@@ -359,6 +359,28 @@ async function main() {
   check("search finds matching notes", searchHit.notes.length > 0);
   check("search excludes non-matching notes", searchMiss.notes.length === 0);
 
+  section("7b2. Shared routines are manageable, not orphaned");
+  // Regression: rows with userId = null were visible to everyone and writable
+  // by no one, so they could never be deleted.
+  const shared = await prisma.promptTemplate.create({
+    data: { name: `Shared routine ${Date.now()}`, instruction: "Keep the plan terse.", userId: null },
+  });
+  const sharedList = (await api("/api/prompts")).body as { templates: { id: string; userId: string | null }[] };
+  check("shared routine is visible", sharedList.templates.some((t) => t.id === shared.id));
+  check("shared routine reports a null owner",
+    sharedList.templates.find((t) => t.id === shared.id)?.userId === null);
+
+  const editShared = await api(`/api/prompts/${shared.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name: shared.name, instruction: "Edited by a signed-in user." }),
+  });
+  check("a signed-in user can edit a shared routine", editShared.status === 200, `got ${editShared.status}`);
+
+  const delShared = await api(`/api/prompts/${shared.id}`, { method: "DELETE" });
+  check("a signed-in user can delete a shared routine", delShared.status === 200, `got ${delShared.status}`);
+  check("it is really gone",
+    (await prisma.promptTemplate.findUnique({ where: { id: shared.id } })) === null);
+
   section("7c. Tenant isolation");
   const bHist = (await api("/api/history", undefined, sessionB)).body as { notes: unknown[] };
   check("clinician B sees none of A's notes", bHist.notes.length === 0, `${bHist.notes.length}`);

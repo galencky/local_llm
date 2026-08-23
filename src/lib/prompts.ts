@@ -105,17 +105,31 @@ export async function createTemplate(userId: string, input: PromptTemplateInput)
   });
 }
 
-/** Scoped by owner: a clinician can only edit their own routines. */
+/**
+ * A routine is manageable by its owner, or by anyone if it is shared.
+ *
+ * Ownerless rows (`userId: null`) are instance-wide shared routines. Scoping
+ * writes to `{ id, userId }` alone made them visible to everyone and editable
+ * by no one — an undeletable dead end. Anyone signed in to this instance may
+ * manage a shared routine; a routine with an owner stays private to them.
+ */
+function writableBy(userId: string, id: string) {
+  return { id, OR: [{ userId }, { userId: null }] };
+}
+
 export async function updateTemplate(userId: string, id: string, input: PromptTemplateInput) {
   const data = normalise(input);
   if (data.isDefault) await clearOtherDefaults(userId, id);
-  const { count } = await prisma.promptTemplate.updateMany({ where: { id, userId }, data });
+  const { count } = await prisma.promptTemplate.updateMany({
+    where: writableBy(userId, id),
+    data,
+  });
   if (count === 0) throw new PromptValidationError("That routine is not yours to edit.");
   return prisma.promptTemplate.findUnique({ where: { id } });
 }
 
 export async function deleteTemplate(userId: string, id: string) {
-  const { count } = await prisma.promptTemplate.deleteMany({ where: { id, userId } });
+  const { count } = await prisma.promptTemplate.deleteMany({ where: writableBy(userId, id) });
   if (count === 0) throw new PromptValidationError("That routine is not yours to delete.");
   return { ok: true };
 }

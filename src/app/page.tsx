@@ -121,6 +121,8 @@ interface PromptTemplate {
   instruction: string;
   format: string | null;
   isDefault: boolean;
+  /** Null owner = a shared routine anyone on this instance can manage. */
+  userId: string | null;
 }
 
 const FORMATS = [
@@ -1471,6 +1473,14 @@ function PromptLibrary({
                     {t.isDefault && (
                       <span className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]">
                         default
+                      </span>
+                    )}
+                    {t.userId === null && (
+                      <span
+                        title="Shared with everyone on this instance"
+                        className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]"
+                      >
+                        shared
                       </span>
                     )}
                   </div>
