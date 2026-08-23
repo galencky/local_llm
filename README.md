@@ -47,7 +47,49 @@ Two other honest caveats: the NER pass is probabilistic, so the inspector drawer
 exists to be read, not skipped; and `[MRN]` matching (`\b\d{7,8}\b`) is
 deliberately over-eager and will sometimes swallow an accession number.
 
-## Setup
+## Running it with Docker (recommended)
+
+```bash
+lms server start --port 1234          # LM Studio stays on the HOST
+lms load google/gemma-4-e4b
+docker compose up -d --build
+```
+
+That brings up the app and Postgres, applies migrations, and serves on
+<http://localhost:3000>.
+
+**LM Studio is deliberately not containerised.** Docker Desktop on macOS runs a
+Linux VM with no GPU passthrough, so a containerised model would lose Metal/MLX
+acceleration entirely. It runs on the host; the container reaches it at
+`host.docker.internal:1234`.
+
+**Set Docker Desktop's VM to 2 GB** (Settings → Resources). Measured on this
+box, with `gemma-4-e4b` loaded:
+
+| Docker VM | Stack usage | Host free |
+| --- | --- | --- |
+| 8 GB (default) | 215 MB | 2.7 GB |
+| 2 GB | 215 MB | **6.2 GB** |
+
+The whole stack peaks around 215 MB, so the default 8 GB is pure waste — and on
+a 16 GB Mac every gigabyte the VM reserves is a gigabyte the model cannot use.
+The full acceptance suite passes 62/62 at 2 GB.
+
+Two things that will bite you:
+
+- **Do not scale the `app` service.** The single-slot compute lock lives in that
+  process's memory; a second replica would silently break it.
+- **`docker compose` auto-loads `.env` for interpolation**, so a host-specific
+  value there can override a compose default. `LMSTUDIO_BASE_URL` is the trap —
+  the host's `127.0.0.1` means "this container" inside the container. That one
+  is pinned to `DOCKER_LMSTUDIO_URL` in the compose file for exactly this
+  reason.
+
+The `airlock-keys` volume holds the RSA identity and **must** persist: a
+regenerated keypair breaks decryption for every browser tab still holding the
+old public key.
+
+## Setup (running directly on the host)
 
 ```bash
 npm install

@@ -1,0 +1,97 @@
+# Project Airlock on the Mac Mini.
+#
+#   docker compose up -d --build
+#
+# LM Studio stays on the HOST (Docker Desktop on macOS has no GPU passthrough).
+# Start it first: `lms server start --port 1234 && lms load google/gemma-4-e4b`
+#
+# Set Docker Desktop's VM to 2 GB (Settings > Resources). The whole stack peaks
+# around 215 MB, and on a 16 GB Mac every gigabyte the VM reserves is a
+# gigabyte the model cannot use. Measured: 2 GB VM leaves 6.2 GB free with
+# gemma-4-e4b loaded; the 8 GB default leaves 2.7 GB.
+
+name: project-airlock
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airlock
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airlock_local}
+      POSTGRES_DB: clinical_notes
+    volumes:
+      - airlock-db:/var/lib/postgresql/data
+    # Bound to loopback only. Published so host tooling — the test suite,
+    # `prisma studio`, psql — works against the same database the app uses.
+    # Never change this to a bare "5432:5432", which would listen on every
+    # interface and put the audit log on your network.
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airlock -d clinical_notes"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  # One-shot: applies migrations, then exits. Uses the builder stage because
+  # the runtime image deliberately has no Prisma CLI.
+  migrate:
+    build:
+      context: .
+      target: builder
+    command: npx prisma migrate deploy
+    environment:
+      DATABASE_URL: postgresql://airlock:${POSTGRES_PASSWORD:-airlock_local}@db:5432/clinical_notes?schema=public
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build:
+      context: .
+      target: runner
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://airlock:${POSTGRES_PASSWORD:-airlock_local}@db:5432/clinical_notes?schema=public
+      # The local NER model runs on the HOST, not in this container.
+      #
+      # Deliberately NOT ${LMSTUDIO_BASE_URL:-...}: compose auto-loads .env for
+      # interpolation, so the host's own value (127.0.0.1) would win and point
+      # the container at itself. Override with DOCKER_LMSTUDIO_URL if needed.
+      LMSTUDIO_BASE_URL: ${DOCKER_LMSTUDIO_URL:-http://host.docker.internal:1234/v1}
+      LMSTUDIO_MODEL: ${LMSTUDIO_MODEL:-google/gemma-4-e4b}
+      LMSTUDIO_TIMEOUT_MS: ${LMSTUDIO_TIMEOUT_MS:-90000}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?set GEMINI_API_KEY in .env}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
+      GEMINI_MODEL_LADDER: ${GEMINI_MODEL_LADDER:-}
+      ALLOW_DEGRADED_SCRUB: ${ALLOW_DEGRADED_SCRUB:-false}
+      KEY_STORE_FILE: ${KEY_STORE_FILE:-server-rsa.json}
+    volumes:
+      # The RSA identity must survive restarts, or every open tab breaks.
+      - airlock-keys:/app/.keys
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # The single-slot compute lock lives in this process's memory. Running more
+    # than one replica would silently break it — do not scale this service.
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 1024M
+
+volumes:
+  airlock-db:
+  airlock-keys:

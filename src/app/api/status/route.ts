@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { currentActivity, isLocked, lockHeldForMs } from "@/lib/concurrency";
-import { checkLmStudioHealth } from "@/lib/scrubber-llm";
+import { checkLmStudioHealth, lastKnownLmStudioHealth } from "@/lib/scrubber-llm";
 import { vaultCount, VAULT_TTL_MS } from "@/lib/memory-cache";
 import { geminiModel } from "@/lib/gemini";
 import { prisma } from "@/lib/db";
@@ -10,8 +10,12 @@ export const dynamic = "force-dynamic";
 
 /** Health probe for the status badge: compute slot, local model, DB, cloud key. */
 export async function GET() {
+  // Do not poke LM Studio while we are the ones keeping it busy: it serialises
+  // requests, so the probe would block and read as "down" during every note.
+  const busyNow = isLocked();
+
   const [lmStudio, database] = await Promise.all([
-    checkLmStudioHealth(),
+    busyNow ? Promise.resolve(lastKnownLmStudioHealth()) : checkLmStudioHealth(),
     prisma
       .$queryRaw`SELECT 1`
       .then(() => ({ online: true as const }))
@@ -21,7 +25,7 @@ export async function GET() {
       })),
   ]);
 
-  const busy = isLocked();
+  const busy = busyNow;
 
   return NextResponse.json(
     {

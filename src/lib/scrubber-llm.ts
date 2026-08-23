@@ -173,15 +173,37 @@ async function callLmStudio(
   });
 }
 
-/** Is the local inference server up and holding a model? */
-export async function checkLmStudioHealth(): Promise<{
+export interface LmStudioHealth {
   online: boolean;
   models: string[];
+  /** True when the answer came from cache because the model was mid-inference. */
+  busy?: boolean;
   error?: string;
-}> {
+}
+
+/**
+ * Last successful probe. LM Studio serialises requests, so `/v1/models` blocks
+ * while the model is generating — without this, the status badge would read
+ * "LM Studio down" for the duration of every note.
+ */
+const globalForHealth = globalThis as unknown as {
+  __lmStudioLastHealthy: { models: string[]; at: number } | undefined;
+};
+
+/** What we last knew, for callers that must not probe a busy server. */
+export function lastKnownLmStudioHealth(): LmStudioHealth {
+  const cached = globalForHealth.__lmStudioLastHealthy;
+  if (!cached) return { online: false, models: [], error: "not probed yet" };
+  return { online: true, models: cached.models, busy: true };
+}
+
+/** Is the local inference server up and holding a model? */
+export async function checkLmStudioHealth(): Promise<LmStudioHealth> {
   try {
     const res = await fetch(`${baseUrl()}/models`, {
-      signal: AbortSignal.timeout(3000),
+      // Generous: the probe crosses Docker Desktop's network proxy when the app
+      // is containerised, and may queue behind a warm-up.
+      signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) {
       return { online: false, models: [], error: `HTTP ${res.status}` };
@@ -190,8 +212,16 @@ export async function checkLmStudioHealth(): Promise<{
     const models = (body.data ?? [])
       .map((m) => m.id)
       .filter((id): id is string => Boolean(id));
+    if (models.length > 0) {
+      globalForHealth.__lmStudioLastHealthy = { models, at: Date.now() };
+    }
     return { online: models.length > 0, models };
   } catch (err) {
+    // A probe that fails while we are mid-inference means "busy", not "down".
+    const cached = globalForHealth.__lmStudioLastHealthy;
+    if (cached && Date.now() - cached.at < 10 * 60 * 1000) {
+      return { online: true, models: cached.models, busy: true };
+    }
     return {
       online: false,
       models: [],

@@ -75,7 +75,7 @@ interface StatusPayload {
   state: "online" | "busy";
   busy: boolean;
   activity: BusyInfo | null;
-  lmStudio: { online: boolean; models: string[]; error?: string };
+  lmStudio: { online: boolean; models: string[]; busy?: boolean; error?: string };
   database: { online: boolean; error?: string };
   gemini: { configured: boolean; model: string };
   vaults: { active: number; ttlMs: number };
@@ -394,7 +394,7 @@ export default function AirlockPage() {
               icon={Sparkles}
               label={
                 status?.lmStudio.online
-                  ? `LM Studio · ${status.lmStudio.models[0]?.slice(0, 20) ?? "loaded"}`
+                  ? `LM Studio${status.lmStudio.busy ? " (working)" : ""} · ${status.lmStudio.models[0]?.slice(0, 20) ?? "loaded"}`
                   : "LM Studio down"
               }
               tone={status?.lmStudio.online ? "ok" : "bad"}

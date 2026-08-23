@@ -7,6 +7,9 @@ const nextConfig: NextConfig = {
   turbopack: { root: path.join(__dirname) },
   // The pipeline holds PHI in memory; never expose a source map of it publicly.
   productionBrowserSourceMaps: false,
+  // Emit a self-contained server bundle so the container stays small and does
+  // not need node_modules at runtime.
+  output: "standalone",
 };
 
 export default nextConfig;
