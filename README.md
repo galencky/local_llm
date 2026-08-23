@@ -117,7 +117,9 @@ Studio on port 11234.
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Local Postgres for the audit log |
-| `GEMINI_API_KEY` / `GEMINI_MODEL` | Cloud formatting layer. Free-tier keys are capped per model per day (20/day on `gemini-3.6-flash` at time of writing) — the UI reports quota exhaustion in plain language, and de-identification has already completed by then, so nothing identifying was sent. |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | Cloud formatting layer. Free-tier keys are capped per model per day (20/day on `gemini-3.6-flash` at time of writing). |
+| `GEMINI_MODEL` | Default starting rung of the ladder. |
+| `GEMINI_MODEL_LADDER` | Optional override of the whole ladder, best first, comma separated. |
 | `LMSTUDIO_BASE_URL` / `LMSTUDIO_MODEL` / `LMSTUDIO_TIMEOUT_MS` | Local NER pass |
 | `ALLOW_DEGRADED_SCRUB` | `false` (default) aborts the request when the local NER pass is unavailable. Setting `true` permits regex-only scrubbing — it weakens de-identification and the UI shows a standing warning. |
 | `KEY_STORE_FILE` | Filename inside `./.keys/` for the RSA keypair |
@@ -165,6 +167,44 @@ compute slot. The queue is client-side: on a 429 the browser retries every two
 seconds while displaying what the Mac Mini is actually busy with, read live from
 `/api/status`. `src/lib/concurrency.ts` publishes the held slot's current stage
 for exactly this.
+
+## The model ladder
+
+The cloud model is a ladder, best first, ending on the lite models — on the
+free tier those carry **500 requests/day** against the flagships' 20, which is
+the difference between "the tool died at lunchtime" and "the tool kept working,
+in a lighter voice". Pro models are deliberately absent: the free tier grants
+them zero quota, so they would only ever be a button that fails.
+
+| Rung | Free-tier RPD |
+| --- | --- |
+| 3.7 / 3.6 / 3.5 / 3 / 2.5 Flash | 20 each |
+| 3.5 Flash Lite, 3.1 Flash Lite | 500 each |
+| 2.5 Flash Lite | 20 |
+
+The selector bar on the page picks where a run **starts**. A rung greys out
+only once Google has actually refused it — availability is observed, never
+predicted — and the cooldown is honest about which kind of refusal it was: a
+per-day exhaustion is held until midnight US Pacific, not retried in 25 seconds
+because a `retryDelay` hint said so.
+
+When a rung is spent the request walks down from there rather than failing:
+
+```
+cloud   running
+cloud   running   gemini-3.6-flash quota → gemini-3.5-flash
+cloud   done      gemini-3.5-flash
+```
+
+The downgrade is **never silent**. It streams as a progress event while it
+happens, the button greys out live, the footer shows the downgrade in amber,
+and `AuditLog.modelUsed` records the model
+that actually wrote the note. A lighter model is a different clinical draft, so
+the clinician is told which one they are reading.
+
+Auth failures and safety-filter blocks do **not** trigger fallback — only
+quota, overload, and retired-model errors, which are the ones another model can
+actually solve.
 
 ## Specialty routines
 

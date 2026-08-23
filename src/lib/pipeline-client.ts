@@ -80,6 +80,8 @@ export interface RunOptions {
   format: string;
   instruction?: string;
   promptId?: string;
+  /** Starting rung of the model ladder; the server falls back downward. */
+  model?: string;
   onProgress?: (event: ProgressEvent) => void;
   onSealed?: () => void;
   signal?: AbortSignal;
@@ -106,6 +108,7 @@ export async function runPipeline<T>(opts: RunOptions): Promise<T> {
       format: opts.format,
       instruction: opts.instruction || undefined,
       promptId: opts.promptId || undefined,
+      model: opts.model || undefined,
     }),
   );
   opts.onSealed?.();

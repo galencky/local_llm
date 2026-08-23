@@ -1,5 +1,13 @@
 import "server-only";
 import { GoogleGenAI } from "@google/genai";
+import {
+  chainFrom,
+  defaultModel,
+  isAvailable,
+  markAvailable,
+  markUnavailable,
+  type UnavailableReason,
+} from "./model-registry";
 
 /**
  * Cloud formatting layer.
@@ -69,48 +77,58 @@ function getClient(): GoogleGenAI {
 }
 
 export function geminiModel(): string {
-  return process.env.GEMINI_MODEL || "gemini-3.6-flash";
+  return defaultModel();
 }
 
-export interface NoteInstructions {
-  /** Saved specialty routine, applied before any ad-hoc steer. */
-  template?: { name: string; instruction: string } | null;
-  /** One-off steer typed by the clinician for this note only. */
-  adHoc?: string | null;
+export function geminiModelChain(start?: string): string[] {
+  return chainFrom(start);
 }
 
 /** Google returns operational failures as a JSON blob; make them readable. */
 export class GeminiUnavailableError extends Error {
-  constructor(message: string, readonly kind: "quota" | "overloaded" | "model" | "auth") {
+  constructor(
+    message: string,
+    readonly kind: UnavailableReason | "auth",
+    /** Daily allowance gone, as opposed to a per-minute burst limit. */
+    readonly daily = false,
+    readonly retryAfterMs?: number,
+  ) {
     super(message);
     this.name = "GeminiUnavailableError";
   }
 }
 
-function translateGeminiError(err: unknown): never {
+function translateGeminiError(err: unknown, model: string): never {
   const raw = err instanceof Error ? err.message : String(err);
 
   if (/RESOURCE_EXHAUSTED|exceeded your current quota|quotaValue/i.test(raw)) {
     const retry = raw.match(/Please retry in ([\d.]+)s/)?.[1];
     const perDay = raw.match(/"quotaValue":\s*"(\d+)"/)?.[1];
+    // A per-day quota is not solved by waiting 25 seconds, whatever the
+    // retryDelay hint says — distinguish it so the cooldown is honest.
+    const daily = /PerDay/i.test(raw);
     throw new GeminiUnavailableError(
-      `Gemini quota exhausted${perDay ? ` (${perDay} requests/day on this tier for ${geminiModel()})` : ""}.` +
-        (retry ? ` Retry in about ${Math.ceil(Number(retry))}s.` : "") +
-        " Your note was de-identified successfully — nothing was lost, and nothing identifying was sent. Switch GEMINI_MODEL or enable billing to raise the limit.",
+      `${model} is out of quota${perDay && daily ? ` (${perDay} requests/day on the free tier)` : ""}.` +
+        (daily ? " It resets at midnight US Pacific." : retry ? ` Retry in about ${Math.ceil(Number(retry))}s.` : ""),
       "quota",
+      daily,
+      retry ? Math.ceil(Number(retry) * 1000) : undefined,
     );
   }
   if (/UNAVAILABLE|high demand|overloaded/i.test(raw)) {
     throw new GeminiUnavailableError(
-      `${geminiModel()} is busy right now. Try again in a moment, or set GEMINI_MODEL to another flash model.`,
+      `${model} is busy right now.`,
       "overloaded",
+      false,
+      30_000,
     );
   }
   if (/NOT_FOUND|no longer available|is not found/i.test(raw)) {
     const suggested = raw.match(/use models\/([\w.-]+)/)?.[1];
     throw new GeminiUnavailableError(
-      `The model "${geminiModel()}" is not available on this key${suggested ? ` — Google suggests "${suggested}"` : ""}. Update GEMINI_MODEL in .env.`,
+      `The model "${model}" is not available on this key${suggested ? ` — Google suggests "${suggested}"` : ""}.`,
       "model",
+      true,
     );
   }
   if (/API key not valid|PERMISSION_DENIED|UNAUTHENTICATED/i.test(raw)) {
@@ -122,9 +140,24 @@ function translateGeminiError(err: unknown): never {
   throw err instanceof Error ? err : new Error(raw);
 }
 
+export interface NoteInstructions {
+  /** Saved specialty routine, applied before any ad-hoc steer. */
+  template?: { name: string; instruction: string } | null;
+  /** One-off steer typed by the clinician for this note only. */
+  adHoc?: string | null;
+}
+
+export interface FallbackStep {
+  model: string;
+  reason: "quota" | "overloaded" | "model";
+}
+
 export interface FormatNoteResult {
   text: string;
+  /** The model that actually produced the note. */
   model: string;
+  /** Models tried and rejected before this one, in order. Empty on first try. */
+  fallbacks: FallbackStep[];
   latencyMs: number;
 }
 
@@ -144,9 +177,10 @@ export async function formatClinicalNote(
   deidentifiedText: string,
   format: NoteFormat,
   instructions: NoteInstructions = {},
+  onFallback?: (step: FallbackStep, next: string) => void,
+  startModel?: string,
 ): Promise<FormatNoteResult> {
   const started = Date.now();
-  const model = geminiModel();
 
   const template = instructions.template;
   const adHoc = instructions.adHoc?.trim();
@@ -162,26 +196,75 @@ export async function formatClinicalNote(
     "\n--- END NARRATIVE ---",
   ].join("");
 
-  let response;
-  try {
-    response = await getClient().models.generateContent({
-      model,
-      contents: prompt,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        temperature: 0.2,
-      },
-    });
-  } catch (err) {
-    translateGeminiError(err);
+  const chain = geminiModelChain(startModel);
+  const fallbacks: FallbackStep[] = [];
+  let lastError: unknown = null;
+
+  for (let i = 0; i < chain.length; i++) {
+    const model = chain[i];
+    const remaining = chain.slice(i + 1);
+
+    // Skip a rung already known to be spent, unless it is the last hope.
+    if (!isAvailable(model) && remaining.length > 0) {
+      fallbacks.push({ model, reason: "quota" });
+      onFallback?.({ model, reason: "quota" }, remaining[0]);
+      continue;
+    }
+
+    try {
+      const response = await getClient().models.generateContent({
+        model,
+        contents: prompt,
+        config: { systemInstruction: SYSTEM_INSTRUCTION, temperature: 0.2 },
+      });
+
+      const text = response.text?.trim();
+      if (!text) {
+        throw new Error(
+          "Gemini returned an empty response (the request may have been blocked by a safety filter).",
+        );
+      }
+      markAvailable(model);
+      return { text, model, fallbacks, latencyMs: Date.now() - started };
+    } catch (err) {
+      let translated: unknown = err;
+      try {
+        translateGeminiError(err, model);
+      } catch (e) {
+        translated = e;
+      }
+      lastError = translated;
+
+      const unavailable =
+        translated instanceof GeminiUnavailableError && translated.kind !== "auth"
+          ? translated
+          : null;
+
+      if (unavailable) {
+        markUnavailable(model, unavailable.kind as UnavailableReason, {
+          daily: unavailable.daily,
+          retryAfterMs: unavailable.retryAfterMs,
+        });
+      }
+
+      // Quota, overload and retirement are solved by another model. An auth
+      // failure or a safety block is not — fail immediately on those.
+      if (unavailable && remaining.length > 0) {
+        const step: FallbackStep = { model, reason: unavailable.kind as FallbackStep["reason"] };
+        fallbacks.push(step);
+        onFallback?.(step, remaining[0]);
+        continue;
+      }
+      throw translated;
+    }
   }
 
-  const text = response.text?.trim();
-  if (!text) {
-    throw new Error(
-      "Gemini returned an empty response (the request may have been blocked by a safety filter).",
-    );
-  }
+  if (lastError) throw lastError;
 
-  return { text, model, latencyMs: Date.now() - started };
+  // Unreachable while the chain is non-empty, but keeps the contract honest.
+  throw new GeminiUnavailableError(
+    "Every model in the ladder is out of quota. They reset at midnight US Pacific.",
+    "quota",
+    true,
+  );
 }

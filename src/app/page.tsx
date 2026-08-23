@@ -58,6 +58,7 @@ interface ProcessNoteResult {
     model: string;
     format: string;
     promptTemplateName: string | null;
+    modelFallbacks: { model: string; reason: string }[];
     processingTimeMs: number;
     scrubMs: number;
     geminiMs: number;
@@ -79,6 +80,17 @@ interface StatusPayload {
   gemini: { configured: boolean; model: string };
   vaults: { active: number; ttlMs: number };
   degradedScrubAllowed: boolean;
+}
+
+interface ModelAvailability {
+  id: string;
+  label: string;
+  tier: "flagship" | "lite";
+  dailyLimit: number;
+  available: boolean;
+  reason: "quota" | "overloaded" | "model" | null;
+  retryInMs: number | null;
+  daily: boolean;
 }
 
 interface PromptTemplate {
@@ -141,6 +153,8 @@ export default function AirlockPage() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [queued, setQueued] = useState<BusyInfo | null>(null);
+  const [models, setModels] = useState<ModelAvailability[]>([]);
+  const [chosenModel, setChosenModel] = useState<string>("");
   const [templates, setTemplates] = useState<PromptTemplate[]>([]);
   const [activeTemplateId, setActiveTemplateId] = useState<string>("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -188,6 +202,37 @@ export default function AirlockPage() {
       cancelled = true;
     };
   }, [applyTemplates]);
+
+  /* --- model ladder ---------------------------------------------------- */
+  const loadModels = useCallback(async () => {
+    try {
+      const r = await fetch("/api/models", { cache: "no-store" });
+      if (!r.ok) return;
+      const d = (await r.json()) as { models: ModelAvailability[]; default: string };
+      setModels(d.models);
+      setChosenModel((current) => current || d.default);
+    } catch {
+      /* selector is optional; the server picks a model regardless */
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await fetch("/api/models", { cache: "no-store" });
+        if (!r.ok || cancelled) return;
+        const d = (await r.json()) as { models: ModelAvailability[]; default: string };
+        setModels(d.models);
+        setChosenModel((c) => c || d.default);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /* --- health polling -------------------------------------------------- */
   const pollMs = queued ? 1000 : 5000;
@@ -238,15 +283,21 @@ export default function AirlockPage() {
           format,
           instruction: instruction.trim() || undefined,
           promptId: activeTemplateId || undefined,
+          model: chosenModel || undefined,
           onSealed: () => setStage("Sealed in the browser — sending"),
-          onProgress: (ev) =>
+          onProgress: (ev) => {
             setProgress((prev) => {
               const next = new Map(prev);
               next.set(ev.stage, ev);
               return next;
-            }),
+            });
+            // "modelA quota → modelB" means modelA just died; grey it now
+            // rather than waiting for the run to finish.
+            if (ev.stage === "cloud" && ev.detail?.includes("→")) void loadModels();
+          },
         });
         setResult(out);
+        void loadModels();
         return "done";
       } catch (e: unknown) {
         if (e instanceof ComputeBusyError) {
@@ -256,7 +307,7 @@ export default function AirlockPage() {
         throw e;
       }
     },
-    [format, instruction, activeTemplateId],
+    [format, instruction, activeTemplateId, chosenModel, loadModels],
   );
 
   const submit = useCallback(async () => {
@@ -287,13 +338,14 @@ export default function AirlockPage() {
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unexpected failure.");
+      void loadModels();
     } finally {
       queuedRef.current = false;
       setSubmitting(false);
       setQueued(null);
       setStage("");
     }
-  }, [publicKey, input, submitting, runOnce]);
+  }, [publicKey, input, submitting, runOnce, loadModels]);
 
   const cancelQueue = useCallback(() => {
     queuedRef.current = false;
@@ -450,6 +502,13 @@ export default function AirlockPage() {
             </button>
           </div>
 
+          <ModelBar
+            models={models}
+            chosen={chosenModel}
+            onChoose={setChosenModel}
+            disabled={submitting}
+          />
+
           <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] px-4 py-3">
             <div className="flex flex-wrap gap-1">
               {FORMATS.map((f) => (
@@ -551,7 +610,18 @@ export default function AirlockPage() {
 
           {result && (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-[var(--border)] px-4 py-2 font-mono text-[11px] text-[var(--muted)]">
-              <span>{result.meta.model}</span>
+              <span
+                className={cn(result.meta.modelFallbacks.length > 0 && "text-amber-500")}
+                title={
+                  result.meta.modelFallbacks.length > 0
+                    ? `Fell back from ${result.meta.modelFallbacks.map((f) => `${f.model} (${f.reason})`).join(", ")}`
+                    : undefined
+                }
+              >
+                {result.meta.model}
+                {result.meta.modelFallbacks.length > 0 &&
+                  ` — downgraded from ${result.meta.modelFallbacks[0].model} (${result.meta.modelFallbacks[0].reason})`}
+              </span>
               {result.meta.promptTemplateName && <span>routine {result.meta.promptTemplateName}</span>}
               <span>scrub {result.meta.scrubMs} ms</span>
               <span>cloud {result.meta.geminiMs} ms</span>
@@ -593,6 +663,98 @@ export default function AirlockPage() {
   );
 }
 
+
+
+/**
+ * The model ladder, best on the left.
+ *
+ * A rung greys out only once Google has actually refused it — availability is
+ * observed, never predicted. Picking a rung sets where the run *starts*; if it
+ * is spent by the time the note is sent, the server walks down from there and
+ * says so in the progress list.
+ */
+function ModelBar({
+  models,
+  chosen,
+  onChoose,
+  disabled,
+}: {
+  models: ModelAvailability[];
+  chosen: string;
+  onChoose: (id: string) => void;
+  disabled: boolean;
+}) {
+  if (models.length === 0) return null;
+
+  const chosenIndex = models.findIndex((m) => m.id === chosen);
+  const nextUp = models.find((m, i) => i >= chosenIndex && m.available);
+
+  const resetHint = (m: ModelAvailability) => {
+    if (m.available || m.retryInMs === null) return "";
+    if (m.daily) {
+      const hours = Math.round(m.retryInMs / 3_600_000);
+      return hours >= 1 ? `resets in ~${hours}h` : "resets shortly";
+    }
+    return `retry in ${Math.ceil(m.retryInMs / 1000)}s`;
+  };
+
+  return (
+    <div className="border-t border-[var(--border)] px-4 py-2.5">
+      <div className="mb-1.5 flex items-center gap-2">
+        <Cloud className="size-3.5 text-[var(--muted)]" />
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+          Cloud model — best first, falls back rightward
+        </span>
+        {nextUp && nextUp.id !== chosen && (
+          <span className="text-[10px] text-amber-600 dark:text-amber-400">
+            starts on {nextUp.label}
+          </span>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-1">
+        {models.map((m) => {
+          const isChosen = m.id === chosen;
+          const spent = !m.available;
+          return (
+            <button
+              key={m.id}
+              onClick={() => onChoose(m.id)}
+              disabled={disabled}
+              title={
+                spent
+                  ? `${m.id} — ${m.reason === "quota" ? "out of quota" : m.reason} ${resetHint(m)}`
+                  : `${m.id} · ${m.dailyLimit || "?"}/day on the free tier`
+              }
+              className={cn(
+                "flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed",
+                spent
+                  ? "border-[var(--border)] bg-[var(--border)]/40 text-[var(--muted)]/60 line-through"
+                  : isChosen
+                    ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]"
+                    : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
+                disabled && "opacity-50",
+              )}
+            >
+              {m.tier === "lite" && !spent && (
+                <span className="text-[9px] uppercase opacity-60">lite</span>
+              )}
+              {m.label}
+              {spent && <span className="no-underline opacity-80">· {resetHint(m)}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {!nextUp && (
+        <p className="mt-1.5 text-[10px] text-rose-600 dark:text-rose-400">
+          Every model is spent. De-identification still runs locally, but there is nothing left to
+          format with until quota resets.
+        </p>
+      )}
+    </div>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* Live feedback                                                       */

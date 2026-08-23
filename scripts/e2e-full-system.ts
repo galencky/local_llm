@@ -215,7 +215,16 @@ async function main() {
     styled.note.slice(0, 120));
   check("routine shaped the output (Braden / pressure injury)",
     /braden|pressure injury/i.test(styled.note));
-  check("identifiers still restored under a routine", styled.note.includes("林淑惠"));
+  // Same contract as section 5: whether the model echoes any given identifier
+  // is its editorial choice — that every token it DID emit comes back is not.
+  const styledEmitted = styled.redactions.filter((r) => styled.deidentifiedOutput.includes(r.token));
+  check("routine run emitted placeholders", styledEmitted.length > 0, `${styledEmitted.length}`);
+  check(
+    "every emitted token restored under a routine",
+    styledEmitted.every((r) => !styled.note.includes(r.token)),
+    styledEmitted.filter((r) => styled.note.includes(r.token)).map((r) => r.token).join(","),
+  );
+  check("real identifiers back in the routine note", PII.some((p) => styled.note.includes(p)));
   check("cloud still saw no PII under a routine",
     PII.every((p) => !styled.deidentifiedInput.includes(p)));
 

@@ -54,6 +54,8 @@ interface DecryptedPayload {
   format?: string;
   instruction?: string;
   promptId?: string;
+  /** Rung of the model ladder to start from. Falls back downward from here. */
+  model?: string;
 }
 
 export interface ProcessNoteResult {
@@ -66,6 +68,8 @@ export interface ProcessNoteResult {
     model: string;
     format: NoteFormat;
     promptTemplateName: string | null;
+    /** Models exhausted or unavailable before the one that served this note. */
+    modelFallbacks: { model: string; reason: string }[];
     processingTimeMs: number;
     scrubMs: number;
     geminiMs: number;
@@ -157,6 +161,7 @@ export async function POST(req: NextRequest) {
         let format: string | undefined = body.format;
         let instruction: string | undefined = body.instruction;
         let promptId: string | undefined;
+        let startModel: string | undefined;
         if (plaintext.trimStart().startsWith("{")) {
           try {
             const payload = JSON.parse(plaintext) as DecryptedPayload;
@@ -165,6 +170,7 @@ export async function POST(req: NextRequest) {
               format = payload.format ?? format;
               instruction = payload.instruction ?? instruction;
               promptId = payload.promptId ?? undefined;
+              startModel = payload.model ?? undefined;
             }
           } catch {
             /* not a payload object; treat the whole thing as the narrative */
@@ -249,10 +255,20 @@ export async function POST(req: NextRequest) {
           status: "running",
           detail: template ? `routine: ${template.name}` : undefined,
         });
-        const gemini = await formatClinicalNote(deidentifiedInput, resolvedFormat, {
-          template,
-          adHoc: instruction,
-        });
+        const gemini = await formatClinicalNote(
+          deidentifiedInput,
+          resolvedFormat,
+          { template, adHoc: instruction },
+          // Surface the downgrade live rather than letting the note quietly
+          // arrive from a lighter model than the clinician expects.
+          (step, next) =>
+            emit("progress", {
+              stage: "cloud",
+              status: "running",
+              detail: `${step.model} ${step.reason} → ${next}`,
+            }),
+          startModel,
+        );
         emit("progress", {
           stage: "cloud",
           status: "done",
@@ -308,6 +324,7 @@ export async function POST(req: NextRequest) {
             model: gemini.model,
             format: resolvedFormat,
             promptTemplateName: template?.name ?? null,
+            modelFallbacks: gemini.fallbacks,
             processingTimeMs,
             scrubMs,
             geminiMs: gemini.latencyMs,
