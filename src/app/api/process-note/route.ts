@@ -12,6 +12,7 @@ import {
   type RedactionSummaryEntry,
 } from "@/lib/memory-cache";
 import { formatClinicalNote, isNoteFormat, type NoteFormat } from "@/lib/gemini";
+import { getTemplate } from "@/lib/prompts";
 import { prisma } from "@/lib/db";
 
 export const runtime = "nodejs";
@@ -36,6 +37,8 @@ interface DecryptedPayload {
   text: string;
   format?: string;
   instruction?: string;
+  /** Saved specialty template to apply, if any. */
+  promptId?: string;
 }
 
 export interface ProcessNoteResult {
@@ -47,6 +50,7 @@ export interface ProcessNoteResult {
     auditLogId: string | null;
     model: string;
     format: NoteFormat;
+    promptTemplateName: string | null;
     processingTimeMs: number;
     scrubMs: number;
     geminiMs: number;
@@ -113,6 +117,7 @@ export async function POST(req: NextRequest) {
     let noteText = plaintext;
     let format: string | undefined = body.format;
     let instruction: string | undefined = body.instruction;
+    let promptId: string | undefined;
     if (plaintext.trimStart().startsWith("{")) {
       try {
         const payload = JSON.parse(plaintext) as DecryptedPayload;
@@ -120,6 +125,7 @@ export async function POST(req: NextRequest) {
           noteText = payload.text;
           format = payload.format ?? format;
           instruction = payload.instruction ?? instruction;
+          promptId = payload.promptId ?? undefined;
         }
       } catch {
         // Not a payload object; treat the whole thing as the narrative.
@@ -129,7 +135,27 @@ export async function POST(req: NextRequest) {
     if (!noteText.trim()) {
       return badRequest("The clinical narrative is empty.");
     }
-    const resolvedFormat: NoteFormat = isNoteFormat(format) ? format : "SOAP";
+    let resolvedFormat: NoteFormat = isNoteFormat(format) ? format : "SOAP";
+
+    // Resolve the saved specialty routine, if one was selected. A missing or
+    // deleted template is not fatal — the note still formats without it.
+    let template: { name: string; instruction: string } | null = null;
+    if (promptId) {
+      try {
+        const found = await getTemplate(promptId);
+        if (found) {
+          template = { name: found.name, instruction: found.instruction };
+          if (!isNoteFormat(format) && isNoteFormat(found.format)) {
+            resolvedFormat = found.format;
+          }
+        }
+      } catch (err) {
+        console.error(
+          "[process-note] prompt template lookup failed:",
+          err instanceof Error ? err.message.split("\n")[0] : "unknown error",
+        );
+      }
+    }
 
     // 3. Deterministic Taiwan PII scrub.
     const scrubStarted = Date.now();
@@ -144,11 +170,10 @@ export async function POST(req: NextRequest) {
     storeVault(sessionId, vault);
 
     // 6. Cloud formatting — placeholders only cross the wire.
-    const gemini = await formatClinicalNote(
-      deidentifiedInput,
-      resolvedFormat,
-      instruction,
-    );
+    const gemini = await formatClinicalNote(deidentifiedInput, resolvedFormat, {
+      template,
+      adHoc: instruction,
+    });
 
     // 7/8. Re-hydrate the structured note back into a usable chart entry.
     const rehydrated = vault.rehydrate(gemini.text);
@@ -164,6 +189,7 @@ export async function POST(req: NextRequest) {
           deidentifiedOutput: gemini.text,
           modelUsed: gemini.model,
           processingTimeMs,
+          promptTemplateName: template?.name ?? null,
         },
         select: { id: true },
       });
@@ -186,6 +212,7 @@ export async function POST(req: NextRequest) {
         auditLogId,
         model: gemini.model,
         format: resolvedFormat,
+        promptTemplateName: template?.name ?? null,
         processingTimeMs,
         scrubMs,
         geminiMs: gemini.latencyMs,

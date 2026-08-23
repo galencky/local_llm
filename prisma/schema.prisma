@@ -1,4 +1,4 @@
-// Zero-Knowledge PHI Clinical Note Assistant — audit schema.
+// LIMEN — audit and configuration schema.
 //
 // HARD CONSTRAINT: this database stores DE-IDENTIFIED text only.
 // Raw PHI and the token->PII mapping never reach Postgres, disk, or logs.
@@ -19,6 +19,29 @@ model AuditLog {
   deidentifiedOutput String   @db.Text
   modelUsed          String
   processingTimeMs   Int
+  /// Name of the prompt template in effect, kept as plain text so the audit
+  /// row survives the template being renamed or deleted.
+  promptTemplateName String?
 
   @@index([createdAt])
+}
+
+/// A reusable instruction block appended to the Gemini system prompt, so each
+/// specialty can encode its own charting routine once.
+///
+/// CONSTRAINT: templates are configuration, not clinical data. The API rejects
+/// any template whose text trips the PII scrubber — nothing patient-specific
+/// belongs in a saved prompt.
+model PromptTemplate {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  specialty   String?
+  instruction String   @db.Text
+  /// Optional note format this template defaults to (SOAP, DISCHARGE_SUMMARY…).
+  format      String?
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([specialty])
 }

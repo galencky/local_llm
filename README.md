@@ -1,7 +1,15 @@
-# Zero-Knowledge PHI Clinical Note Assistant
+# LIMEN
+
+> *Nothing identifying crosses the threshold.*
 
 Structures Taiwanese hospital narratives into formal notes (SOAP, discharge
 summary, hospital course, …) without any identifier leaving the Mac Mini.
+
+A *limen* is a threshold — and in psychophysics, the boundary below which a
+stimulus cannot be perceived. Every identifier is pushed below that line before
+anything crosses into the cloud.
+
+Created by **Kuan-Yuan Chen**. Built with **Claude Code**.
 
 ```
 browser ──AES-GCM sealed──▶ Cloudflare ──ciphertext──▶ Mac Mini (M4/16GB)
@@ -90,6 +98,7 @@ authenticates the caller — the single-slot lock is a compute guard, not a door
 npm run verify           # offline: crypto, scrubbers, re-hydration, lock
 npm run e2e              # against a running server: sealed round-trip
 npm run e2e:concurrency  # proves the 429 single-slot limit
+npm run e2e:routine      # same note with and without a specialty routine
 npm run db:smoke         # audit database round-trip
 
 # whole pipeline with both externals stubbed (no Gemini key, no model needed):
@@ -123,6 +132,32 @@ Studio on port 11234.
 | `src/lib/memory-cache.ts` | `TokenVault` + 10-minute TTL store. **The only place raw PHI lives on the server.** |
 | `src/lib/gemini.ts` | Note formats and the placeholder-preserving system prompt |
 | `src/lib/db.ts` | Prisma singleton (`@prisma/adapter-pg`) |
+| `src/lib/prompts.ts` | Specialty routine CRUD + the guard that keeps PHI out of saved prompts |
+
+## Specialty routines
+
+A *routine* is a saved instruction block appended to the Gemini prompt, so each
+department encodes its charting habits once — "always call out dialysis access
+and dry weight under Objective", "number the Plan, one line per problem". Manage
+them from **Manage** next to the routine selector, or over the API:
+
+```
+GET    /api/prompts        list
+POST   /api/prompts        create   { name, specialty?, instruction, format?, isDefault? }
+PATCH  /api/prompts/:id    update
+DELETE /api/prompts/:id    delete
+```
+
+Instruction precedence, weakest to strongest: the built-in format skeleton, then
+the saved routine, then the one-off steer typed under the input box. All three
+sit *below* the placeholder rules in the system instruction — a routine cannot
+talk the model into inventing a name.
+
+Routines are configuration, not clinical data, and they live in Postgres
+forever. The API therefore runs every saved routine through the deterministic
+scrubber and **rejects it with HTTP 422 if any identifier matches** — a patient
+name pasted into a template would quietly defeat the whole pipeline. The audit
+row records which routine was in effect by name.
 
 ## The rule that matters
 

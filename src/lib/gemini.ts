@@ -72,6 +72,13 @@ export function geminiModel(): string {
   return process.env.GEMINI_MODEL || "gemini-3.6-flash";
 }
 
+export interface NoteInstructions {
+  /** Saved specialty routine, applied before any ad-hoc steer. */
+  template?: { name: string; instruction: string } | null;
+  /** One-off steer typed by the clinician for this note only. */
+  adHoc?: string | null;
+}
+
 export interface FormatNoteResult {
   text: string;
   model: string;
@@ -81,24 +88,33 @@ export interface FormatNoteResult {
 /**
  * Format a fully de-identified narrative into a structured note.
  *
+ * Instruction precedence, weakest to strongest: the built-in format skeleton,
+ * then the saved specialty template, then the clinician's ad-hoc steer. The
+ * placeholder rules in the system instruction outrank all three — a template
+ * cannot talk the model into inventing a name.
+ *
  * @param deidentifiedText text containing placeholders only — never raw PHI
  * @param format target note structure
- * @param extraInstruction optional free-text steer from the clinician
+ * @param instructions saved template and/or one-off steer
  */
 export async function formatClinicalNote(
   deidentifiedText: string,
   format: NoteFormat,
-  extraInstruction?: string,
+  instructions: NoteInstructions = {},
 ): Promise<FormatNoteResult> {
   const started = Date.now();
   const model = geminiModel();
 
+  const template = instructions.template;
+  const adHoc = instructions.adHoc?.trim();
+
   const prompt = [
     FORMAT_INSTRUCTIONS[format],
-    extraInstruction?.trim()
-      ? `\nAdditional instruction from the clinician: ${extraInstruction.trim()}`
+    template?.instruction?.trim()
+      ? `\n\nDepartmental charting routine ("${template.name}") — follow this unless it conflicts with the placeholder rules:\n${template.instruction.trim()}`
       : "",
-    "\n--- DE-IDENTIFIED CLINICAL NARRATIVE ---\n",
+    adHoc ? `\n\nAdditional instruction for this note only: ${adHoc}` : "",
+    "\n\n--- DE-IDENTIFIED CLINICAL NARRATIVE ---\n",
     deidentifiedText,
     "\n--- END NARRATIVE ---",
   ].join("");

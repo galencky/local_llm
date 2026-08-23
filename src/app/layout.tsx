@@ -6,9 +6,12 @@ const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Clinical Note Assistant — Zero-Knowledge",
+  title: "LIMEN",
   description:
-    "PDPA-compliant clinical note structuring. Local de-identification, end-to-end encrypted transport.",
+    "Nothing identifying crosses the threshold. PDPA-compliant clinical note structuring with local de-identification and end-to-end encrypted transport.",
+  applicationName: "LIMEN",
+  authors: [{ name: "Kuan-Yuan Chen" }, { name: "Claude Code" }],
+  creator: "Kuan-Yuan Chen",
   robots: { index: false, follow: false },
 };
 

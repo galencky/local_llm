@@ -1,5 +1,5 @@
 {
-  "name": "local_llm",
+  "name": "limen",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -15,7 +15,8 @@
     "db:studio": "prisma studio",
     "postinstall": "prisma generate",
     "db:smoke": "tsx scripts/db-smoke.ts",
-    "e2e:full": "tsx scripts/e2e-full-stubbed.ts"
+    "e2e:full": "tsx scripts/e2e-full-stubbed.ts",
+    "e2e:routine": "tsx scripts/e2e-routine.ts"
   },
   "dependencies": {
     "@google/genai": "^2.18.0",
@@ -43,5 +44,11 @@
     "tailwindcss": "^4",
     "tsx": "^4.23.12",
     "typescript": "^5"
-  }
+  },
+  "description": "LIMEN \u2014 zero-knowledge, PDPA-compliant clinical note assistant. Local de-identification, end-to-end encrypted transport.",
+  "author": "Kuan-Yuan Chen",
+  "contributors": [
+    "Claude Code (Anthropic)"
+  ],
+  "license": "UNLICENSED"
 }
