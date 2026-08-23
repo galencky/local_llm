@@ -84,6 +84,15 @@ async function main() {
   sessionA = await createTestSession("clinician-a");
   sessionB = await createTestSession("clinician-b");
 
+  // The box runs one note at a time. If something else is mid-run — a browser
+  // tab, a screenshot script — wait rather than reporting a false failure.
+  for (let i = 0; i < 60; i++) {
+    const st = (await api("/api/status")).body as { busy?: boolean; activity?: { label?: string } };
+    if (!st.busy) break;
+    if (i === 0) console.log(`  waiting for the compute slot (${st.activity?.label ?? "busy"})…`);
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+
   /* ---------------------------------------------------------------- */
   section("0. Authentication gate");
   for (const [path, init] of [
