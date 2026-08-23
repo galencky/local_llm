@@ -48,13 +48,16 @@ npm install
 
 ```bash
 brew install postgresql@17 && brew services start postgresql@17
+# postgresql@17 is keg-only; add it to your PATH for psql/createdb:
+echo 'export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"' >> ~/.zshrc
 createdb clinical_notes
 ```
 
 Set `DATABASE_URL` in `.env`, then:
 
 ```bash
-npm run db:migrate     # or: npm run db:push
+npm run db:migrate
+npm run db:smoke       # inserts and deletes one de-identified row
 ```
 
 **2. LM Studio** — launch it, load an instruction-following model that handles
@@ -87,6 +90,11 @@ authenticates the caller — the single-slot lock is a compute guard, not a door
 npm run verify           # offline: crypto, scrubbers, re-hydration, lock
 npm run e2e              # against a running server: sealed round-trip
 npm run e2e:concurrency  # proves the 429 single-slot limit
+npm run db:smoke         # audit database round-trip
+
+# whole pipeline with both externals stubbed (no Gemini key, no model needed):
+GEMINI_API_KEY=stub GEMINI_BASE_URL=http://localhost:8899 npm run dev
+npm run e2e:full
 ```
 
 `npm run verify` needs no database, no API key, and no model — it stubs LM
@@ -101,6 +109,7 @@ Studio on port 11234.
 | `LMSTUDIO_BASE_URL` / `LMSTUDIO_MODEL` / `LMSTUDIO_TIMEOUT_MS` | Local NER pass |
 | `ALLOW_DEGRADED_SCRUB` | `false` (default) aborts the request when the local NER pass is unavailable. Setting `true` permits regex-only scrubbing — it weakens de-identification and the UI shows a standing warning. |
 | `KEY_STORE_FILE` | Filename inside `./.keys/` for the RSA keypair |
+| `GEMINI_BASE_URL` | Optional endpoint override (egress proxy, regional endpoint, local stub). Unset in normal operation. |
 
 ## Layout
 

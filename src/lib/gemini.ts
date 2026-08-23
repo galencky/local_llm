@@ -58,7 +58,13 @@ function getClient(): GoogleGenAI {
       "GEMINI_API_KEY is not set. Add it to .env on the Mac Mini.",
     );
   }
-  client ??= new GoogleGenAI({ apiKey });
+  // GEMINI_BASE_URL lets you point at an egress proxy, a regional endpoint, or
+  // a local stub during verification. Unset in normal operation.
+  const baseUrl = process.env.GEMINI_BASE_URL;
+  client ??= new GoogleGenAI({
+    apiKey,
+    ...(baseUrl ? { httpOptions: { baseUrl } } : {}),
+  });
   return client;
 }
 
