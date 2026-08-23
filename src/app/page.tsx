@@ -25,6 +25,7 @@ import {
   ShieldCheck,
   Sparkles,
   Radio,
+  ScrollText,
   Trash2,
   Wand2,
   X,
@@ -178,6 +179,7 @@ export default function AirlockPage() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [promptsOpen, setPromptsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [user, setUser] = useState<SessionUser | null>(null);
   const [copied, setCopied] = useState(false);
@@ -434,20 +436,20 @@ export default function AirlockPage() {
     <div className="flex min-h-full flex-col">
       {/* ---------------- header ---------------- */}
       <header className="sticky top-0 z-20 border-b border-[var(--border)] bg-[var(--surface)]/85 backdrop-blur">
-        <div className="mx-auto flex max-w-[1600px] items-center gap-2 px-3 py-2 sm:px-5">
+        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-2 gap-y-1.5 px-3 py-2 sm:px-5">
           <div className="flex shrink-0 items-baseline gap-2">
             <ShieldCheck className="size-5 shrink-0 translate-y-0.5 text-[var(--accent)]" />
             <span className="whitespace-nowrap text-sm font-semibold tracking-[0.14em] sm:text-base sm:tracking-[0.18em]">
               PROJECT AIRLOCK
             </span>
-            {/* The tagline is the first thing to go: on a 1024px ward screen the
-                status pills matter more than the strapline. */}
+            {/* Only the strapline is ever dropped — it is decoration. Every
+                control keeps its label and wraps to another row instead. */}
             <span className="hidden whitespace-nowrap text-[11px] text-[var(--muted)] 2xl:inline">
               a local AI strips patient identity before the cloud
             </span>
           </div>
 
-          <div className="ml-auto flex min-w-0 items-center gap-1.5">
+          <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto lg:ml-auto">
             <HealthPill
               icon={Cpu}
               label={busy ? "Mac Mini Busy" : status ? "Mac Mini Online" : "Offline"}
@@ -464,8 +466,9 @@ export default function AirlockPage() {
               tone={status?.lmStudio.online ? "ok" : "bad"}
             />
             <HealthPill
+              title="Local Postgres on this Mac — de-identified copies of past notes, which is what History reads"
               icon={Database}
-              label={status?.database.online ? "Audit DB" : "Audit DB down"}
+              label={status?.database.online ? "Note log" : "Note log down"}
               tone={status?.database.online ? "ok" : "bad"}
             />
             <HealthPill icon={Lock} label={publicKey ? "E2EE armed" : "No key"} tone={publicKey ? "ok" : "bad"} />
@@ -477,21 +480,29 @@ export default function AirlockPage() {
               className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] xl:px-2.5"
             >
               <GithubMark className="size-3.5" />
-              <span className="hidden xl:inline">Source</span>
+              Source
             </a>
             <button
               onClick={() => setHistoryOpen(true)}
               className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] xl:px-2.5"
             >
               <Clock className="size-3.5" />
-              <span className="hidden xl:inline">History</span>
+              History
+            </button>
+            <button
+              onClick={() => setPromptsOpen(true)}
+              title="See exactly what each model is told"
+              className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] xl:px-2.5"
+            >
+              <ScrollText className="size-3.5" />
+              Prompts
             </button>
             <button
               onClick={() => setHelpOpen(true)}
               className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] xl:px-2.5"
             >
               <HelpCircle className="size-3.5" />
-              <span className="hidden xl:inline">How it works</span>
+              How it works
             </button>
             {user && (
               <button
@@ -516,7 +527,7 @@ export default function AirlockPage() {
                 className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] xl:px-2.5"
               >
                 <LogOut className="size-3.5 shrink-0" />
-                <span className="hidden max-w-[8rem] truncate xl:inline">
+                <span className="max-w-[8rem] truncate">
                   {(user.name ?? user.email ?? "").split(" ")[0] || "Sign out"}
                 </span>
               </button>
@@ -791,6 +802,7 @@ export default function AirlockPage() {
         <Inspector result={result} onClose={() => setInspectorOpen(false)} />
       )}
       {helpOpen && <HowItWorks onClose={() => setHelpOpen(false)} />}
+      {promptsOpen && <PromptsDrawer onClose={() => setPromptsOpen(false)} />}
       {wireOpen && wire && <WireView wire={wire} onClose={() => setWireOpen(false)} />}
       {historyOpen && (
         <HistoryDrawer onClose={() => setHistoryOpen(false)} onReuse={(text) => {
@@ -849,8 +861,7 @@ function ModelBar({
       <div className="mb-1.5 flex items-center gap-2">
         <Cloud className="size-3.5 text-[var(--muted)]" />
         <span className="whitespace-nowrap text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
-          <span className="xl:hidden">Cloud model</span>
-          <span className="hidden xl:inline">Cloud model — best first, falls back rightward</span>
+          Cloud model — best first, falls back rightward
         </span>
         {nextUp && nextUp.id !== chosen && (
           <span className="text-[10px] text-amber-600 dark:text-amber-400">
@@ -887,9 +898,7 @@ function ModelBar({
                 <span className="text-[9px] uppercase opacity-60">lite</span>
               )}
               {m.label}
-              {spent && (
-                <span className="hidden no-underline opacity-80 xl:inline">· {resetHint(m)}</span>
-              )}
+              {spent && <span className="no-underline opacity-80">· {resetHint(m)}</span>}
             </button>
           );
         })}
@@ -1419,6 +1428,225 @@ function Field2({ label, value, sub }: { label: string; value: string; sub: stri
   );
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Prompts                                                             */
+/* ------------------------------------------------------------------ */
+
+interface PromptConfig {
+  local: { model: string; prompt: string };
+  cloud: {
+    model: string;
+    systemInstruction: string;
+    formats: { format: string; label: string; instruction: string }[];
+  };
+  customisation: { where: string; why: string };
+}
+
+/**
+ * Read-only view of what each model is told.
+ *
+ * Nothing here is editable on purpose. The local prompt IS the
+ * de-identification step; the Gemini system instruction carries the rules that
+ * keep placeholders intact and stop the model inventing findings. Tuning
+ * belongs in a saved routine, which is owned, PII-screened and recorded on
+ * every audit row.
+ */
+function PromptsDrawer({ onClose }: { onClose: () => void }) {
+  const [cfg, setCfg] = useState<PromptConfig | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<"local" | "cloud">("local");
+  const [openFormat, setOpenFormat] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await fetch("/api/prompt-config", { cache: "no-store" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = (await r.json()) as PromptConfig;
+        if (!cancelled) setCfg(d);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : "Could not load prompts.");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <aside className="relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+        <div className="flex items-start justify-between border-b border-[var(--border)] px-4 py-3">
+          <div>
+            <h3 className="text-sm font-semibold">What each model is told</h3>
+            <p className="mt-0.5 text-[11px] text-[var(--muted)]">
+              The exact instructions behind every note. Read-only — see below for why.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-[var(--muted)] hover:text-[var(--foreground)]"
+            aria-label="Close prompts"
+          >
+            <ChevronRight className="size-5" />
+          </button>
+        </div>
+
+        <div className="flex gap-1 border-b border-[var(--border)] px-4 py-2">
+          {(
+            [
+              ["local", Cpu, "Local model — de-identification"],
+              ["cloud", Cloud, "Gemini — formatting"],
+            ] as const
+          ).map(([id, Icon, label]) => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              className={cn(
+                "flex items-center gap-1.5 rounded border px-2.5 py-1 text-[11px] transition-colors",
+                tab === id
+                  ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]"
+                  : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
+              )}
+            >
+              <Icon className="size-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex-1 overflow-auto p-4">
+          {error && (
+            <div className="flex gap-2 rounded border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-700 dark:text-rose-300">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+          {!cfg && !error && (
+            <div className="flex items-center gap-2 text-xs text-[var(--muted)]">
+              <Loader2 className="size-3.5 animate-spin" />
+              Loading…
+            </div>
+          )}
+
+          {cfg && tab === "local" && (
+            <>
+              <Locked
+                heading={`Runs on this Mac · ${cfg.local.model}`}
+                body="This prompt is the de-identification step itself. It is what finds the names, wards and addresses that pattern rules cannot. Weakening it would silently widen what reaches the cloud, so it is compiled in rather than configurable."
+              />
+              <PromptBlock title="System prompt" body={cfg.local.prompt} />
+            </>
+          )}
+
+          {cfg && tab === "cloud" && (
+            <>
+              <Locked
+                heading={`Runs at Google · ${cfg.cloud.model}`}
+                body="These rules keep [PATIENT_1] intact through the round trip and stop the model inventing findings. They are the reason a note can be re-hydrated at all, so they are not a setting."
+              />
+              <PromptBlock title="System instruction" body={cfg.cloud.systemInstruction} />
+
+              <h4 className="mt-5 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+                Format skeletons — one per note type
+              </h4>
+              <ul className="divide-y divide-[var(--border)] rounded border border-[var(--border)]">
+                {cfg.cloud.formats.map((f) => (
+                  <li key={f.format}>
+                    <button
+                      onClick={() => setOpenFormat(openFormat === f.format ? null : f.format)}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-[var(--background)]"
+                    >
+                      <span className="font-medium">{f.label}</span>
+                      <span className="font-mono text-[10px] text-[var(--muted)]">{f.format}</span>
+                      <ChevronRight
+                        className={cn(
+                          "ml-auto size-3.5 text-[var(--muted)] transition-transform",
+                          openFormat === f.format && "rotate-90",
+                        )}
+                      />
+                    </button>
+                    {openFormat === f.format && (
+                      <pre className="mx-3 mb-3 max-h-56 overflow-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[11px] leading-relaxed">
+                        {f.instruction}
+                      </pre>
+                    )}
+                  </li>
+                ))}
+              </ul>
+
+              <div className="mt-5 rounded-lg border border-[var(--accent)]/30 bg-[var(--accent)]/5 p-3">
+                <h4 className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-[var(--accent)]">
+                  <BookMarked className="size-3.5" />
+                  Where you change things
+                </h4>
+                <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--muted)]">
+                  Everything above is fixed. Your instructions go in a{" "}
+                  <strong className="text-[var(--foreground)]">saved routine</strong> — or the
+                  one-off box, for a single note. Both are appended <em>beneath</em> these rules,
+                  so a routine can shape the note without being able to override the parts that
+                  protect the patient.
+                </p>
+                <p className="mt-2 text-[12px] leading-relaxed text-[var(--muted)]">
+                  {cfg.customisation.why}
+                </p>
+              </div>
+            </>
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function Locked({ heading, body }: { heading: string; body: string }) {
+  return (
+    <div className="mb-3 rounded-lg border border-[var(--border)] bg-[var(--background)] p-3">
+      <div className="flex items-center gap-1.5">
+        <Lock className="size-3.5 text-[var(--muted)]" />
+        <span className="text-[11px] font-semibold">{heading}</span>
+        <span className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-[var(--muted)]">
+          read-only
+        </span>
+      </div>
+      <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--muted)]">{body}</p>
+    </div>
+  );
+}
+
+function PromptBlock({ title, body }: { title: string; body: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center gap-2">
+        <h4 className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+          {title}
+        </h4>
+        <span className="font-mono text-[10px] text-[var(--muted)]">
+          {body.length.toLocaleString()} chars
+        </span>
+        <button
+          onClick={() => {
+            void navigator.clipboard.writeText(body);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1800);
+          }}
+          className="ml-auto flex items-center gap-1 rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:text-[var(--foreground)]"
+        >
+          {copied ? <CheckCheck className="size-3 text-[var(--accent)]" /> : <Copy className="size-3" />}
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre className="max-h-[26rem] overflow-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-3 font-mono text-[11px] leading-relaxed">
+        {body}
+      </pre>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Explainer                                                           */
 /* ------------------------------------------------------------------ */
@@ -1898,20 +2126,23 @@ function NoteBody({ markdown }: { markdown: string }) {
 /* ------------------------------------------------------------------ */
 
 /**
- * Status chip. Sized for a 1024x768 ward screen: the text never wraps, and
- * below `xl` it collapses to the icon alone with the label kept in the
- * tooltip — a three-line "Mac Mini Online" pill is worse than no label.
+ * Status chip. Sized for a 1024x768 ward screen: the text never wraps mid-pill,
+ * the label is always shown, and the row of pills wraps to a second or third
+ * line rather than hiding anything. A long model name truncates with the full
+ * value in the tooltip.
  */
 function HealthPill({
   icon: Icon,
   label,
   tone,
   pulse,
+  title,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
   tone: "ok" | "warn" | "bad";
   pulse?: boolean;
+  title?: string;
 }) {
   const tones = {
     ok: "border-emerald-500/30 text-emerald-600 dark:text-emerald-400",
@@ -1920,15 +2151,15 @@ function HealthPill({
   } as const;
   return (
     <span
-      title={label}
+      title={title ?? label}
       className={cn(
-        "hidden shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-1 text-[11px] sm:inline-flex xl:px-2.5",
+        "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-1 text-[11px] xl:px-2.5",
         tones[tone],
         pulse && "animate-pulse",
       )}
     >
       <Icon className="size-3.5 shrink-0" />
-      <span className="hidden max-w-[13rem] truncate xl:inline">{label}</span>
+      <span className="max-w-[9rem] truncate xl:max-w-[15rem]">{label}</span>
     </span>
   );
 }

@@ -18,6 +18,16 @@ import {
  * clinical structure and nothing that can name a person.
  */
 
+/**
+ * The full system instruction, exported so the UI can show it verbatim.
+ *
+ * This half is NOT editable and is not stored in the database. The placeholder
+ * rules are what keep `[PATIENT_1]` intact through the round trip, and the
+ * clinical rules are what stop the model inventing findings. Making them a
+ * setting would make the safety properties a setting.
+ */
+export const LOCKED_SYSTEM_INSTRUCTION_LABEL = "Fixed rules — not editable";
+
 export const NOTE_FORMATS = {
   SOAP: "SOAP note",
   DISCHARGE_SUMMARY: "Discharge summary",
@@ -57,6 +67,42 @@ CLINICAL RULES:
 - Write in the register of a hospital chart: concise, impersonal, standard abbreviations acceptable.
 - Keep source-language clinical terms where the physician used them; do not translate Traditional Chinese findings into English or vice versa unless asked.
 - Output the note as Markdown. No preamble, no closing commentary, no explanation of what you did.`;
+
+/** The compiled-in skeleton for a format, before any per-user override. */
+export function builtInFormatInstruction(format: NoteFormat): string {
+  return FORMAT_INSTRUCTIONS[format];
+}
+
+export function systemInstruction(): string {
+  return SYSTEM_INSTRUCTION;
+}
+
+/**
+ * Assemble exactly what Gemini will receive, for display or for sending.
+ *
+ * One function, used by both the real request and the read-only preview, so
+ * what the UI shows cannot drift from what is actually sent. Everything a
+ * clinician can change enters through `template` (a saved routine) or `adHoc`
+ * — the skeleton and the system instruction are compiled in.
+ */
+export function assemblePrompt(opts: {
+  format: NoteFormat;
+  template?: { name: string; instruction: string } | null;
+  adHoc?: string | null;
+  narrative: string;
+}): string {
+  const adHoc = opts.adHoc?.trim();
+  return [
+    FORMAT_INSTRUCTIONS[opts.format],
+    opts.template?.instruction?.trim()
+      ? `\n\nDepartmental charting routine ("${opts.template.name}") — follow this unless it conflicts with the placeholder rules:\n${opts.template.instruction.trim()}`
+      : "",
+    adHoc ? `\n\nAdditional instruction for this note only: ${adHoc}` : "",
+    "\n\n--- DE-IDENTIFIED CLINICAL NARRATIVE ---\n",
+    opts.narrative,
+    "\n--- END NARRATIVE ---",
+  ].join("");
+}
 
 let client: GoogleGenAI | null = null;
 
@@ -183,19 +229,12 @@ export async function formatClinicalNote(
 ): Promise<FormatNoteResult> {
   const started = Date.now();
 
-  const template = instructions.template;
-  const adHoc = instructions.adHoc?.trim();
-
-  const prompt = [
-    FORMAT_INSTRUCTIONS[format],
-    template?.instruction?.trim()
-      ? `\n\nDepartmental charting routine ("${template.name}") — follow this unless it conflicts with the placeholder rules:\n${template.instruction.trim()}`
-      : "",
-    adHoc ? `\n\nAdditional instruction for this note only: ${adHoc}` : "",
-    "\n\n--- DE-IDENTIFIED CLINICAL NARRATIVE ---\n",
-    deidentifiedText,
-    "\n--- END NARRATIVE ---",
-  ].join("");
+  const prompt = assemblePrompt({
+    format,
+    template: instructions.template,
+    adHoc: instructions.adHoc,
+    narrative: deidentifiedText,
+  });
 
   // Persisted cooldowns must be loaded before we decide which rung to try.
   await ensureCooldownsLoaded();

@@ -64,6 +64,11 @@ network.
 └────────────────────────────────────┘
 ```
 
+Prompts are **not** in the database. Both system prompts and the five format
+skeletons are compiled into the image and read-only — see the Prompts drawer.
+The only prompt text that is stored is a `PromptTemplate`, which is a saved
+routine appended beneath the fixed rules.
+
 `VerificationToken` also exists — required by the Auth.js adapter, unused here
 because Google is the only provider.
 

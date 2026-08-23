@@ -29,7 +29,7 @@ export class LocalScrubUnavailableError extends Error {
   }
 }
 
-const SYSTEM_PROMPT = `You are a strict named-entity recogniser for a hospital de-identification pipeline in Taiwan. You operate on Traditional Chinese and English clinical narratives.
+export const NER_SYSTEM_PROMPT = `You are a strict named-entity recogniser for a hospital de-identification pipeline in Taiwan. You operate on Traditional Chinese and English clinical narratives.
 
 Your ONLY job is to list spans of text that identify a real person, place, or institution. You never summarise, translate, diagnose, or comment.
 
@@ -154,7 +154,7 @@ async function callLmStudio(
       // looping model pinning the single compute slot for minutes.
       max_tokens: 6144,
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: NER_SYSTEM_PROMPT },
         { role: "user", content: prompt },
       ],
       ...(useSchema

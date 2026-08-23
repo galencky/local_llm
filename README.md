@@ -453,12 +453,55 @@ created.
 
 ## On a 1024×768 ward screen
 
-The interface is built for the monitor you actually have, not the one the
-screenshots were taken on. Below `xl` the status chips collapse to icons with
-their label in the tooltip, the strapline drops, and the model chips shed their
-reset countdown — a three-line "Mac Mini Online" pill costs more than the words
-are worth. Measured at 1024×768: header 44px (it was 85px), no horizontal
-overflow, and **Encrypt & structure** on screen without scrolling.
+Built for the monitor you actually have. **No control ever loses its label** —
+the header wraps to a second row instead, and only the decorative strapline is
+dropped. Measured at 1024×768: all eight chips readable, no horizontal
+overflow, and **Encrypt & structure** on screen without scrolling (it used to
+be below the fold). Verified at 1024, 1280, 1600 and 1920.
+
+## Multiple clinicians
+
+Yes, with one caveat worth understanding.
+
+Sign-in, history and routines are fully per-user: three clinicians can work at
+once and each sees only their own notes. But **the compute slot is global, not
+per user** — 16 GB of unified memory runs one model pass at a time, so notes
+queue rather than run in parallel. A waiting client shows what the box is busy
+with and starts automatically when the slot frees.
+
+Measured with three simultaneous users:
+
+```
+carol   done at  9.5s  (waited out 0 busy replies)
+bob     done at 13.9s  (waited out 5 busy replies)
+alice   done at 17.9s  (waited out 7 busy replies)
+3/3 completed, each seeing only their own note
+```
+
+So it is genuinely multi-user, but throughput is one note at a time. For a ward
+round where several people submit at once, expect the last person to wait
+roughly *n* × the time of one note.
+
+## What each model is told
+
+The **Prompts** drawer shows both system prompts verbatim — the local NER
+prompt and the Gemini system instruction — plus every format skeleton, with a
+copy button.
+
+All of it is **read-only, deliberately**:
+
+- The local prompt *is* the de-identification step. Weakening it would silently
+  widen what reaches the cloud.
+- The Gemini system instruction carries the placeholder rules that let a note be
+  re-hydrated at all, and the rules that stop the model inventing findings.
+- The format skeletons are what `AuditLog.noteFormat` refers to. If they drifted
+  per user, two rows both labelled "SOAP" would not be comparable.
+
+Customisation goes in a **saved routine**, or the one-off box for a single note.
+Both are appended *beneath* the fixed rules, so a routine can shape the note
+without overriding what protects the patient. Routines are owned, PII-screened
+on save, and recorded by name on every audit row — so a note can always be
+traced back to the instructions that produced it.
 
 ## Stale tabs fix themselves
 
