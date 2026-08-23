@@ -36,8 +36,12 @@ export default async function SignInPage({
             <AlertTriangle className="mt-0.5 size-4 shrink-0" />
             <span>
               {error === "AccessDenied"
-                ? "That Google account is not on this instance's allowlist."
-                : "Sign-in failed. Try again."}
+                ? "That Google account is not on this instance's allowlist. Add it to AUTH_ALLOWED_EMAILS and restart."
+                : error === "OAuthAccountNotLinked"
+                  ? "An account already exists with that email address but was not created through Google. Sign in the original way, or remove that user from the database."
+                  : error === "Configuration"
+                    ? "Sign-in is misconfigured. Check AUTH_GOOGLE_ID, AUTH_GOOGLE_SECRET, AUTH_SECRET and AUTH_URL."
+                    : `Sign-in failed (${error}). Try again.`}
             </span>
           </div>
         )}

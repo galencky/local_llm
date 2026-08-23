@@ -105,6 +105,35 @@ services:
         limits:
           memory: 1024M
 
+  # Cloudflare Tunnel, for publishing at llm.galenchen.uk.
+  #
+  # Only starts when asked for:  docker compose --profile tunnel up -d
+  #
+  # Get TUNNEL_TOKEN from the Cloudflare dashboard:
+  #   Zero Trust > Networks > Tunnels > Create a tunnel > Cloudflared
+  # Then, in that tunnel's "Public Hostname" tab, add:
+  #   Subdomain: llm      Domain: galenchen.uk
+  #   Service:   HTTP     URL:    app:3000
+  #
+  # NOTE the URL is `app:3000`, not `localhost:3000`. This container talks to
+  # the app over the compose network; localhost here means the tunnel itself.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    # cloudflared reads TUNNEL_TOKEN from the environment, so the compose file
+    # stays valid (and this service stays inert) when the token is unset.
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      app:
+        condition: service_started
+    profiles: ["tunnel"]
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
 volumes:
   airlock-db:
   airlock-keys:

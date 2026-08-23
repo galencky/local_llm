@@ -4,14 +4,56 @@ The container listens on `localhost:3000`. Cloudflare Tunnel gives it a public
 HTTPS hostname without opening a single port on your router — the tunnel dials
 *out* to Cloudflare, so there is no inbound path to your home network.
 
-## 1. Install and authenticate
+## Route A — dashboard token (recommended, no browser login on the Mac)
+
+Cloudflare's dashboard creates the tunnel and hands you a token; nothing needs
+authorising from the terminal.
+
+1. **Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared.**
+   Name it `airlock`. Copy the token from the install command it shows —
+   the long string after `--token`.
+
+2. Put it in `.env`:
+
+   ```
+   TUNNEL_TOKEN="eyJhIjoi...."
+   ```
+
+3. In that tunnel's **Public Hostname** tab, add a route:
+
+   | Field | Value |
+   | --- | --- |
+   | Subdomain | `llm` |
+   | Domain | `galenchen.uk` |
+   | Service type | `HTTP` |
+   | URL | `app:3000` |
+
+   **`app:3000`, not `localhost:3000`.** The tunnel runs as its own container
+   and reaches the app over the compose network; `localhost` there would mean
+   the tunnel container itself.
+
+4. Start it:
+
+   ```bash
+   docker compose --profile tunnel up -d
+   docker compose logs -f tunnel        # look for "Registered tunnel connection"
+   ```
+
+The tunnel restarts with the rest of the stack and survives reboot, because
+`restart: unless-stopped` applies to it too.
+
+## Route B — CLI
+
+Needs a browser login on the Mac to authorise the domain.
+
+### 1. Install and authenticate
 
 ```bash
 brew install cloudflared
 cloudflared tunnel login          # opens a browser; pick galenchen.uk
 ```
 
-## 2. Create the tunnel and point DNS at it
+### 2. Create the tunnel and point DNS at it
 
 ```bash
 cloudflared tunnel create airlock
@@ -20,7 +62,7 @@ cloudflared tunnel route dns airlock llm.galenchen.uk
 
 `create` writes credentials to `~/.cloudflared/<TUNNEL-ID>.json`. Note the ID.
 
-## 3. Configure it
+### 3. Configure it
 
 `~/.cloudflared/config.yml`:
 
@@ -41,7 +83,7 @@ ingress:
   - service: http_status:404
 ```
 
-## 4. Tell the app its public name
+## Either route: tell the app its public name
 
 Auth.js builds OAuth callbacks from `AUTH_URL`. In `.env`:
 
@@ -57,15 +99,12 @@ https://llm.galenchen.uk/api/auth/callback/google
 
 Then `docker compose up -d` to pick up the change.
 
-## 5. Run it as a service
+`AUTH_URL` does double duty — Auth.js builds OAuth callbacks from it **and**
+derives whether the session cookie carries the `__Secure-` prefix. Behind a
+tunnel the container is spoken to over HTTP while the browser is on HTTPS, so
+this must be the public HTTPS name or sign-in silently fails to stick.
 
-```bash
-sudo cloudflared service install     # survives reboot
-# or, to try it first:
-cloudflared tunnel run airlock
-```
-
-## 6. Lock it down — do this before any real patient note
+## Lock it down — do this before any real patient note
 
 - **Cloudflare Access** in front of the hostname (Zero Trust → Access →
   Applications). This is a second, independent gate: Airlock's own Google

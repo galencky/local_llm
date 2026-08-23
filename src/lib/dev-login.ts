@@ -31,6 +31,24 @@ export function devLoginAllowsRemote(): boolean {
 
 export function devLoginAllowedFromHost(host: string): boolean {
   if (devLoginAllowsRemote()) return true;
-  const name = host.split(":")[0].toLowerCase();
-  return name === "localhost" || name === "127.0.0.1" || name === "[::1]" || name === "::1";
+  const name = host.split(":")[0].toLowerCase().replace(/^\[|\]$/g, "");
+  return name === "localhost" || name === "127.0.0.1" || name === "::1";
+}
+
+/**
+ * The session cookie name Auth.js will look for.
+ *
+ * Auth.js derives the `__Secure-` prefix from AUTH_URL, not from the transport
+ * of the current request. Behind a tunnel those disagree — the browser is on
+ * HTTPS while the container is spoken to over HTTP — so a cookie named from the
+ * connection would be written under a name Auth.js never reads. Follow AUTH_URL
+ * and the two stay in lockstep.
+ */
+export function sessionCookieName(): { name: string; secure: boolean } {
+  const url = process.env.AUTH_URL || process.env.NEXTAUTH_URL || "";
+  const secure = url.startsWith("https://");
+  return {
+    name: secure ? "__Secure-authjs.session-token" : "authjs.session-token",
+    secure,
+  };
 }

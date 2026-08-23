@@ -124,9 +124,26 @@ npm run dev          # http://localhost:3000
 npm run build && npm start
 ```
 
-**5. Publish it** — see [ops/PUBLISH.md](ops/PUBLISH.md) for the full Cloudflare
-Tunnel walkthrough, including the `AUTH_URL` and Google redirect-URI changes the
-public hostname requires.
+**5. Publish it** — easiest via a dashboard token, which needs no browser login
+on the Mac:
+
+```bash
+# Zero Trust > Networks > Tunnels > Create a tunnel > Cloudflared
+# Copy the token into .env as TUNNEL_TOKEN, then in the tunnel's
+# "Public Hostname" tab route llm.galenchen.uk -> HTTP -> app:3000
+docker compose --profile tunnel up -d
+```
+
+Or via the CLI (`cloudflared tunnel login` then `bash ops/setup-tunnel.sh`).
+
+Then set `AUTH_URL="https://llm.galenchen.uk"` in `.env` and add the matching
+redirect URI to the Google OAuth client. Details and the pre-flight checklist:
+[ops/PUBLISH.md](ops/PUBLISH.md).
+
+Verified end to end through a live Cloudflare tunnel: the auth gate, the
+`__Secure-` session cookie, the full de-identification pipeline, and — the one
+that could have failed silently — **Cloudflare does not buffer the progress
+stream**, so the stage list stays live over the tunnel.
 
 ## Verification
 

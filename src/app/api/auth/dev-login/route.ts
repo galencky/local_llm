@@ -7,6 +7,7 @@ import {
   devLoginAllowedFromHost,
   devLoginEnabled,
   devLoginPassword,
+  sessionCookieName,
 } from "@/lib/dev-login";
 
 export const runtime = "nodejs";
@@ -78,12 +79,12 @@ export async function POST(req: NextRequest) {
     const expires = new Date(Date.now() + SESSION_HOURS * 60 * 60 * 1000);
     await prisma.session.create({ data: { sessionToken, userId: user.id, expires } });
 
-    const secure = req.nextUrl.protocol === "https:";
+    const { name, secure } = sessionCookieName();
     const res = NextResponse.json({ ok: true, user: { name: user.name, email: user.email } });
     res.cookies.set({
-      // Same cookie Auth.js reads, so the session is indistinguishable
-      // downstream from a real Google sign-in.
-      name: secure ? "__Secure-authjs.session-token" : "authjs.session-token",
+      // Exactly the cookie Auth.js reads, so downstream this session is
+      // indistinguishable from a real Google sign-in.
+      name,
       value: sessionToken,
       httpOnly: true,
       sameSite: "lax",
