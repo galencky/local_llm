@@ -144,6 +144,24 @@ Verified end to end through a live Cloudflare tunnel: the auth gate, the
 that could have failed silently — **Cloudflare does not buffer the progress
 stream**, so the stage list stays live over the tunnel.
 
+## Proving it, rather than asserting it
+
+```bash
+npm run prove:e2ee     # wiretap the traffic and try to read the note
+npm run db:inspect     # dump the audit schema and scan every row for identifiers
+```
+
+`prove:e2ee` runs a proxy between the browser and the app — exactly where
+Cloudflare sits — records every byte in both directions, then tries to recover
+the note from the capture. It reports the wrapped-key and ciphertext sizes,
+shows the ciphertext decoded as text, and checks that no identifier appears
+anywhere in the traffic, that the AES key cannot be unwrapped without the Mac
+Mini's private key, and that GCM rejects tampered ciphertext.
+
+`db:inspect` prints every table and row count, the full `AuditLog` column list,
+one real row in both directions, and then scans the whole table for known
+identifiers.
+
 ## Verification
 
 ```bash

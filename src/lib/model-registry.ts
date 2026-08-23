@@ -167,9 +167,21 @@ export interface ModelAvailability extends ModelSpec {
   daily: boolean;
 }
 
+/**
+ * A model Google says does not exist for this key is retired, not merely busy.
+ * Waiting will not bring it back, so it is dropped from the ladder and from
+ * the selector rather than sitting there greyed out forever.
+ */
+function isRetired(model: string): boolean {
+  const c = cooldownFor(model);
+  return c?.reason === "model";
+}
+
 export async function availability(): Promise<ModelAvailability[]> {
   await ensureCooldownsLoaded();
-  return modelLadder().map((spec) => {
+  return modelLadder()
+    .filter((spec) => !isRetired(spec.id))
+    .map((spec) => {
     const c = cooldownFor(spec.id);
     return {
       ...spec,
@@ -187,7 +199,9 @@ export async function availability(): Promise<ModelAvailability[]> {
  * cooldown that expires mid-request is still usable.
  */
 export function chainFrom(start?: string): string[] {
-  const ladder = modelLadder().map((m) => m.id);
+  const ladder = modelLadder()
+    .map((m) => m.id)
+    .filter((id) => !isRetired(id));
   const from = start && ladder.includes(start) ? ladder.indexOf(start) : ladder.indexOf(defaultModel());
   return ladder.slice(Math.max(0, from));
 }

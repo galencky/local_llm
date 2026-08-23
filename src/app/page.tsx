@@ -25,6 +25,7 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  Wand2,
   X,
 } from "lucide-react";
 import {
@@ -554,16 +555,36 @@ export default function AirlockPage() {
             </div>
           )}
 
-          {/* ---- specialty routine ---- */}
+          {/* ---- extra instruction for this note only ---- */}
+          <div className="border-t border-[var(--border)] px-4 py-2">
+            <label className="flex items-center gap-2">
+              <Wand2 className="size-3.5 shrink-0 text-[var(--muted)]" />
+              <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+                Extra instruction · this note only
+              </span>
+              <input
+                value={instruction}
+                onChange={(e) => setInstruction(e.target.value)}
+                disabled={submitting}
+                placeholder="e.g. 以中文輸出 · emphasise the renal course · keep the plan to one line per problem"
+                className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-[var(--muted)]/60 disabled:opacity-50"
+              />
+            </label>
+          </div>
+
+          {/* ---- saved specialty routine ---- */}
           <div className="flex items-center gap-2 border-t border-[var(--border)] px-4 py-2">
             <BookMarked className="size-3.5 shrink-0 text-[var(--muted)]" />
+            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+              Saved routine
+            </span>
             <select
               value={activeTemplateId}
               onChange={(e) => setActiveTemplateId(e.target.value)}
               disabled={submitting}
               className="min-w-0 flex-1 cursor-pointer truncate bg-transparent text-xs outline-none disabled:opacity-50"
             >
-              <option value="">No specialty routine</option>
+              <option value="">None — no saved routine</option>
               {templates.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.specialty ? `${t.specialty} — ${t.name}` : t.name}
@@ -615,15 +636,6 @@ export default function AirlockPage() {
             </button>
           </div>
 
-          <div className="border-t border-[var(--border)] px-4 py-2">
-            <input
-              value={instruction}
-              onChange={(e) => setInstruction(e.target.value)}
-              disabled={submitting}
-              placeholder="One-off steer — e.g. 以中文輸出, emphasise the renal course, keep the plan terse"
-              className="w-full bg-transparent text-xs outline-none placeholder:text-[var(--muted)]/60"
-            />
-          </div>
         </section>
 
         {/* ---- output ---- */}

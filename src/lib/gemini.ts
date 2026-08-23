@@ -249,6 +249,11 @@ export async function formatClinicalNote(
           daily: unavailable.daily,
           retryAfterMs: unavailable.retryAfterMs,
         });
+        if (unavailable.kind === "model") {
+          console.warn(
+            `[gemini] ${model} is retired for this key and has been dropped from the ladder.`,
+          );
+        }
       }
 
       // Quota, overload and retirement are solved by another model. An auth
