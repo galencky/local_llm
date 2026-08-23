@@ -1,4 +1,4 @@
-// LIMEN — audit and configuration schema.
+// Project Airlock — audit and configuration schema.
 //
 // HARD CONSTRAINT: this database stores DE-IDENTIFIED text only.
 // Raw PHI and the token->PII mapping never reach Postgres, disk, or logs.

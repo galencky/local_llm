@@ -108,7 +108,7 @@ async function fetchTemplates(): Promise<PromptTemplate[] | null> {
 
 /* ------------------------------------------------------------------ */
 
-export default function LimenPage() {
+export default function AirlockPage() {
   const [input, setInput] = useState("");
   const [format, setFormat] = useState<string>("SOAP");
   const [instruction, setInstruction] = useState("");
@@ -269,9 +269,11 @@ export default function LimenPage() {
         <div className="mx-auto flex max-w-[1600px] items-center gap-4 px-5 py-3">
           <div className="flex items-baseline gap-2.5">
             <ShieldCheck className="size-5 translate-y-0.5 text-[var(--accent)]" />
-            <span className="text-base font-semibold tracking-[0.2em]">LIMEN</span>
+            <span className="text-base font-semibold tracking-[0.18em]">
+              PROJECT AIRLOCK
+            </span>
             <span className="hidden text-[11px] text-[var(--muted)] sm:inline">
-              nothing identifying crosses the threshold
+              both doors never open at once
             </span>
           </div>
 
@@ -479,7 +481,7 @@ export default function LimenPage() {
       </main>
 
       <footer className="border-t border-[var(--border)] px-5 py-3 text-center text-[11px] text-[var(--muted)]">
-        <span className="tracking-[0.15em]">LIMEN</span> · created by{" "}
+        <span className="tracking-[0.15em]">PROJECT AIRLOCK</span> · created by{" "}
         <span className="text-[var(--foreground)]">Kuan-Yuan Chen</span> · built with{" "}
         <span className="text-[var(--foreground)]">Claude Code</span>
         {activeTemplate && <> · routine: {activeTemplate.name}</>}

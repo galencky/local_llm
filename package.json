@@ -1,5 +1,5 @@
 {
-  "name": "limen",
+  "name": "project-airlock",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -45,7 +45,7 @@
     "tsx": "^4.23.12",
     "typescript": "^5"
   },
-  "description": "LIMEN \u2014 zero-knowledge, PDPA-compliant clinical note assistant. Local de-identification, end-to-end encrypted transport.",
+  "description": "Project Airlock \u2014 zero-knowledge, PDPA-compliant clinical note assistant. Local de-identification, end-to-end encrypted transport.",
   "author": "Kuan-Yuan Chen",
   "contributors": [
     "Claude Code (Anthropic)"

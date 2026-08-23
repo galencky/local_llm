@@ -1,13 +1,14 @@
-# LIMEN
+# Project Airlock
 
-> *Nothing identifying crosses the threshold.*
+> *Both doors never open at once.*
 
 Structures Taiwanese hospital narratives into formal notes (SOAP, discharge
 summary, hospital course, …) without any identifier leaving the Mac Mini.
 
-A *limen* is a threshold — and in psychophysics, the boundary below which a
-stimulus cannot be perceived. Every identifier is pushed below that line before
-anything crosses into the cloud.
+An airlock joins two environments that must never meet. Nothing passes through
+carrying what belongs to the other side: identifiers are stripped on the inner
+door before the outer one opens onto the cloud, and restored only after it
+shuts again.
 
 Created by **Kuan-Yuan Chen**. Built with **Claude Code**.
 
