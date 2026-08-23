@@ -104,7 +104,15 @@ export default async function SignInPage({
 
         <p className="mt-4 text-[10px] leading-relaxed text-[var(--muted)]">
           Airlock stores only your name, email and avatar from Google. Past notes are kept
-          de-identified — the mapping back to real identifiers is destroyed when each note finishes.
+          de-identified — the mapping back to real identifiers is destroyed when each note finishes.{" "}
+          <a
+            href="https://github.com/galencky/local_llm"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline decoration-dotted underline-offset-2 hover:text-[var(--foreground)]"
+          >
+            Read the source.
+          </a>
         </p>
       </div>
     </main>

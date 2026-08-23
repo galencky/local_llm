@@ -1,5 +1,3 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
 # dependencies
 /node_modules
 /.pnp
@@ -10,39 +8,47 @@
 !.yarn/releases
 !.yarn/versions
 
-# testing
-/coverage
-
-# next.js
+# build output
 /.next/
 /out/
-
-# production
 /build
+/coverage
+*.tsbuildinfo
+next-env.d.ts
+/src/generated
 
-# misc
-.DS_Store
+# secrets and key material — never commit these
+# .env holds the Gemini key, Google OAuth client secret, AUTH_SECRET and the
+# Cloudflare tunnel token. .env.example is the template and IS tracked.
+.env
+.env.*
+!.env.example
+.keys/
 *.pem
+*.p12
+*.key
 
-# debug
+# local database dumps (de-identified, but still not repo material)
+*.sql.gz
+/backups/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# tooling artefacts dropped in by `prisma init` — reference docs for AI
+# assistants, not part of this project
+/.agents/
+/.windsurf/
+/.claude/
+skills-lock.json
 
-# vercel
+# deploy
 .vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
-/src/generated/prisma
-
-# local secrets & keys
-.env
-.keys/
-src/generated/

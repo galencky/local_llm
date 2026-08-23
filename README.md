@@ -10,6 +10,7 @@ on your own Mac reads each note and removes every name, ID, date and ward before
 the outer door opens onto the cloud — and puts them back only after it shuts.
 
 Created by **Kuan-Yuan Chen**. Built with **Claude Code**.
+Source: <https://github.com/galencky/local_llm>
 
 ```
 browser ──AES-GCM sealed──▶ Cloudflare ──ciphertext──▶ Mac Mini (M4/16GB)
@@ -214,6 +215,8 @@ Studio on port 11234.
 | `src/lib/memory-cache.ts` | `TokenVault` + 10-minute TTL store. **The only place raw PHI lives on the server.** |
 | `src/lib/gemini.ts` | Note formats and the placeholder-preserving system prompt |
 | `src/lib/db.ts` | Prisma singleton (`@prisma/adapter-pg`) |
+| `src/lib/auth.ts` | Google sign-in, with the mandatory email allowlist |
+| `src/lib/model-registry.ts` | The Gemini ladder and observed availability |
 | `src/lib/prompts.ts` | Specialty routine CRUD + the guard that keeps PHI out of saved prompts |
 
 ## Nightly backups
@@ -399,8 +402,34 @@ scrubber and **rejects it with HTTP 422 if any identifier matches** — a patien
 name pasted into a template would quietly defeat the whole pipeline. The audit
 row records which routine was in effect by name.
 
+## Documentation
+
+| | |
+| --- | --- |
+| [docs/DATABASE.md](docs/DATABASE.md) | Schema diagram, what each table holds, and what is deliberately absent |
+| [ops/PUBLISH.md](ops/PUBLISH.md) | Cloudflare Tunnel, both routes, and the pre-flight checklist |
+
+## Configuration files
+
+| | |
+| --- | --- |
+| `.env` | **Never committed.** Holds the Gemini key, Google OAuth secret, `AUTH_SECRET` and the tunnel token. |
+| `.env.example` | The tracked template. Copy to `.env` and fill in. |
+| `docker-compose.yml` | app + Postgres + migrate, and an opt-in `tunnel` profile |
+| `Dockerfile` | Multi-stage build to a standalone Next server |
+
 ## The rule that matters
 
 `TokenVault` contents must never be written to Postgres, a file, a log line, or
 telemetry. If you add logging to the pipeline route, log `deidentifiedInput` —
 never `plaintext`, never `noteText`, never `vault`.
+
+## Housekeeping notes
+
+- `npm run db:inspect` is the fastest way to satisfy yourself that the audit
+  table holds nothing identifying.
+- The container healthcheck hits `/api/health`, which is public and returns
+  `{"ok":true}` and nothing else. Every other route is behind sign-in, so a
+  probe against `/api/status` would fail forever with a 401.
+- Docker build cache grows quickly across rebuilds. `docker builder prune -af`
+  reclaims it without touching the `airlock-db` or `airlock-keys` volumes.

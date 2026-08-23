@@ -12,7 +12,13 @@ import type { NextRequest } from "next/server";
  * the route handlers via `auth()`. Middleware deliberately avoids a database
  * round-trip on every request.
  */
-const PUBLIC = [/^\/signin/, /^\/api\/auth\//, /^\/_next\//, /^\/favicon/];
+const PUBLIC = [
+  /^\/signin/,
+  /^\/api\/auth\//,
+  /^\/api\/health$/,
+  /^\/_next\//,
+  /^\/favicon/,
+];
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
