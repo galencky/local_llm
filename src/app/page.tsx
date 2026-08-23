@@ -4,21 +4,37 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import {
   AlertTriangle,
   BookMarked,
+  Check,
   CheckCheck,
   ChevronRight,
+  Circle,
+  Cloud,
   Copy,
   Cpu,
   Database,
   Eye,
+  HelpCircle,
   Loader2,
   Lock,
+  Monitor,
   Pencil,
   Plus,
   ShieldCheck,
   Sparkles,
   Trash2,
+  X,
 } from "lucide-react";
-import { openResponse, sealRequest, type CryptoEnvelope } from "@/lib/crypto";
+import {
+  ComputeBusyError,
+  runPipeline,
+  STAGE_LOCUS,
+  STAGE_ORDER,
+  STAGE_TITLES,
+  type BusyInfo,
+  type PipelineStage,
+  type ProgressEvent,
+} from "@/lib/pipeline-client";
+import { HARD_CHAR_LIMIT, measure } from "@/lib/limits";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -57,6 +73,7 @@ interface ProcessNoteResult {
 interface StatusPayload {
   state: "online" | "busy";
   busy: boolean;
+  activity: BusyInfo | null;
   lmStudio: { online: boolean; models: string[]; error?: string };
   database: { online: boolean; error?: string };
   gemini: { configured: boolean; model: string };
@@ -121,7 +138,9 @@ export default function AirlockPage() {
   const [keyError, setKeyError] = useState<string | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [queued, setQueued] = useState<BusyInfo | null>(null);
   const [templates, setTemplates] = useState<PromptTemplate[]>([]);
   const [activeTemplateId, setActiveTemplateId] = useState<string>("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -171,6 +190,7 @@ export default function AirlockPage() {
   }, [applyTemplates]);
 
   /* --- health polling -------------------------------------------------- */
+  const pollMs = queued ? 1000 : 5000;
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -183,12 +203,14 @@ export default function AirlockPage() {
       }
     };
     void poll();
-    const id = setInterval(poll, 5000);
+    // Tighten the cadence while queued: a stale "what is it doing" read-out is
+    // worse than none, and the wait is exactly when the user is watching.
+    const id = setInterval(poll, pollMs);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, []);
+  }, [pollMs]);
 
   /* --- the input grows with the narrative ------------------------------ */
   useLayoutEffect(() => {
@@ -198,53 +220,85 @@ export default function AirlockPage() {
     el.style.height = `${el.scrollHeight}px`;
   }, [input]);
 
-  const ready = Boolean(publicKey) && !submitting && input.trim().length > 0;
+  const size = measure(input);
+  const ready =
+    Boolean(publicKey) && !submitting && input.trim().length > 0 && !size.overHard;
   const activeTemplate = templates.find((t) => t.id === activeTemplateId) ?? null;
+
+  /** Live pipeline stages for the current run. */
+  const [progress, setProgress] = useState<Map<PipelineStage, ProgressEvent>>(new Map());
+  const queuedRef = useRef(false);
+
+  const runOnce = useCallback(
+    async (text: string): Promise<"done" | "busy"> => {
+      setProgress(new Map());
+      try {
+        const out = await runPipeline<ProcessNoteResult>({
+          text,
+          format,
+          instruction: instruction.trim() || undefined,
+          promptId: activeTemplateId || undefined,
+          onSealed: () => setStage("Sealed in the browser — sending"),
+          onProgress: (ev) =>
+            setProgress((prev) => {
+              const next = new Map(prev);
+              next.set(ev.stage, ev);
+              return next;
+            }),
+        });
+        setResult(out);
+        return "done";
+      } catch (e: unknown) {
+        if (e instanceof ComputeBusyError) {
+          setQueued(e.activity);
+          return "busy";
+        }
+        throw e;
+      }
+    },
+    [format, instruction, activeTemplateId],
+  );
 
   const submit = useCallback(async () => {
     if (!publicKey || !input.trim() || submitting) return;
+    if (measure(input).overHard) return;
 
+    const text = input;
     setSubmitting(true);
     setError(null);
     setResult(null);
     setCopied(false);
+    setQueued(null);
+    queuedRef.current = true;
+    setStage("Encrypting in browser…");
+
+    // The raw note leaves the visible workspace the moment it is sealed:
+    // a chart entry sitting on screen is itself a PDPA exposure.
+    setInput("");
 
     try {
-      setStage("Encrypting in browser…");
-      const payload = JSON.stringify({
-        text: input,
-        format,
-        instruction: instruction.trim() || undefined,
-        promptId: activeTemplateId || undefined,
-      });
-      const { envelope, aesKey } = await sealRequest(publicKey, payload);
-
-      // The raw note leaves the visible workspace the moment it is sealed:
-      // a chart entry sitting on screen is itself a PDPA exposure.
-      setInput("");
-      setStage("De-identifying locally, then formatting…");
-
-      const res = await fetch("/api/process-note", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(envelope),
-      });
-
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? `Request failed with status ${res.status}.`);
+      // The server refuses rather than queues, to protect the single slot — so
+      // the queue lives here, retrying while showing what the box is busy with.
+      for (let attempt = 0; queuedRef.current; attempt++) {
+        const outcome = await runOnce(text);
+        if (outcome === "done") break;
+        await new Promise((r) => setTimeout(r, 2000));
+        if (!queuedRef.current) break;
       }
-
-      setStage("Decrypting response…");
-      const sealed = (await res.json()) as CryptoEnvelope;
-      setResult(JSON.parse(await openResponse(aesKey, sealed)) as ProcessNoteResult);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unexpected failure.");
     } finally {
+      queuedRef.current = false;
       setSubmitting(false);
+      setQueued(null);
       setStage("");
     }
-  }, [publicKey, input, format, instruction, activeTemplateId, submitting]);
+  }, [publicKey, input, submitting, runOnce]);
+
+  const cancelQueue = useCallback(() => {
+    queuedRef.current = false;
+    setQueued(null);
+  }, []);
 
   const copyNote = useCallback(async () => {
     if (!result) return;
@@ -299,6 +353,13 @@ export default function AirlockPage() {
               tone={status?.database.online ? "ok" : "bad"}
             />
             <HealthPill icon={Lock} label={publicKey ? "E2EE armed" : "No key"} tone={publicKey ? "ok" : "bad"} />
+            <button
+              onClick={() => setHelpOpen(true)}
+              className="flex items-center gap-1.5 rounded-full border border-[var(--border)] px-2.5 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)]"
+            >
+              <HelpCircle className="size-3.5" />
+              How it works
+            </button>
           </div>
         </div>
       </header>
@@ -319,9 +380,7 @@ export default function AirlockPage() {
             <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">
               Raw narrative
             </h2>
-            <span className="font-mono text-[11px] text-[var(--muted)]">
-              {input.length.toLocaleString()} ch
-            </span>
+            <WordCounter size={size} />
           </div>
 
           {/* Scroll container: the textarea itself grows to fit the note. */}
@@ -340,6 +399,31 @@ export default function AirlockPage() {
               className="block min-h-[52vh] w-full resize-none overflow-hidden bg-transparent px-4 py-3 font-mono text-[13px] leading-relaxed outline-none placeholder:text-[var(--muted)]/60 disabled:opacity-50"
             />
           </div>
+
+          {(size.overSoft || size.overHard) && (
+            <div
+              className={cn(
+                "border-t px-4 py-2 text-[11px]",
+                size.overHard
+                  ? "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
+                  : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+              )}
+            >
+              {size.overHard ? (
+                <>
+                  Too long to de-identify safely. The local model can scan about{" "}
+                  {HARD_CHAR_LIMIT.toLocaleString()} characters reliably; past that it starts
+                  missing names. Split this into shorter sections.
+                </>
+              ) : (
+                <>
+                  Long note ({size.chars.toLocaleString()} characters). It will still run, but a
+                  4B local model scans shorter passages more reliably — check the redaction list
+                  carefully before filing.
+                </>
+              )}
+            </div>
+          )}
 
           {/* ---- specialty routine ---- */}
           <div className="flex items-center gap-2 border-t border-[var(--border)] px-4 py-2">
@@ -400,7 +484,7 @@ export default function AirlockPage() {
               value={instruction}
               onChange={(e) => setInstruction(e.target.value)}
               disabled={submitting}
-              placeholder="One-off steer — e.g. 以中文輸出, emphasise the renal course, keep it under 200 words"
+              placeholder="One-off steer — e.g. 以中文輸出, emphasise the renal course, keep the plan terse"
               className="w-full bg-transparent text-xs outline-none placeholder:text-[var(--muted)]/60"
             />
           </div>
@@ -442,9 +526,16 @@ export default function AirlockPage() {
             )}
 
             {submitting && !error && (
-              <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
-                <Loader2 className="size-4 animate-spin" />
-                {stage}
+              <div className="space-y-4">
+                {queued ? (
+                  <QueuedPanel activity={queued} live={status?.activity ?? null} onCancel={cancelQueue} />
+                ) : (
+                  <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
+                    <Loader2 className="size-4 animate-spin" />
+                    {stage}
+                  </div>
+                )}
+                <PipelineProgress progress={progress} paused={Boolean(queued)} />
               </div>
             )}
 
@@ -490,6 +581,7 @@ export default function AirlockPage() {
       {inspectorOpen && result && (
         <Inspector result={result} onClose={() => setInspectorOpen(false)} />
       )}
+      {helpOpen && <HowItWorks onClose={() => setHelpOpen(false)} />}
       {libraryOpen && (
         <PromptLibrary
           templates={templates}
@@ -497,6 +589,312 @@ export default function AirlockPage() {
           onChanged={loadTemplates}
         />
       )}
+    </div>
+  );
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Live feedback                                                       */
+/* ------------------------------------------------------------------ */
+
+function WordCounter({ size }: { size: ReturnType<typeof measure> }) {
+  const tone = size.overHard
+    ? "text-rose-600 dark:text-rose-400"
+    : size.overSoft
+      ? "text-amber-600 dark:text-amber-400"
+      : "text-[var(--muted)]";
+  const bar = size.overHard ? "bg-rose-500" : size.overSoft ? "bg-amber-500" : "bg-[var(--accent)]";
+
+  return (
+    <div className="flex items-center gap-2.5">
+      {/* Fill against the hard cap, so "how much room is left" is glanceable. */}
+      <div className="h-1 w-20 overflow-hidden rounded-full bg-[var(--border)]">
+        <div
+          className={cn("h-full transition-[width] duration-200", bar)}
+          style={{ width: `${Math.max(2, size.fraction * 100)}%` }}
+        />
+      </div>
+      <span className={cn("font-mono text-[11px] tabular-nums", tone)}>
+        {size.words.toLocaleString()} words · {size.chars.toLocaleString()} /{" "}
+        {HARD_CHAR_LIMIT.toLocaleString()} ch
+      </span>
+    </div>
+  );
+}
+
+const LOCUS_STYLE = {
+  browser: { icon: Monitor, tint: "text-sky-600 dark:text-sky-400", where: "your browser" },
+  mac: { icon: Cpu, tint: "text-emerald-600 dark:text-emerald-400", where: "Mac Mini" },
+  cloud: { icon: Cloud, tint: "text-violet-600 dark:text-violet-400", where: "Gemini" },
+} as const;
+
+/** The pipeline as it actually happens, one row per server stage. */
+function PipelineProgress({
+  progress,
+  paused,
+}: {
+  progress: Map<PipelineStage, ProgressEvent>;
+  paused: boolean;
+}) {
+  return (
+    <ol className="space-y-0.5">
+      {STAGE_ORDER.map((stage) => {
+        const ev = progress.get(stage);
+        const locus = LOCUS_STYLE[STAGE_LOCUS[stage]];
+        const Icon = locus.icon;
+        const state = ev?.status ?? (paused ? "waiting" : "pending");
+
+        return (
+          <li
+            key={stage}
+            className={cn(
+              "flex items-center gap-2.5 rounded px-2 py-1.5 text-xs transition-colors",
+              state === "running" && "bg-[var(--accent)]/8",
+              state === "pending" && "opacity-40",
+              state === "waiting" && "opacity-30",
+            )}
+          >
+            <span className="flex size-4 shrink-0 items-center justify-center">
+              {state === "running" ? (
+                <Loader2 className="size-3.5 animate-spin text-[var(--accent)]" />
+              ) : state === "done" ? (
+                <Check className="size-3.5 text-[var(--accent)]" />
+              ) : state === "failed" ? (
+                <AlertTriangle className="size-3.5 text-amber-500" />
+              ) : (
+                <Circle className="size-2 text-[var(--muted)]" />
+              )}
+            </span>
+
+            <Icon className={cn("size-3.5 shrink-0", locus.tint)} />
+            <span className="flex-1 truncate">{STAGE_TITLES[stage]}</span>
+
+            {ev?.detail && (
+              <span className="shrink-0 font-mono text-[10px] text-[var(--muted)]">
+                {ev.detail}
+              </span>
+            )}
+            {typeof ev?.ms === "number" && (
+              <span className="w-14 shrink-0 text-right font-mono text-[10px] tabular-nums text-[var(--muted)]">
+                {ev.ms < 1000 ? `${ev.ms} ms` : `${(ev.ms / 1000).toFixed(1)} s`}
+              </span>
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/**
+ * Shown when the single compute slot is taken. The server refuses rather than
+ * queues (that is what protects the box), so the wait is client-side — and the
+ * clinician gets to see exactly what the Mac Mini is busy with meanwhile.
+ */
+function QueuedPanel({
+  activity,
+  live,
+  onCancel,
+}: {
+  activity: BusyInfo;
+  live: BusyInfo | null;
+  onCancel: () => void;
+}) {
+  const current = live ?? activity;
+
+  // The server reports elapsed time only when polled. Re-anchor on each poll
+  // and advance locally in between, so the counter moves instead of freezing.
+  const [seconds, setSeconds] = useState(() => Math.floor(activity.totalElapsedMs / 1000));
+  const anchor = useRef({ ms: activity.totalElapsedMs, at: 0 });
+
+  useEffect(() => {
+    anchor.current = { ms: current.totalElapsedMs, at: Date.now() };
+  }, [current.totalElapsedMs, current.stage]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const { ms, at } = anchor.current;
+      if (at) setSeconds(Math.floor((ms + (Date.now() - at)) / 1000));
+    }, 500);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+      <div className="flex items-center gap-2">
+        <Loader2 className="size-4 animate-spin text-amber-600 dark:text-amber-400" />
+        <span className="text-sm font-medium text-amber-700 dark:text-amber-300">
+          Queued — the Mac Mini is running another note
+        </span>
+        <button
+          onClick={onCancel}
+          className="ml-auto flex items-center gap-1 rounded border border-amber-500/40 px-2 py-0.5 text-[11px] text-amber-700 hover:bg-amber-500/10 dark:text-amber-300"
+        >
+          <X className="size-3" />
+          Cancel
+        </button>
+      </div>
+
+      <div className="mt-2.5 flex items-center gap-2 text-xs text-amber-700/90 dark:text-amber-300/90">
+        <Cpu className="size-3.5 shrink-0" />
+        <span>{current.label}</span>
+        {current.detail && <span className="font-mono text-[10px]">({current.detail})</span>}
+        <span className="ml-auto font-mono tabular-nums">{seconds}s elapsed</span>
+      </div>
+
+      <p className="mt-2 text-[11px] text-amber-700/70 dark:text-amber-300/70">
+        16GB of unified memory runs one inference at a time. Your note is sealed and waiting —
+        it starts automatically the moment the slot frees.
+      </p>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Explainer                                                           */
+/* ------------------------------------------------------------------ */
+
+const STEPS: { n: string; where: keyof typeof LOCUS_STYLE; title: string; body: string }[] = [
+  {
+    n: "1",
+    where: "browser",
+    title: "Your browser locks the note",
+    body:
+      "Before anything is sent, the note is encrypted here in the page with a one-time key. That key is itself locked with the Mac Mini's public key. Cloudflare relays the traffic but can only see scrambled bytes — which matters, because Cloudflare decrypts ordinary HTTPS at its edge.",
+  },
+  {
+    n: "2",
+    where: "mac",
+    title: "The Mac Mini opens it — nothing else can",
+    body:
+      "Only your machine holds the private key, so only your machine can read the note. Everything from here until step 6 happens on hardware you physically own.",
+  },
+  {
+    n: "3",
+    where: "mac",
+    title: "Pattern rules strip the obvious identifiers",
+    body:
+      "Fixed rules catch national IDs, medical record numbers, phone numbers, and both ROC and Gregorian dates. Each one is swapped for a tag like [MRN_1], and the real value is kept only in memory.",
+  },
+  {
+    n: "4",
+    where: "mac",
+    title: "A local AI model catches the rest",
+    body:
+      "Names, wards, addresses and hospitals do not follow a pattern, so a language model running on your Mac reads the note and flags them. It never touches the internet. If it is not running, the whole request is refused rather than risking a leak.",
+  },
+  {
+    n: "5",
+    where: "cloud",
+    title: "Only the tagged version goes to Gemini",
+    body:
+      "Google receives a note where every person, place and number has become a tag. It writes the structured note around those tags. It cannot know who the patient is, because that information never left your desk.",
+  },
+  {
+    n: "6",
+    where: "mac",
+    title: "Your Mac puts the real names back",
+    body:
+      "The tags are swapped for the real identifiers here, locally, and only then is the finished note encrypted and sent back to your browser. The lookup table is erased immediately, and expires after ten minutes regardless.",
+  },
+  {
+    n: "7",
+    where: "mac",
+    title: "The audit log keeps the anonymous copy only",
+    body:
+      "The local database stores the tagged prompt and the tagged output — never a name, never a chart number. You keep a usable record without keeping a second copy of the patient's identity.",
+  },
+];
+
+function HowItWorks({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <aside className="relative flex h-full w-full max-w-xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+        <div className="flex items-start justify-between border-b border-[var(--border)] px-5 py-4">
+          <div>
+            <h3 className="text-sm font-semibold">How Project Airlock works</h3>
+            <p className="mt-0.5 text-[11px] text-[var(--muted)]">
+              An airlock joins two rooms that must never meet. Both doors never open at once.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-[var(--muted)] hover:text-[var(--foreground)]"
+            aria-label="Close explainer"
+          >
+            <ChevronRight className="size-5" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-auto px-5 py-4">
+          <div className="mb-5 flex items-center justify-between gap-2 rounded-lg border border-[var(--border)] bg-[var(--background)] p-3 text-[11px]">
+            {(["browser", "mac", "cloud"] as const).map((k, i) => {
+              const L = LOCUS_STYLE[k];
+              const Icon = L.icon;
+              return (
+                <div key={k} className="flex flex-1 items-center gap-2">
+                  {i > 0 && <span className="text-[var(--muted)]">→</span>}
+                  <Icon className={cn("size-4", L.tint)} />
+                  <div className="min-w-0">
+                    <div className="truncate font-medium">{L.where}</div>
+                    <div className="truncate text-[10px] text-[var(--muted)]">
+                      {k === "cloud" ? "sees tags only" : "sees real data"}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <ol className="space-y-4">
+            {STEPS.map((step) => {
+              const L = LOCUS_STYLE[step.where];
+              const Icon = L.icon;
+              return (
+                <li key={step.n} className="flex gap-3">
+                  <span
+                    className={cn(
+                      "flex size-7 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold",
+                      "border-[var(--border)] bg-[var(--background)]",
+                      L.tint,
+                    )}
+                  >
+                    {step.n}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[13px] font-medium">{step.title}</span>
+                      <Icon className={cn("size-3.5", L.tint)} />
+                    </div>
+                    <p className="mt-1 text-[12px] leading-relaxed text-[var(--muted)]">
+                      {step.body}
+                    </p>
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+
+          <div className="mt-6 rounded-lg border border-[var(--border)] bg-[var(--background)] p-3">
+            <h4 className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+              What this does not promise
+            </h4>
+            <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--muted)]">
+              The name-finding step is a prediction, not a guarantee — always open the{" "}
+              <strong className="text-[var(--foreground)]">redactions</strong> list and check what
+              was caught before filing a note. And the formatted note is written by a model: it can
+              drop or misplace a detail, so read it as a draft, not a record.
+            </p>
+          </div>
+        </div>
+
+        <div className="border-t border-[var(--border)] px-5 py-3 text-[11px] text-[var(--muted)]">
+          One note at a time — 16GB of unified memory runs a single model pass, so a second
+          request waits its turn rather than slowing yours down.
+        </div>
+      </aside>
     </div>
   );
 }

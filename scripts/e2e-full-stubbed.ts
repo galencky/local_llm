@@ -7,7 +7,7 @@
  *   GEMINI_API_KEY=stub GEMINI_BASE_URL=http://localhost:8899 npm run dev
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { sealRequest, openResponse, type CryptoEnvelope } from "../src/lib/crypto";
+import { runPipeline } from "../src/lib/pipeline-client";
 
 const base = "http://localhost:3000";
 
@@ -88,20 +88,12 @@ async function main() {
   await new Promise<void>((r) => geminiStub.listen(8899, r));
   console.log("stubs up: LM Studio :1234, Gemini :8899\n");
 
-  const { publicKey } = (await (await fetch(`${base}/api/keys`)).json()) as { publicKey: string };
-  const { envelope, aesKey } = await sealRequest(publicKey, JSON.stringify({ text: NOTE, format: "SOAP" }));
-
-  const res = await fetch(`${base}/api/process-note`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(envelope),
-  });
-  if (!res.ok) {
-    console.log("request failed:", res.status, JSON.stringify(await res.json()));
-    process.exit(1);
-  }
-
-  const decoded = JSON.parse(await openResponse(aesKey, (await res.json()) as CryptoEnvelope));
+  const decoded = await runPipeline<{
+    note: string;
+    deidentifiedInput: string;
+    redactions: { preview: string }[];
+    meta: { unresolvedTokens: string[]; auditLogId: string | null; degradedScrub: boolean };
+  }>({ baseUrl: base, text: NOTE, format: "SOAP" });
 
   console.log("--- what the cloud actually received ---");
   console.log(decoded.deidentifiedInput.split("\n").map((l: string) => "   " + l).join("\n"));

@@ -148,9 +148,11 @@ async function callLmStudio(
     body: JSON.stringify({
       model: process.env.LMSTUDIO_MODEL || "local-model",
       temperature: 0,
-      // Entity lists are short; cap generation so a looping model cannot pin
-      // the single compute slot for minutes.
-      max_tokens: 1536,
+      // A long shift note can carry 60+ entities. Too low a cap truncates the
+      // JSON mid-array, which fails closed and looks to the user like an
+      // unexplained 503 — so the cap is generous but still bounded, to stop a
+      // looping model pinning the single compute slot for minutes.
+      max_tokens: 6144,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: prompt },
@@ -258,8 +260,10 @@ export async function scrubWithLlm(
   } catch (err) {
     if (process.env.ALLOW_DEGRADED_SCRUB !== "true") {
       throw new LocalScrubUnavailableError(
-        "The local model did not return usable NER output; refusing to send " +
-          "unverified text to the cloud.",
+        "The local model did not return usable NER output, so the note cannot " +
+          "be cleared for cloud processing. This usually means the narrative " +
+          "is long enough that the entity list was cut off — try splitting it " +
+          "into shorter sections.",
         err,
       );
     }

@@ -1,10 +1,30 @@
 /**
- * Atomic single-slot compute lock.
+ * Atomic single-slot compute lock, plus a live read-out of what the slot is
+ * doing so other tabs can see why they are queued.
  *
- * The M4 / 16GB box runs one LM Studio inference at a time. Node's event loop
- * is single-threaded, so a synchronous test-and-set on a plain boolean IS
- * atomic: no `await` can interleave between the read and the write below.
+ * The M4 / 16GB box runs one inference at a time. Node's event loop is
+ * single-threaded, so a synchronous test-and-set on a plain boolean IS atomic:
+ * no `await` can interleave between the read and the write below.
  */
+
+export type PipelineStage =
+  | "decrypt"
+  | "regex"
+  | "ner"
+  | "cloud"
+  | "rehydrate"
+  | "audit"
+  | "seal";
+
+export const STAGE_LABELS: Record<PipelineStage, string> = {
+  decrypt: "Decrypting the sealed note",
+  regex: "Scrubbing Taiwan identifiers",
+  ner: "Local model scanning for names",
+  cloud: "Gemini formatting the note",
+  rehydrate: "Restoring identifiers",
+  audit: "Writing the audit row",
+  seal: "Encrypting the reply",
+};
 
 export interface LockHandle {
   readonly token: string;
@@ -16,6 +36,10 @@ const STALE_LOCK_MS = 5 * 60 * 1000;
 
 interface LockState {
   held: LockHandle | null;
+  stage: PipelineStage | null;
+  stageStartedAt: number;
+  /** Non-identifying description, e.g. "1,240 characters". Never note content. */
+  detail: string | null;
 }
 
 const globalForLock = globalThis as unknown as {
@@ -24,6 +48,9 @@ const globalForLock = globalThis as unknown as {
 
 const state: LockState = (globalForLock.__clinicalComputeLock ??= {
   held: null,
+  stage: null,
+  stageStartedAt: 0,
+  detail: null,
 });
 
 let counter = 0;
@@ -44,8 +71,27 @@ export function acquireLock(): LockHandle | null {
     acquiredAt: Date.now(),
   };
   state.held = handle;
+  state.stage = null;
+  state.stageStartedAt = Date.now();
+  state.detail = null;
   // --- end atomic region ---
   return handle;
+}
+
+/**
+ * Publish which stage the held slot is working on.
+ *
+ * @param detail short, non-identifying context for the UI. NEVER note content.
+ */
+export function setStage(
+  handle: LockHandle | null,
+  stage: PipelineStage,
+  detail?: string,
+): void {
+  if (!handle || state.held?.token !== handle.token) return;
+  state.stage = stage;
+  state.stageStartedAt = Date.now();
+  state.detail = detail ?? null;
 }
 
 /**
@@ -54,7 +100,11 @@ export function acquireLock(): LockHandle | null {
  */
 export function releaseLock(handle: LockHandle | null): void {
   if (!handle) return;
-  if (state.held?.token === handle.token) state.held = null;
+  if (state.held?.token === handle.token) {
+    state.held = null;
+    state.stage = null;
+    state.detail = null;
+  }
 }
 
 export function isLocked(): boolean {
@@ -66,4 +116,27 @@ export function isLocked(): boolean {
 export function lockHeldForMs(): number | null {
   const current = state.held;
   return current ? Date.now() - current.acquiredAt : null;
+}
+
+export interface Activity {
+  stage: PipelineStage | null;
+  label: string;
+  detail: string | null;
+  /** Time in the current stage. */
+  stageElapsedMs: number;
+  /** Time since the slot was taken. */
+  totalElapsedMs: number;
+}
+
+/** What the compute slot is doing right now, for queued clients to display. */
+export function currentActivity(): Activity | null {
+  const current = state.held;
+  if (!current || !isLocked()) return null;
+  return {
+    stage: state.stage,
+    label: state.stage ? STAGE_LABELS[state.stage] : "Starting",
+    detail: state.detail,
+    stageElapsedMs: Date.now() - state.stageStartedAt,
+    totalElapsedMs: Date.now() - current.acquiredAt,
+  };
 }

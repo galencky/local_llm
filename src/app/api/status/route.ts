@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { isLocked, lockHeldForMs } from "@/lib/concurrency";
+import { currentActivity, isLocked, lockHeldForMs } from "@/lib/concurrency";
 import { checkLmStudioHealth } from "@/lib/scrubber-llm";
 import { vaultCount, VAULT_TTL_MS } from "@/lib/memory-cache";
 import { geminiModel } from "@/lib/gemini";
@@ -28,6 +28,8 @@ export async function GET() {
       state: busy ? "busy" : "online",
       busy,
       lockHeldForMs: lockHeldForMs(),
+      /** What the compute slot is doing, so queued clients can show it live. */
+      activity: currentActivity(),
       lmStudio,
       database,
       gemini: {

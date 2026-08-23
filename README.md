@@ -100,6 +100,8 @@ npm run verify           # offline: crypto, scrubbers, re-hydration, lock
 npm run e2e              # against a running server: sealed round-trip
 npm run e2e:concurrency  # proves the 429 single-slot limit
 npm run e2e:routine      # same note with and without a specialty routine
+npm run e2e:system       # full acceptance run: routines, PHI guard, ward note,
+                         # audit invariant, input cap, streaming, 429
 npm run db:smoke         # audit database round-trip
 
 # whole pipeline with both externals stubbed (no Gemini key, no model needed):
@@ -115,7 +117,7 @@ Studio on port 11234.
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Local Postgres for the audit log |
-| `GEMINI_API_KEY` / `GEMINI_MODEL` | Cloud formatting layer |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | Cloud formatting layer. Free-tier keys are capped per model per day (20/day on `gemini-3.6-flash` at time of writing) — the UI reports quota exhaustion in plain language, and de-identification has already completed by then, so nothing identifying was sent. |
 | `LMSTUDIO_BASE_URL` / `LMSTUDIO_MODEL` / `LMSTUDIO_TIMEOUT_MS` | Local NER pass |
 | `ALLOW_DEGRADED_SCRUB` | `false` (default) aborts the request when the local NER pass is unavailable. Setting `true` permits regex-only scrubbing — it weakens de-identification and the UI shows a standing warning. |
 | `KEY_STORE_FILE` | Filename inside `./.keys/` for the RSA keypair |
@@ -134,6 +136,35 @@ Studio on port 11234.
 | `src/lib/gemini.ts` | Note formats and the placeholder-preserving system prompt |
 | `src/lib/db.ts` | Prisma singleton (`@prisma/adapter-pg`) |
 | `src/lib/prompts.ts` | Specialty routine CRUD + the guard that keeps PHI out of saved prompts |
+
+## Input budget
+
+The cap is a **safety** limit before it is a performance limit: the local NER
+pass runs on a ~4B model with a 34k context, and a note longer than it can
+attend to reliably starts losing names — a PHI leak, not a quality dip.
+
+| | |
+| --- | --- |
+| Comfortable | up to 6,000 characters — a full shift handover fits easily |
+| Soft warning | past 6,000, the UI warns and asks you to check the redaction list |
+| Hard refusal | past 20,000, the request is rejected client- and server-side |
+
+Both limits live in `src/lib/limits.ts` and are shared by the browser counter
+and the server, so the two can never disagree. The live counter reports words
+(Latin words plus CJK characters, since Chinese is unspaced) and characters
+against the cap.
+
+## Live progress and the queue
+
+`/api/process-note` streams Server-Sent Events, one per pipeline stage, so the
+clinician watches real work rather than a spinner. Only the final `result`
+event carries the sealed payload; progress events never contain note content.
+
+The server still refuses rather than queues — that is what protects the single
+compute slot. The queue is client-side: on a 429 the browser retries every two
+seconds while displaying what the Mac Mini is actually busy with, read live from
+`/api/status`. `src/lib/concurrency.ts` publishes the held slot's current stage
+for exactly this.
 
 ## Specialty routines
 

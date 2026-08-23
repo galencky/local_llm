@@ -16,7 +16,8 @@
     "postinstall": "prisma generate",
     "db:smoke": "tsx scripts/db-smoke.ts",
     "e2e:full": "tsx scripts/e2e-full-stubbed.ts",
-    "e2e:routine": "tsx scripts/e2e-routine.ts"
+    "e2e:routine": "tsx scripts/e2e-routine.ts",
+    "e2e:system": "tsx scripts/e2e-full-system.ts"
   },
   "dependencies": {
     "@google/genai": "^2.18.0",

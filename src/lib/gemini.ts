@@ -79,6 +79,49 @@ export interface NoteInstructions {
   adHoc?: string | null;
 }
 
+/** Google returns operational failures as a JSON blob; make them readable. */
+export class GeminiUnavailableError extends Error {
+  constructor(message: string, readonly kind: "quota" | "overloaded" | "model" | "auth") {
+    super(message);
+    this.name = "GeminiUnavailableError";
+  }
+}
+
+function translateGeminiError(err: unknown): never {
+  const raw = err instanceof Error ? err.message : String(err);
+
+  if (/RESOURCE_EXHAUSTED|exceeded your current quota|quotaValue/i.test(raw)) {
+    const retry = raw.match(/Please retry in ([\d.]+)s/)?.[1];
+    const perDay = raw.match(/"quotaValue":\s*"(\d+)"/)?.[1];
+    throw new GeminiUnavailableError(
+      `Gemini quota exhausted${perDay ? ` (${perDay} requests/day on this tier for ${geminiModel()})` : ""}.` +
+        (retry ? ` Retry in about ${Math.ceil(Number(retry))}s.` : "") +
+        " Your note was de-identified successfully — nothing was lost, and nothing identifying was sent. Switch GEMINI_MODEL or enable billing to raise the limit.",
+      "quota",
+    );
+  }
+  if (/UNAVAILABLE|high demand|overloaded/i.test(raw)) {
+    throw new GeminiUnavailableError(
+      `${geminiModel()} is busy right now. Try again in a moment, or set GEMINI_MODEL to another flash model.`,
+      "overloaded",
+    );
+  }
+  if (/NOT_FOUND|no longer available|is not found/i.test(raw)) {
+    const suggested = raw.match(/use models\/([\w.-]+)/)?.[1];
+    throw new GeminiUnavailableError(
+      `The model "${geminiModel()}" is not available on this key${suggested ? ` — Google suggests "${suggested}"` : ""}. Update GEMINI_MODEL in .env.`,
+      "model",
+    );
+  }
+  if (/API key not valid|PERMISSION_DENIED|UNAUTHENTICATED/i.test(raw)) {
+    throw new GeminiUnavailableError(
+      "Gemini rejected the API key. Check GEMINI_API_KEY in .env.",
+      "auth",
+    );
+  }
+  throw err instanceof Error ? err : new Error(raw);
+}
+
 export interface FormatNoteResult {
   text: string;
   model: string;
@@ -119,14 +162,19 @@ export async function formatClinicalNote(
     "\n--- END NARRATIVE ---",
   ].join("");
 
-  const response = await getClient().models.generateContent({
-    model,
-    contents: prompt,
-    config: {
-      systemInstruction: SYSTEM_INSTRUCTION,
-      temperature: 0.2,
-    },
-  });
+  let response;
+  try {
+    response = await getClient().models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+        temperature: 0.2,
+      },
+    });
+  } catch (err) {
+    translateGeminiError(err);
+  }
 
   const text = response.text?.trim();
   if (!text) {

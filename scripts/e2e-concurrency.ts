@@ -5,7 +5,7 @@
  *   npx tsx scripts/e2e-concurrency.ts
  */
 import { createServer } from "node:http";
-import { sealRequest } from "../src/lib/crypto";
+import { ComputeBusyError, runPipeline } from "../src/lib/pipeline-client";
 
 const base = "http://localhost:3000";
 
@@ -45,20 +45,15 @@ const NOTE = `病歷號 87654321，患者王小明，身分證 B234567890，
 2024/05/02 因發燒入院，主治醫師陳大文，8A病房。CRP 12.4 mg/dL。`;
 
 async function fire(n: number) {
-  const { publicKey } = (await (await fetch(`${base}/api/keys`)).json()) as {
-    publicKey: string;
-  };
-  const { envelope } = await sealRequest(
-    publicKey,
-    JSON.stringify({ text: NOTE, format: "SOAP" }),
-  );
-  const res = await fetch(`${base}/api/process-note`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(envelope),
-  });
-  const body = (await res.json()) as { error?: string; code?: string };
-  return { n, status: res.status, error: body.error, code: body.code };
+  try {
+    await runPipeline({ baseUrl: base, text: NOTE, format: "SOAP" });
+    return { n, status: 200, code: "OK", error: undefined as string | undefined };
+  } catch (e) {
+    if (e instanceof ComputeBusyError) {
+      return { n, status: 429, code: "COMPUTE_BUSY", error: e.message };
+    }
+    return { n, status: 500, code: "ERROR", error: (e as Error).message };
+  }
 }
 
 async function main() {

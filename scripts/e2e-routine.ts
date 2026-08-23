@@ -4,7 +4,7 @@
  *
  *   npx tsx scripts/e2e-routine.ts "<routine name>"
  */
-import { sealRequest, openResponse, type CryptoEnvelope } from "../src/lib/crypto";
+import { runPipeline } from "../src/lib/pipeline-client";
 
 const base = "http://localhost:3000";
 const wanted = process.argv[2] ?? "Nephrology ward round";
@@ -16,18 +16,12 @@ Cr 8.9 mg/dL，eGFR 5，K 5.8 mmol/L，Hb 9.4 g/dL，iPTH 412 pg/mL。
 予 calcium polystyrene sulfonate 5g PO TID。家屬林佳玲 0937-882-146。`;
 
 async function run(promptId?: string) {
-  const { publicKey } = (await (await fetch(`${base}/api/keys`)).json()) as { publicKey: string };
-  const { envelope, aesKey } = await sealRequest(
-    publicKey,
-    JSON.stringify({ text: NOTE, format: "PROGRESS_NOTE", promptId }),
-  );
-  const res = await fetch(`${base}/api/process-note`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(envelope),
+  return runPipeline<{ note: string; meta: Record<string, unknown> }>({
+    baseUrl: base,
+    text: NOTE,
+    format: "PROGRESS_NOTE",
+    promptId,
   });
-  if (!res.ok) throw new Error(JSON.stringify(await res.json()));
-  return JSON.parse(await openResponse(aesKey, (await res.json()) as CryptoEnvelope));
 }
 
 async function main() {
