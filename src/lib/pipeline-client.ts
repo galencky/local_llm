@@ -83,7 +83,11 @@ export interface RunOptions {
   /** Starting rung of the model ladder; the server falls back downward. */
   model?: string;
   onProgress?: (event: ProgressEvent) => void;
-  onSealed?: () => void;
+  /**
+   * Called with the exact bytes that are about to go on the wire, plus the
+   * plaintext they replace. Lets the UI show what an intermediary sees.
+   */
+  onSealed?: (sealed: { envelope: CryptoEnvelope; plaintext: string }) => void;
   signal?: AbortSignal;
   baseUrl?: string;
   /** Extra request headers — used by the test harness to carry a session cookie. */
@@ -105,17 +109,15 @@ export async function runPipeline<T>(opts: RunOptions): Promise<T> {
   if (!keyRes.ok) throw new PipelineError(`Key endpoint returned ${keyRes.status}.`);
   const { publicKey } = (await keyRes.json()) as { publicKey: string };
 
-  const { envelope, aesKey } = await sealRequest(
-    publicKey,
-    JSON.stringify({
-      text: opts.text,
-      format: opts.format,
-      instruction: opts.instruction || undefined,
-      promptId: opts.promptId || undefined,
-      model: opts.model || undefined,
-    }),
-  );
-  opts.onSealed?.();
+  const plaintext = JSON.stringify({
+    text: opts.text,
+    format: opts.format,
+    instruction: opts.instruction || undefined,
+    promptId: opts.promptId || undefined,
+    model: opts.model || undefined,
+  });
+  const { envelope, aesKey } = await sealRequest(publicKey, plaintext);
+  opts.onSealed?.({ envelope, plaintext });
 
   const res = await fetch(`${base}/api/process-note`, {
     method: "POST",

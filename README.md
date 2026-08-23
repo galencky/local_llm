@@ -144,6 +144,14 @@ Verified end to end through a live Cloudflare tunnel: the auth gate, the
 that could have failed silently — **Cloudflare does not buffer the progress
 stream**, so the stage list stays live over the tunnel.
 
+## Seeing it for yourself
+
+After any run, **Wire view** in the output panel shows the literal request body
+that crossed the internet, beside the plaintext it replaced: the RSA-wrapped AES
+key, the GCM nonce, the ciphertext decoded as text (gibberish, by design), the
+first 96 bytes as hex, and the whole POST body. Nothing extra is fetched to
+render it — those bytes are already in the browser.
+
 ## Proving it, rather than asserting it
 
 ```bash

@@ -24,6 +24,7 @@ import {
   Plus,
   ShieldCheck,
   Sparkles,
+  Radio,
   Trash2,
   Wand2,
   X,
@@ -38,6 +39,7 @@ import {
   type PipelineStage,
   type ProgressEvent,
 } from "@/lib/pipeline-client";
+import { base64ToBytes, type CryptoEnvelope } from "@/lib/crypto";
 import { HARD_CHAR_LIMIT, measure } from "@/lib/limits";
 import { cn } from "@/lib/utils";
 
@@ -316,6 +318,8 @@ export default function AirlockPage() {
 
   /** Live pipeline stages for the current run. */
   const [progress, setProgress] = useState<Map<PipelineStage, ProgressEvent>>(new Map());
+  const [wire, setWire] = useState<{ envelope: CryptoEnvelope; plaintext: string } | null>(null);
+  const [wireOpen, setWireOpen] = useState(false);
   const queuedRef = useRef(false);
 
   const runOnce = useCallback(
@@ -328,7 +332,10 @@ export default function AirlockPage() {
           instruction: instruction.trim() || undefined,
           promptId: activeTemplateId || undefined,
           model: chosenModel || undefined,
-          onSealed: () => setStage("Sealed in the browser — sending"),
+          onSealed: (sealed) => {
+            setWire(sealed);
+            setStage("Sealed in the browser — sending");
+          },
           onProgress: (ev) => {
             setProgress((prev) => {
               const next = new Map(prev);
@@ -645,6 +652,16 @@ export default function AirlockPage() {
               Structured note
             </h2>
             <div className="flex items-center gap-2">
+              {wire && (
+                <button
+                  onClick={() => setWireOpen(true)}
+                  title="See the exact bytes that crossed the internet"
+                  className="flex items-center gap-1.5 rounded border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] hover:text-[var(--foreground)]"
+                >
+                  <Radio className="size-3.5" />
+                  Wire view
+                </button>
+              )}
               {result && (
                 <button
                   onClick={() => setInspectorOpen(true)}
@@ -741,6 +758,7 @@ export default function AirlockPage() {
         <Inspector result={result} onClose={() => setInspectorOpen(false)} />
       )}
       {helpOpen && <HowItWorks onClose={() => setHelpOpen(false)} />}
+      {wireOpen && wire && <WireView wire={wire} onClose={() => setWireOpen(false)} />}
       {historyOpen && (
         <HistoryDrawer onClose={() => setHistoryOpen(false)} onReuse={(text) => {
           setInput(text);
@@ -1216,6 +1234,142 @@ function Panel({ title, body }: { title: string; body: string }) {
       <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[11px] leading-relaxed">
         {body}
       </pre>
+    </div>
+  );
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Wire view                                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The exact bytes that crossed the internet, beside the plaintext they
+ * replaced. This is what Cloudflare relays: an RSA-wrapped AES key, a nonce,
+ * and ciphertext. Everything shown here is already in the browser — nothing
+ * extra is fetched to render it.
+ */
+function WireView({
+  wire,
+  onClose,
+}: {
+  wire: { envelope: CryptoEnvelope; plaintext: string };
+  onClose: () => void;
+}) {
+  const { envelope, plaintext } = wire;
+  const body = JSON.stringify(envelope);
+
+  const keyBytes = base64ToBytes(envelope.encryptedKey ?? "");
+  const ivBytes = base64ToBytes(envelope.iv);
+  const dataBytes = base64ToBytes(envelope.encryptedData);
+
+  // Decoding ciphertext as UTF-8 is meaningless by design — that is the point.
+  const asText = new TextDecoder().decode(dataBytes).slice(0, 400);
+  const hex = [...dataBytes.slice(0, 96)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join(" ");
+
+  const note = (() => {
+    try {
+      return (JSON.parse(plaintext) as { text?: string }).text ?? plaintext;
+    } catch {
+      return plaintext;
+    }
+  })();
+
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <aside className="relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+        <div className="flex items-start justify-between border-b border-[var(--border)] px-4 py-3">
+          <div>
+            <h3 className="text-sm font-semibold">What Cloudflare sees</h3>
+            <p className="mt-0.5 text-[11px] text-[var(--muted)]">
+              The literal request body from your last run. Cloudflare terminates HTTPS at its
+              edge, so this — not your note — is what it relays.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-[var(--muted)] hover:text-[var(--foreground)]"
+            aria-label="Close wire view"
+          >
+            <ChevronRight className="size-5" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-auto p-4">
+          <div className="grid gap-3 md:grid-cols-2">
+            <div>
+              <h4 className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+                <Monitor className="size-3.5 text-sky-600 dark:text-sky-400" />
+                What you typed — stays in this browser
+              </h4>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded border border-sky-500/30 bg-sky-500/5 p-2.5 font-mono text-[11px] leading-relaxed">
+                {note}
+              </pre>
+            </div>
+            <div>
+              <h4 className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+                <Radio className="size-3.5 text-violet-600 dark:text-violet-400" />
+                What went on the wire
+              </h4>
+              <pre className="max-h-64 overflow-auto break-all whitespace-pre-wrap rounded border border-violet-500/30 bg-violet-500/5 p-2.5 font-mono text-[11px] leading-relaxed">
+                {asText}
+              </pre>
+            </div>
+          </div>
+
+          <div className="mt-4 grid grid-cols-3 gap-px overflow-hidden rounded border border-[var(--border)] bg-[var(--border)] text-center">
+            <Field2 label="Wrapped AES key" value={`${keyBytes.length} B`} sub="RSA-OAEP-2048" />
+            <Field2 label="Nonce (iv)" value={`${ivBytes.length} B`} sub="AES-GCM" />
+            <Field2 label="Ciphertext" value={`${dataBytes.length} B`} sub={`${note.length} chars in`} />
+          </div>
+
+          <h4 className="mt-4 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+            First 96 bytes, as hex
+          </h4>
+          <pre className="overflow-x-auto rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[10px] leading-relaxed">
+            {hex}
+          </pre>
+
+          <h4 className="mt-4 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+            The whole POST body
+          </h4>
+          <pre className="max-h-48 overflow-auto break-all whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[10px] leading-relaxed">
+            {body}
+          </pre>
+
+          <div className="mt-4 rounded-lg border border-[var(--border)] bg-[var(--background)] p-3">
+            <h4 className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+              Why this is unreadable
+            </h4>
+            <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--muted)]">
+              Your browser made a one-time AES-256 key, encrypted the note with it, then locked
+              that key with the Mac Mini&apos;s public key. Only the matching private key — which
+              never leaves your machine — can unlock it. Cloudflare relays the box without a way
+              to open it. Tampering fails too: AES-GCM authenticates the ciphertext, so a single
+              flipped bit is rejected rather than silently decrypted into something else.
+            </p>
+            <p className="mt-2 text-[12px] leading-relaxed text-[var(--muted)]">
+              One honest limit: the public key is served from{" "}
+              <code className="text-[var(--foreground)]">/api/keys</code> over this same tunnel. An
+              attacker who controlled the edge could substitute their own. This defeats passive
+              inspection and incidental logging — not an active edge adversary.
+            </p>
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function Field2({ label, value, sub }: { label: string; value: string; sub: string }) {
+  return (
+    <div className="bg-[var(--surface)] px-3 py-2.5">
+      <div className="font-mono text-sm">{value}</div>
+      <div className="text-[10px] uppercase tracking-wider text-[var(--muted)]">{label}</div>
+      <div className="mt-0.5 font-mono text-[9px] text-[var(--muted)]">{sub}</div>
     </div>
   );
 }
