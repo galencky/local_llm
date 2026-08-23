@@ -13,7 +13,10 @@ export default async function SignInPage({
 }) {
   const { from, error } = await searchParams;
   const session = await auth();
-  if (session?.user) redirect(from && from.startsWith("/") ? from : "/");
+  // Only bounce a signed-in user onward when nothing went wrong. Redirecting
+  // through an error swallowed it — a failed Google sign-in looked like it had
+  // silently logged you in as whoever the browser still had a session for.
+  if (session?.user && !error) redirect(from && from.startsWith("/") ? from : "/");
 
   const configured = allowlistConfigured();
   const googleReady = Boolean(process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET);
@@ -30,6 +33,16 @@ export default async function SignInPage({
         <p className="mt-5 text-sm text-[var(--muted)]">
           Clinical notes are processed on this machine. Sign in to continue.
         </p>
+
+        {error && session?.user && (
+          <div className="mt-4 rounded border border-[var(--border)] bg-[var(--background)] p-3 text-xs">
+            <p>
+              You are still signed in as{" "}
+              <strong>{session.user.name ?? session.user.email}</strong> from an earlier session.
+              That is why the app may have looked like it let you in anyway.
+            </p>
+          </div>
+        )}
 
         {error && (
           <div className="mt-4 flex gap-2 rounded border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-700 dark:text-rose-300">

@@ -32,10 +32,16 @@ export async function createTestSession(label = "harness"): Promise<TestSession>
     },
   });
 
+  // Auth.js derives the __Secure- prefix from AUTH_URL, so the harness must
+  // too — once AUTH_URL is the public HTTPS host, a plain-named cookie is a
+  // cookie Auth.js never reads, and every request comes back 401.
+  const secure = (process.env.AUTH_URL ?? "").startsWith("https://");
+  const name = secure ? "__Secure-authjs.session-token" : "authjs.session-token";
+
   return {
     userId: user.id,
     email,
-    cookie: { Cookie: `authjs.session-token=${sessionToken}` },
+    cookie: { Cookie: `${name}=${sessionToken}` },
   };
 }
 

@@ -59,8 +59,19 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       return isAllowed(profile?.email ?? user?.email);
     },
     session({ session, user }) {
-      if (session.user) session.user.id = user.id;
-      return session;
+      // Return only what the client needs. The adapter's session row carries
+      // `sessionToken`, and spreading it here would publish the session token
+      // in a JSON response readable by JavaScript — defeating the httpOnly
+      // cookie it is supposed to live in.
+      return {
+        expires: session.expires,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          image: user.image,
+        },
+      };
     },
   },
   trustHost: true,

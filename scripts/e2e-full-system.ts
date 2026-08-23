@@ -114,8 +114,10 @@ async function main() {
       body: JSON.stringify(body),
     });
 
-  const devEnabled = ((await api("/api/status")).body as { devLogin?: { enabled: boolean } })
-    .devLogin?.enabled;
+  const devCfg = ((await api("/api/status")).body as {
+    devLogin?: { enabled: boolean; allowsRemote: boolean };
+  }).devLogin;
+  const devEnabled = devCfg?.enabled;
 
   if (!devEnabled) {
     check("dev bypass disabled -> route is 404", (await devPost({ password: "llm" })).status === 404);
@@ -146,7 +148,11 @@ async function main() {
       req.on("error", reject);
       req.end(body);
     });
-    check("refused when the Host is not localhost", spoofed === 403, `got ${spoofed}`);
+    if (devCfg?.allowsRemote) {
+      check("remote allowed by config, so a foreign Host is accepted", spoofed === 200, `got ${spoofed}`);
+    } else {
+      check("refused when the Host is not localhost", spoofed === 403, `got ${spoofed}`);
+    }
 
     const ok = await devPost({ password: "llm" });
     check("correct password accepted", ok.status === 200);
@@ -180,7 +186,9 @@ async function main() {
   check("LM Studio online", status.lmStudio.online, JSON.stringify(status.lmStudio));
   check("audit database online", status.database.online);
   check("Gemini key configured", status.gemini.configured);
-  console.log(`       local: ${status.lmStudio.models[0]}   cloud: ${status.gemini.model}`);
+  console.log(
+    `       local: ${status.lmStudio?.models?.[0] ?? "(none reported)"}   cloud: ${status.gemini?.model}`,
+  );
 
   /* ---------------------------------------------------------------- */
   section("2. Specialty routines — CRUD against Postgres");

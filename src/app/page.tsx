@@ -500,14 +500,6 @@ export default function AirlockPage() {
         </div>
       )}
 
-      {status?.devLogin.enabled && (
-        <div className="border-b border-amber-500/30 bg-amber-500/10 px-5 py-2 text-xs text-amber-700 dark:text-amber-300">
-          Developer password sign-in is enabled
-          {status.devLogin.allowsRemote
-            ? " and reachable from the internet (DEV_LOGIN_ALLOW_REMOTE). Turn both off before this instance sees real patients."
-            : " on localhost. Turn it off before this instance sees real patients."}
-        </div>
-      )}
 
       {/* ---------------- workspace ---------------- */}
       <main className="mx-auto grid w-full max-w-[1600px] flex-1 grid-cols-1 gap-4 p-5 lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)]">
