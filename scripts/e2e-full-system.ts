@@ -8,6 +8,12 @@
  * on output + audit attribution), the PHI guard on saved prompts, the input
  * length cap, the streaming progress contract, the single-slot 429, and the
  * database's de-identification invariant.
+ *
+ * NON-DESTRUCTIVE. It creates its own users and removes only what it created;
+ * your notes and routines are left alone. Never add a TRUNCATE here — the
+ * leak scan deliberately covers every row in the table, including yours, and
+ * emptying it first would make that check meaningless as well as destroying
+ * real history.
  */
 import "dotenv/config";
 import { ComputeBusyError, PipelineError, runPipeline, STAGE_ORDER } from "../src/lib/pipeline-client";

@@ -424,6 +424,25 @@ row records which routine was in effect by name.
 telemetry. If you add logging to the pipeline route, log `deidentifiedInput` —
 never `plaintext`, never `noteText`, never `vault`.
 
+## Does rebuilding lose my data?
+
+No. `docker compose up -d --build --force-recreate` keeps everything — the
+database lives on the `airlock-db` named volume, which is independent of the
+container. Verified by writing a note and a routine, doing a full rebuild, and
+reading both back.
+
+Only two things destroy it:
+
+- `docker compose down -v` — the `-v` removes named volumes. Without it, `down`
+  is safe.
+- Docker Desktop → Troubleshoot → *Reset to factory defaults*.
+
+The nightly dump in `~/Documents/airlock-backups/` covers both.
+
+The other way to lose it is a `TRUNCATE` run by hand. The acceptance suite is
+deliberately non-destructive: it creates its own users and removes only what it
+created.
+
 ## Housekeeping notes
 
 - `npm run db:inspect` is the fastest way to satisfy yourself that the audit
