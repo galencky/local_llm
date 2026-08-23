@@ -1,0 +1,24 @@
+// Zero-Knowledge PHI Clinical Note Assistant — audit schema.
+//
+// HARD CONSTRAINT: this database stores DE-IDENTIFIED text only.
+// Raw PHI and the token->PII mapping never reach Postgres, disk, or logs.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model AuditLog {
+  id                 String   @id @default(uuid())
+  createdAt          DateTime @default(now())
+  deidentifiedInput  String   @db.Text
+  deidentifiedOutput String   @db.Text
+  modelUsed          String
+  processingTimeMs   Int
+
+  @@index([createdAt])
+}
