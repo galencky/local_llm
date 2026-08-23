@@ -1,7 +1,10 @@
 # The database
 
-Local PostgreSQL 17, in the `db` container, on the `airlock-db` volume. Bound to
-`127.0.0.1:5432` only — never to your network.
+Local PostgreSQL 17, in the `db` container, with its data **bind-mounted to the
+Mac's filesystem** at `$AIRLOCK_DATA_DIR/postgres` — not a Docker named volume,
+because a Docker Desktop major upgrade can reset the VM image those live in and
+did destroy this database once. Bound to `127.0.0.1:5432` only, never to your
+network.
 
 ## Where to find it
 
@@ -12,7 +15,8 @@ Local PostgreSQL 17, in the `db` container, on the `airlock-db` volume. Bound to
 | Inspect it, with a leak scan | `npm run db:inspect` |
 | Browse it visually | `npm run db:studio` |
 | Raw SQL | `docker compose exec db psql -U airlock -d clinical_notes` |
-| Nightly dumps | `~/Documents/airlock-backups/` (23:59, keeps 30 days) |
+| Data on disk | `$AIRLOCK_DATA_DIR/postgres` (default `~/Library/Application Support/ProjectAirlock`) |
+| Hourly dumps | `~/Documents/airlock-backups/` (:59 each hour, keeps 30 days) |
 
 ## Shape
 

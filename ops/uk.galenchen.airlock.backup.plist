@@ -11,10 +11,11 @@
     <string>/Users/galen/Desktop/local_llm/ops/backup-airlock.sh</string>
   </array>
 
-  <!-- 23:59 daily. If the Mac is asleep, launchd runs it at next wake. -->
+  <!-- Hourly at :59, plus the 23:59 daily run this replaces. A daily-only
+       window means up to 24h of loss; the dumps are a few KB each. If the Mac
+       is asleep, launchd runs it at next wake. -->
   <key>StartCalendarInterval</key>
   <dict>
-    <key>Hour</key><integer>23</integer>
     <key>Minute</key><integer>59</integer>
   </dict>
 

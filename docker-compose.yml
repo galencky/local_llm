@@ -20,8 +20,17 @@ services:
       POSTGRES_USER: airlock
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airlock_local}
       POSTGRES_DB: clinical_notes
+      # Keep the cluster in a subdirectory: initdb refuses a non-empty data
+      # directory, and a bind mount can carry stray host files.
+      PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
-      - airlock-db:/var/lib/postgresql/data
+      # Bind mount on the Mac's real filesystem, NOT a Docker named volume.
+      #
+      # Named volumes live inside Docker Desktop's VM disk image, and a Docker
+      # Desktop major upgrade can reset that image — which destroyed this
+      # database going from 28.x to 29.x. A bind mount lives on the host, so it
+      # survives Docker upgrades, factory resets, and uninstalling Docker.
+      - ${AIRLOCK_DATA_DIR:?set AIRLOCK_DATA_DIR in .env}/postgres:/var/lib/postgresql/data
     # Bound to loopback only. Published so host tooling — the test suite,
     # `prisma studio`, psql — works against the same database the app uses.
     # Never change this to a bare "5432:5432", which would listen on every
@@ -88,8 +97,9 @@ services:
       DEV_LOGIN_PASSWORD: ${DEV_LOGIN_PASSWORD:-llm}
       DEV_LOGIN_ALLOW_REMOTE: ${DEV_LOGIN_ALLOW_REMOTE:-false}
     volumes:
-      # The RSA identity must survive restarts, or every open tab breaks.
-      - airlock-keys:/app/.keys
+      # Also a bind mount: a regenerated keypair breaks decryption for every
+      # browser tab still holding the old public key.
+      - ${AIRLOCK_DATA_DIR:?set AIRLOCK_DATA_DIR in .env}/keys:/app/.keys
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -134,6 +144,3 @@ services:
         limits:
           memory: 128M
 
-volumes:
-  airlock-db:
-  airlock-keys:

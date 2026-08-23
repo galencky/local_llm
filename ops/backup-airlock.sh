@@ -1,5 +1,10 @@
 #!/bin/bash
-# Nightly Postgres dump for Project Airlock.
+# Hourly Postgres dump for Project Airlock.
+#
+# Hourly rather than daily because a 24-hour window is exactly what lost a day
+# of history once. Each dump is a few KB, so 30 days of hourly retention costs
+# single-digit megabytes. No de-duplication: session rows change on every
+# request, so consecutive dumps always differ anyway.
 #
 # The audit database holds de-identified text only, but it is still the record
 # of what this instance did — and a Docker volume is one `compose down -v` away

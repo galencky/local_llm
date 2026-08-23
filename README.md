@@ -226,8 +226,10 @@ Studio on port 11234.
 Machine picks it up, and prunes dumps older than 30 days. Files are `chmod 600`,
 the directory `700`.
 
-Installed as a launchd job that fires at **23:59 daily**; if the Mac is asleep,
-launchd runs it at next wake.
+Installed as a launchd job that fires **hourly at :59** — daily was tried first
+and a 24-hour window is precisely what lost a day of history. Each dump is a few
+KB, so 30 days of hourly retention costs single-digit megabytes. If the Mac is
+asleep, launchd runs it at next wake.
 
 ```bash
 cp ops/uk.galenchen.airlock.backup.plist ~/Library/LaunchAgents/
@@ -424,20 +426,26 @@ row records which routine was in effect by name.
 telemetry. If you add logging to the pipeline route, log `deidentifiedInput` —
 never `plaintext`, never `noteText`, never `vault`.
 
-## Does rebuilding lose my data?
+## Where the data lives, and why not in a Docker volume
 
-No. `docker compose up -d --build --force-recreate` keeps everything — the
-database lives on the `airlock-db` named volume, which is independent of the
-container. Verified by writing a note and a routine, doing a full rebuild, and
-reading both back.
+Postgres and the RSA keypair are **bind-mounted to the Mac's own filesystem**,
+under `AIRLOCK_DATA_DIR` (default
+`~/Library/Application Support/ProjectAirlock`). They are deliberately *not*
+Docker named volumes.
 
-Only two things destroy it:
+This is not a preference. Named volumes live inside Docker Desktop's VM disk
+image, and **a Docker Desktop major upgrade can reset that image** — going from
+28.x to 29.x destroyed this database, the routines, the sessions and the RSA
+keypair in one step, with no warning and nothing in `docker volume ls`
+afterwards. A bind mount survives Docker upgrades, factory resets, and
+uninstalling Docker altogether.
 
-- `docker compose down -v` — the `-v` removes named volumes. Without it, `down`
-  is safe.
-- Docker Desktop → Troubleshoot → *Reset to factory defaults*.
+Verified end to end: write a note and a routine through the site, quit Docker
+Desktop entirely, relaunch, and read both back — along with the same session
+and the *same* RSA `keyId`.
 
-The nightly dump in `~/Documents/airlock-backups/` covers both.
+What still destroys data: deleting `AIRLOCK_DATA_DIR` yourself. `docker compose
+down`, `down -v`, rebuilds and Docker upgrades no longer touch it.
 
 The other way to lose it is a `TRUNCATE` run by hand. The acceptance suite is
 deliberately non-destructive: it creates its own users and removes only what it
