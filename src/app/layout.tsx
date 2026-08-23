@@ -8,7 +8,7 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 export const metadata: Metadata = {
   title: "Project Airlock",
   description:
-    "Both doors never open at once. PDPA-compliant clinical note structuring with local de-identification and end-to-end encrypted transport.",
+    "A local AI strips patient identity before anything reaches the cloud. PDPA-compliant clinical note structuring with end-to-end encrypted transport.",
   applicationName: "Project Airlock",
   authors: [{ name: "Kuan-Yuan Chen" }, { name: "Claude Code" }],
   creator: "Kuan-Yuan Chen",

@@ -1,14 +1,13 @@
 # Project Airlock
 
-> *Both doors never open at once.*
+> *A local AI strips patient identity before the cloud.*
 
 Structures Taiwanese hospital narratives into formal notes (SOAP, discharge
 summary, hospital course, …) without any identifier leaving the Mac Mini.
 
-An airlock joins two environments that must never meet. Nothing passes through
-carrying what belongs to the other side: identifiers are stripped on the inner
-door before the outer one opens onto the cloud, and restored only after it
-shuts again.
+An airlock joins two environments that must never meet. A language model running
+on your own Mac reads each note and removes every name, ID, date and ward before
+the outer door opens onto the cloud — and puts them back only after it shuts.
 
 Created by **Kuan-Yuan Chen**. Built with **Claude Code**.
 
@@ -315,11 +314,21 @@ them zero quota, so they would only ever be a button that fails.
 | 3.5 Flash Lite, 3.1 Flash Lite | 500 each |
 | 2.5 Flash Lite | 20 |
 
-The selector bar on the page picks where a run **starts**. A rung greys out
-only once Google has actually refused it — availability is observed, never
-predicted — and the cooldown is honest about which kind of refusal it was: a
-per-day exhaustion is held until midnight US Pacific, not retried in 25 seconds
-because a `retryDelay` hint said so.
+The selector bar on the page picks where a run **starts**.
+
+**Availability is observed, never predicted.** Airlock cannot see your Google AI
+Studio dashboard — no API reports remaining quota — so a rung greys out only
+after Google has actually refused it. That observation is written to the
+`ModelCooldown` table, so a container restart does not forget which models are
+spent and burn a request per rung rediscovering it.
+
+The cooldown is honest about which kind of refusal it was: a per-day exhaustion
+is held until midnight US Pacific, not retried in 25 seconds because a
+`retryDelay` hint said so.
+
+The 2.5-era models are deliberately absent — Google returns NOT_FOUND for them
+on keys issued after their retirement, so listing them would only spend a
+request rediscovering that daily.
 
 When a rung is spent the request walks down from there rather than failing:
 

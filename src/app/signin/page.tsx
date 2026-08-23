@@ -28,7 +28,7 @@ export default async function SignInPage({
           <ShieldCheck className="size-5 translate-y-0.5 text-[var(--accent)]" />
           <span className="text-base font-semibold tracking-[0.18em]">PROJECT AIRLOCK</span>
         </div>
-        <p className="mt-1 text-[11px] text-[var(--muted)]">both doors never open at once</p>
+        <p className="mt-1 text-[11px] text-[var(--muted)]">a local AI strips patient identity before the cloud</p>
 
         <p className="mt-5 text-sm text-[var(--muted)]">
           Clinical notes are processed on this machine. Sign in to continue.

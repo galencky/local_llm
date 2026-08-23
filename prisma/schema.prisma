@@ -12,6 +12,22 @@ datasource db {
   provider = "postgresql"
 }
 
+/// Observed quota/availability state for a cloud model.
+///
+/// Airlock cannot see your Google AI Studio dashboard — no API reports
+/// remaining quota — so availability is learned only by being refused. Kept in
+/// Postgres rather than memory so a container restart does not forget which
+/// models are spent and burn a request re-discovering it.
+model ModelCooldown {
+  model     String   @id
+  until     DateTime
+  reason    String
+  daily     Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+
+  @@index([until])
+}
+
 /// A clinician. Identity comes from Google; Airlock stores only what OAuth
 /// returns. Sign-in is gated by an email allowlist (AUTH_ALLOWED_EMAILS) —
 /// without it, anyone with a Google account could reach a tunnelled instance.

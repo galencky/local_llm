@@ -422,7 +422,7 @@ export default function AirlockPage() {
               PROJECT AIRLOCK
             </span>
             <span className="hidden text-[11px] text-[var(--muted)] sm:inline">
-              both doors never open at once
+              a local AI strips patient identity before the cloud
             </span>
           </div>
 
@@ -1273,7 +1273,8 @@ function HowItWorks({ onClose }: { onClose: () => void }) {
           <div>
             <h3 className="text-sm font-semibold">How Project Airlock works</h3>
             <p className="mt-0.5 text-[11px] text-[var(--muted)]">
-              An airlock joins two rooms that must never meet. Both doors never open at once.
+              An airlock joins two rooms that must never meet. A model on this Mac removes every
+              identifier before the outer door opens.
             </p>
           </div>
           <button

@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
  */
 export async function GET() {
   return NextResponse.json(
-    { models: availability(), default: defaultModel() },
+    { models: await availability(), default: defaultModel() },
     { headers: { "Cache-Control": "no-store" } },
   );
 }

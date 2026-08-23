@@ -3,6 +3,7 @@ import { GoogleGenAI } from "@google/genai";
 import {
   chainFrom,
   defaultModel,
+  ensureCooldownsLoaded,
   isAvailable,
   markAvailable,
   markUnavailable,
@@ -195,6 +196,9 @@ export async function formatClinicalNote(
     deidentifiedText,
     "\n--- END NARRATIVE ---",
   ].join("");
+
+  // Persisted cooldowns must be loaded before we decide which rung to try.
+  await ensureCooldownsLoaded();
 
   const chain = geminiModelChain(startModel);
   const fallbacks: FallbackStep[] = [];
