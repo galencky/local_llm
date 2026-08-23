@@ -83,6 +83,10 @@ services:
       # internet via Cloudflare Tunnel.
       AUTH_ALLOWED_EMAILS: ${AUTH_ALLOWED_EMAILS:-}
       AUTH_TRUST_HOST: "true"
+      # Developer password bypass — off by default, localhost only.
+      DEV_LOGIN_ENABLED: ${DEV_LOGIN_ENABLED:-false}
+      DEV_LOGIN_PASSWORD: ${DEV_LOGIN_PASSWORD:-llm}
+      DEV_LOGIN_ALLOW_REMOTE: ${DEV_LOGIN_ALLOW_REMOTE:-false}
     volumes:
       # The RSA identity must survive restarts, or every open tab breaks.
       - airlock-keys:/app/.keys

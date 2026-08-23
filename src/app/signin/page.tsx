@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import { ShieldCheck, AlertTriangle } from "lucide-react";
 import { auth, signIn, allowlistConfigured } from "@/lib/auth";
+import { devLoginAllowsRemote, devLoginEnabled } from "@/lib/dev-login";
+import { DevLoginForm } from "./dev-login-form";
 
 export const dynamic = "force-dynamic";
 
@@ -74,6 +76,13 @@ export default async function SignInPage({
               Continue with Google
             </button>
           </form>
+        )}
+
+        {devLoginEnabled() && (
+          <DevLoginForm
+            from={from && from.startsWith("/") ? from : "/"}
+            remote={devLoginAllowsRemote()}
+          />
         )}
 
         <p className="mt-4 text-[10px] leading-relaxed text-[var(--muted)]">

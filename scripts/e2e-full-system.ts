@@ -14,6 +14,7 @@ import { ComputeBusyError, PipelineError, runPipeline, STAGE_ORDER } from "../sr
 import type { PipelineStage, ProgressEvent } from "../src/lib/pipeline-client";
 import { HARD_CHAR_LIMIT } from "../src/lib/limits";
 import { prisma } from "../src/lib/db";
+import { request as httpRequest } from "node:http";
 import { createTestSession, destroyTestUser, type TestSession } from "./test-session";
 
 const base = "http://localhost:3000";
@@ -104,6 +105,70 @@ async function main() {
     page.status === 307 && (page.headers.get("location") ?? "").includes("/signin"),
     `${page.status} ${page.headers.get("location")}`);
   check("/signin itself is public", (await fetch(`${base}/signin`)).status === 200);
+
+  section("0b. Developer bypass guards");
+  const devPost = (body: unknown, headers: Record<string, string> = {}) =>
+    fetch(`${base}/api/auth/dev-login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+
+  const devEnabled = ((await api("/api/status")).body as { devLogin?: { enabled: boolean } })
+    .devLogin?.enabled;
+
+  if (!devEnabled) {
+    check("dev bypass disabled -> route is 404", (await devPost({ password: "llm" })).status === 404);
+  } else {
+    check("wrong password rejected", (await devPost({ password: "nope" })).status === 401);
+    check("empty password rejected", (await devPost({ password: "" })).status === 401);
+    // fetch() silently drops a custom Host — it is a forbidden header — so the
+    // tunnel guard has to be exercised over a raw socket to mean anything.
+    const spoofed = await new Promise<number>((resolve, reject) => {
+      const body = JSON.stringify({ password: "llm" });
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: 3000,
+          path: "/api/auth/dev-login",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(body),
+            Host: "llm.galenchen.uk",
+          },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.on("error", reject);
+      req.end(body);
+    });
+    check("refused when the Host is not localhost", spoofed === 403, `got ${spoofed}`);
+
+    const ok = await devPost({ password: "llm" });
+    check("correct password accepted", ok.status === 200);
+    const setCookie = ok.headers.get("set-cookie") ?? "";
+    check("issues a session cookie", setCookie.includes("authjs.session-token"));
+    check("cookie is httpOnly", /httponly/i.test(setCookie));
+
+    const devCookie = setCookie.split(";")[0];
+    const who = await (
+      await fetch(`${base}/api/auth/session`, { headers: { Cookie: devCookie } })
+    ).json();
+    check("signs in as airlock_dev", who?.user?.name === "airlock_dev", JSON.stringify(who?.user));
+
+    // The bypass must be an ordinary session, not a privileged one.
+    const devHist = await (
+      await fetch(`${base}/api/history`, { headers: { Cookie: devCookie } })
+    ).json();
+    check(
+      "dev user sees only its own history",
+      Array.isArray(devHist.notes) && devHist.notes.every((n: { id: string }) => n.id !== undefined),
+    );
+  }
 
   /* ---------------------------------------------------------------- */
   section("1. Preflight — every dependency is real");

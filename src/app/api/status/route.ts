@@ -3,6 +3,7 @@ import { currentActivity, isLocked, lockHeldForMs } from "@/lib/concurrency";
 import { checkLmStudioHealth, lastKnownLmStudioHealth } from "@/lib/scrubber-llm";
 import { vaultCount, VAULT_TTL_MS } from "@/lib/memory-cache";
 import { geminiModel } from "@/lib/gemini";
+import { devLoginAllowsRemote, devLoginEnabled } from "@/lib/dev-login";
 import { prisma } from "@/lib/db";
 
 export const runtime = "nodejs";
@@ -42,6 +43,7 @@ export async function GET() {
       },
       vaults: { active: vaultCount(), ttlMs: VAULT_TTL_MS },
       degradedScrubAllowed: process.env.ALLOW_DEGRADED_SCRUB === "true",
+      devLogin: { enabled: devLoginEnabled(), allowsRemote: devLoginAllowsRemote() },
     },
     { headers: { "Cache-Control": "no-store" } },
   );

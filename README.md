@@ -124,16 +124,9 @@ npm run dev          # http://localhost:3000
 npm run build && npm start
 ```
 
-**5. Cloudflare Tunnel**
-
-```bash
-cloudflared tunnel create clinical-notes
-cloudflared tunnel route dns clinical-notes llm.galenchen.uk
-cloudflared tunnel --url http://localhost:3000 run clinical-notes
-```
-
-Put Cloudflare Access in front of the hostname. Nothing in this app
-authenticates the caller — the single-slot lock is a compute guard, not a door.
+**5. Publish it** — see [ops/PUBLISH.md](ops/PUBLISH.md) for the full Cloudflare
+Tunnel walkthrough, including the `AUTH_URL` and Google redirect-URI changes the
+public hostname requires.
 
 ## Verification
 
@@ -181,6 +174,35 @@ Studio on port 11234.
 | `src/lib/db.ts` | Prisma singleton (`@prisma/adapter-pg`) |
 | `src/lib/prompts.ts` | Specialty routine CRUD + the guard that keeps PHI out of saved prompts |
 
+## Nightly backups
+
+`ops/backup-airlock.sh` dumps the database with the container's own `pg_dump`
+(always the right version), gzips it into `~/Documents/airlock-backups/` so Time
+Machine picks it up, and prunes dumps older than 30 days. Files are `chmod 600`,
+the directory `700`.
+
+Installed as a launchd job that fires at **23:59 daily**; if the Mac is asleep,
+launchd runs it at next wake.
+
+```bash
+cp ops/uk.galenchen.airlock.backup.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/uk.galenchen.airlock.backup.plist
+bash ops/backup-airlock.sh          # run once by hand to check
+tail ~/Documents/airlock-backups/backup.log
+```
+
+Restoring is a plain `psql` load — verified end to end, all seven tables and
+their rows:
+
+```bash
+gunzip -c ~/Documents/airlock-backups/airlock_YYYY-MM-DD_HHMM.sql.gz \
+  | docker compose exec -T db psql -U airlock -d clinical_notes
+```
+
+This is the answer to "a Docker reset would nuke my data" — the volume is
+already durable across restarts and `compose down`, and the dump covers the one
+case that is not: `compose down -v` or a Docker factory reset.
+
 ## Sign-in
 
 Google sign-in via Auth.js, gating **everything** — `/` redirects anonymous
@@ -206,6 +228,21 @@ AUTH_ALLOWED_EMAILS="you@example.com,@yourhospital.org.tw"
 ```
 
 Airlock stores only what OAuth returns: name, email, avatar.
+
+### Developer bypass
+
+For working on the UI without Google, `DEV_LOGIN_ENABLED=true` adds a password
+form to `/signin` that signs you in as `airlock_dev`.
+
+It mints a **real** session row rather than threading a special case through the
+app, so ownership, history scoping and tenant isolation behave exactly as they
+do for a Google account — a bypass that takes a different code path is a bypass
+that hides bugs.
+
+Two guards, because `llm` on a public hostname is not authentication: it is off
+unless explicitly enabled, and it refuses any request whose `Host` is not
+localhost unless `DEV_LOGIN_ALLOW_REMOTE=true`. While enabled, a standing amber
+banner says so at the top of every page.
 
 ## Past notes
 

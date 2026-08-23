@@ -83,6 +83,7 @@ interface StatusPayload {
   gemini: { configured: boolean; model: string };
   vaults: { active: number; ttlMs: number };
   degradedScrubAllowed: boolean;
+  devLogin: { enabled: boolean; allowsRemote: boolean };
 }
 
 interface HistoryNote {
@@ -494,6 +495,15 @@ export default function AirlockPage() {
           {keyError
             ? `Encryption unavailable: ${keyError}`
             : "ALLOW_DEGRADED_SCRUB is enabled — notes may reach Gemini with regex-only de-identification."}
+        </div>
+      )}
+
+      {status?.devLogin.enabled && (
+        <div className="border-b border-amber-500/30 bg-amber-500/10 px-5 py-2 text-xs text-amber-700 dark:text-amber-300">
+          Developer password sign-in is enabled
+          {status.devLogin.allowsRemote
+            ? " and reachable from the internet (DEV_LOGIN_ALLOW_REMOTE). Turn both off before this instance sees real patients."
+            : " on localhost. Turn it off before this instance sees real patients."}
         </div>
       )}
 
