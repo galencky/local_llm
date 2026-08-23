@@ -181,6 +181,43 @@ Studio on port 11234.
 | `src/lib/db.ts` | Prisma singleton (`@prisma/adapter-pg`) |
 | `src/lib/prompts.ts` | Specialty routine CRUD + the guard that keeps PHI out of saved prompts |
 
+## Sign-in
+
+Google sign-in via Auth.js, gating **everything** — `/` redirects anonymous
+browsers to `/signin`, and every API route returns 401. Before this, anything
+that could reach the tunnel could submit clinical text.
+
+```bash
+# 1. Google Cloud Console → APIs & Services → Credentials → OAuth client ID
+#    Type: Web application. Authorised redirect URIs:
+#      http://localhost:3000/api/auth/callback/google
+#      https://llm.galenchen.uk/api/auth/callback/google
+# 2. Put the client id/secret in .env, plus:
+openssl rand -base64 32        # -> AUTH_SECRET
+```
+
+**`AUTH_ALLOWED_EMAILS` is mandatory and fails closed.** An unset or empty
+allowlist denies *everyone* rather than allowing everyone — without it, any
+Google account on earth could sign in to a tunnelled instance. Accepts
+addresses and whole domains:
+
+```
+AUTH_ALLOWED_EMAILS="you@example.com,@yourhospital.org.tw"
+```
+
+Airlock stores only what OAuth returns: name, email, avatar.
+
+## Past notes
+
+Each run is filed against the clinician who made it, and the **History** drawer
+recalls them — searchable, expandable, copyable, deletable.
+
+Everything in history is de-identified and permanently so. The token→PII map is
+destroyed when the request that created it ends, so history *cannot* show a
+real name; it is a record of what crossed to the cloud, not a second copy of
+the chart. One clinician can never see, reuse or delete another's notes or
+routines — the acceptance suite asserts this both ways.
+
 ## Input budget
 
 The cap is a **safety** limit before it is a performance limit: the local NER

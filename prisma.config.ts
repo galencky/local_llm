@@ -10,5 +10,8 @@ export default defineConfig({
   },
   datasource: {
     url: process.env["DATABASE_URL"],
+    // Scratch database used by `prisma migrate diff/dev` to compute a diff.
+    // Never holds application data.
+    shadowDatabaseUrl: process.env["SHADOW_DATABASE_URL"],
   },
 });

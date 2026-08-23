@@ -77,42 +77,52 @@ function normalise(input: PromptTemplateInput) {
 }
 
 /** Only one template may be the default; clear the others in the same transaction. */
-async function clearOtherDefaults(keepId: string | null): Promise<void> {
+async function clearOtherDefaults(userId: string, keepId: string | null): Promise<void> {
   await prisma.promptTemplate.updateMany({
-    where: { isDefault: true, ...(keepId ? { NOT: { id: keepId } } : {}) },
+    where: { isDefault: true, userId, ...(keepId ? { NOT: { id: keepId } } : {}) },
     data: { isDefault: false },
   });
 }
 
-export async function listTemplates() {
+/** A clinician's own routines plus any shared (ownerless) ones. */
+export async function listTemplates(userId: string) {
   return prisma.promptTemplate.findMany({
+    where: { OR: [{ userId }, { userId: null }] },
     orderBy: [{ isDefault: "desc" }, { specialty: "asc" }, { name: "asc" }],
   });
 }
 
-export async function createTemplate(input: PromptTemplateInput) {
+export async function createTemplate(userId: string, input: PromptTemplateInput) {
   const data = normalise(input);
   return prisma.$transaction(async (tx) => {
     if (data.isDefault) {
       await tx.promptTemplate.updateMany({
-        where: { isDefault: true },
+        where: { isDefault: true, userId },
         data: { isDefault: false },
       });
     }
-    return tx.promptTemplate.create({ data });
+    return tx.promptTemplate.create({ data: { ...data, userId } });
   });
 }
 
-export async function updateTemplate(id: string, input: PromptTemplateInput) {
+/** Scoped by owner: a clinician can only edit their own routines. */
+export async function updateTemplate(userId: string, id: string, input: PromptTemplateInput) {
   const data = normalise(input);
-  if (data.isDefault) await clearOtherDefaults(id);
-  return prisma.promptTemplate.update({ where: { id }, data });
-}
-
-export async function deleteTemplate(id: string) {
-  return prisma.promptTemplate.delete({ where: { id } });
-}
-
-export async function getTemplate(id: string) {
+  if (data.isDefault) await clearOtherDefaults(userId, id);
+  const { count } = await prisma.promptTemplate.updateMany({ where: { id, userId }, data });
+  if (count === 0) throw new PromptValidationError("That routine is not yours to edit.");
   return prisma.promptTemplate.findUnique({ where: { id } });
+}
+
+export async function deleteTemplate(userId: string, id: string) {
+  const { count } = await prisma.promptTemplate.deleteMany({ where: { id, userId } });
+  if (count === 0) throw new PromptValidationError("That routine is not yours to delete.");
+  return { ok: true };
+}
+
+/** Readable by the owner, or by anyone if it is a shared routine. */
+export async function getTemplate(userId: string, id: string) {
+  return prisma.promptTemplate.findFirst({
+    where: { id, OR: [{ userId }, { userId: null }] },
+  });
 }

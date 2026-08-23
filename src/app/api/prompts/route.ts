@@ -5,14 +5,27 @@ import {
   PromptValidationError,
   type PromptTemplateInput,
 } from "@/lib/prompts";
+import { auth } from "@/lib/auth";
+
+async function requireUser() {
+  const session = await auth();
+  return session?.user?.id ?? null;
+}
+
+const UNAUTHENTICATED = NextResponse.json(
+  { error: "Sign in required.", code: "UNAUTHENTICATED" },
+  { status: 401 },
+);
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const userId = await requireUser();
+  if (!userId) return UNAUTHENTICATED.clone();
   try {
     return NextResponse.json(
-      { templates: await listTemplates() },
+      { templates: await listTemplates(userId) },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
@@ -25,6 +38,9 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const userId = await requireUser();
+  if (!userId) return UNAUTHENTICATED.clone();
+
   let body: PromptTemplateInput;
   try {
     body = (await req.json()) as PromptTemplateInput;
@@ -33,7 +49,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    return NextResponse.json({ template: await createTemplate(body) }, { status: 201 });
+    return NextResponse.json({ template: await createTemplate(userId, body) }, { status: 201 });
   } catch (err) {
     if (err instanceof PromptValidationError) {
       return NextResponse.json({ error: err.message, detail: err.detail }, { status: 422 });

@@ -12,9 +12,68 @@ datasource db {
   provider = "postgresql"
 }
 
+/// A clinician. Identity comes from Google; Airlock stores only what OAuth
+/// returns. Sign-in is gated by an email allowlist (AUTH_ALLOWED_EMAILS) —
+/// without it, anyone with a Google account could reach a tunnelled instance.
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+
+  accounts  Account[]
+  sessions  Session[]
+  auditLogs AuditLog[]
+  templates PromptTemplate[]
+}
+
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@id([identifier, token])
+}
+
 model AuditLog {
   id                 String   @id @default(uuid())
   createdAt          DateTime @default(now())
+  /// Owner. Nullable so rows written before sign-in existed are retained
+  /// rather than silently deleted — they simply belong to nobody.
+  userId             String?
+  user               User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Note format (SOAP, DISCHARGE_SUMMARY, …), for filtering history.
+  noteFormat         String?
   deidentifiedInput  String   @db.Text
   deidentifiedOutput String   @db.Text
   modelUsed          String
@@ -24,6 +83,7 @@ model AuditLog {
   promptTemplateName String?
 
   @@index([createdAt])
+  @@index([userId, createdAt])
 }
 
 /// A reusable instruction block appended to the Gemini system prompt, so each
@@ -34,7 +94,10 @@ model AuditLog {
 /// belongs in a saved prompt.
 model PromptTemplate {
   id          String   @id @default(uuid())
-  name        String   @unique
+  /// Owner. Null means a shared routine visible to everyone on this instance.
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
   specialty   String?
   instruction String   @db.Text
   /// Optional note format this template defaults to (SOAP, DISCHARGE_SUMMARY…).
@@ -43,5 +106,8 @@ model PromptTemplate {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  /// Names are unique per owner, so two clinicians can each have a "Ward round".
+  @@unique([userId, name])
   @@index([specialty])
+  @@index([userId])
 }

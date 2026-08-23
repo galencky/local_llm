@@ -86,6 +86,8 @@ export interface RunOptions {
   onSealed?: () => void;
   signal?: AbortSignal;
   baseUrl?: string;
+  /** Extra request headers — used by the test harness to carry a session cookie. */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -97,7 +99,9 @@ export interface RunOptions {
 export async function runPipeline<T>(opts: RunOptions): Promise<T> {
   const base = opts.baseUrl ?? "";
 
-  const keyRes = await fetch(`${base}/api/keys`, { signal: opts.signal });
+  const extra = opts.headers ?? {};
+
+  const keyRes = await fetch(`${base}/api/keys`, { signal: opts.signal, headers: extra });
   if (!keyRes.ok) throw new PipelineError(`Key endpoint returned ${keyRes.status}.`);
   const { publicKey } = (await keyRes.json()) as { publicKey: string };
 
@@ -115,7 +119,7 @@ export async function runPipeline<T>(opts: RunOptions): Promise<T> {
 
   const res = await fetch(`${base}/api/process-note`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...extra },
     body: JSON.stringify(envelope),
     signal: opts.signal,
   });

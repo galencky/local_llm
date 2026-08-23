@@ -26,6 +26,7 @@ import {
 import { getTemplate } from "@/lib/prompts";
 import { HARD_CHAR_LIMIT, measure } from "@/lib/limits";
 import { prisma } from "@/lib/db";
+import { auth } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -94,6 +95,16 @@ function fail(lock: LockHandle | null, message: string, status: number, code?: s
 }
 
 export async function POST(req: NextRequest) {
+  // 0. Identity first: an unauthenticated caller must not even take the lock.
+  const session = await auth();
+  const userId = session?.user?.id;
+  if (!userId) {
+    return NextResponse.json(
+      { error: "Sign in required.", code: "UNAUTHENTICATED" },
+      { status: 401 },
+    );
+  }
+
   // 1. Single-slot compute lock. 16GB of unified memory holds one model run.
   const lock = acquireLock();
   if (!lock) {
@@ -233,7 +244,7 @@ export async function POST(req: NextRequest) {
         let template: { name: string; instruction: string } | null = null;
         if (promptId) {
           try {
-            const found = await getTemplate(promptId);
+            const found = await getTemplate(userId, promptId);
             if (found) {
               template = { name: found.name, instruction: found.instruction };
               if (!isNoteFormat(format) && isNoteFormat(found.format)) {
@@ -300,6 +311,8 @@ export async function POST(req: NextRequest) {
               modelUsed: gemini.model,
               processingTimeMs,
               promptTemplateName: template?.name ?? null,
+              noteFormat: resolvedFormat,
+              userId,
             },
             select: { id: true },
           });

@@ -14,6 +14,7 @@ import { ComputeBusyError, PipelineError, runPipeline, STAGE_ORDER } from "../sr
 import type { PipelineStage, ProgressEvent } from "../src/lib/pipeline-client";
 import { HARD_CHAR_LIMIT } from "../src/lib/limits";
 import { prisma } from "../src/lib/db";
+import { createTestSession, destroyTestUser, type TestSession } from "./test-session";
 
 const base = "http://localhost:3000";
 
@@ -66,15 +67,44 @@ interface RunResult {
   };
 }
 
-async function api(path: string, init?: RequestInit) {
+let sessionA: TestSession;
+let sessionB: TestSession;
+
+async function api(path: string, init?: RequestInit, as?: TestSession) {
+  const who = as ?? sessionA;
   const res = await fetch(`${base}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: { "Content-Type": "application/json", ...who.cookie, ...(init?.headers ?? {}) },
   });
   return { status: res.status, body: await res.json().catch(() => ({})) };
 }
 
 async function main() {
+  sessionA = await createTestSession("clinician-a");
+  sessionB = await createTestSession("clinician-b");
+
+  /* ---------------------------------------------------------------- */
+  section("0. Authentication gate");
+  for (const [path, init] of [
+    ["/api/status", undefined],
+    ["/api/history", undefined],
+    ["/api/prompts", undefined],
+    ["/api/models", undefined],
+    ["/api/process-note", { method: "POST", body: "{}" }],
+  ] as [string, RequestInit | undefined][]) {
+    const res = await fetch(`${base}${path}`, {
+      ...init,
+      headers: { "Content-Type": "application/json" },
+      redirect: "manual",
+    });
+    check(`${path} refuses an anonymous caller`, res.status === 401, `got ${res.status}`);
+  }
+  const page = await fetch(`${base}/`, { redirect: "manual" });
+  check("/ redirects anonymous browsers to sign-in",
+    page.status === 307 && (page.headers.get("location") ?? "").includes("/signin"),
+    `${page.status} ${page.headers.get("location")}`);
+  check("/signin itself is public", (await fetch(`${base}/signin`)).status === 200);
+
   /* ---------------------------------------------------------------- */
   section("1. Preflight — every dependency is real");
   const status = (await api("/api/status")).body as {
@@ -142,7 +172,7 @@ async function main() {
   /* ---------------------------------------------------------------- */
   section("4. Input cap — refuses what the local model cannot scan safely");
   try {
-    await runPipeline({ baseUrl: base, text: "患者".repeat(HARD_CHAR_LIMIT), format: "SOAP" });
+    await runPipeline({ baseUrl: base, text: "患者".repeat(HARD_CHAR_LIMIT), format: "SOAP", headers: sessionA.cookie });
     check("oversized note refused", false, "it was accepted");
   } catch (e) {
     check("oversized note refused", e instanceof PipelineError && e.code === "TOO_LONG", String(e));
@@ -155,6 +185,7 @@ async function main() {
     baseUrl: base,
     text: WARD_NOTE,
     format: "PROGRESS_NOTE",
+    headers: sessionA.cookie,
     onProgress: (e) => seen.push(e),
   });
 
@@ -208,6 +239,7 @@ async function main() {
     text: WARD_NOTE,
     format: "PROGRESS_NOTE",
     promptId: routine.id,
+    headers: sessionA.cookie,
   });
   check("routine reported in metadata", styled.meta.promptTemplateName === routine.name,
     String(styled.meta.promptTemplateName));
@@ -248,11 +280,44 @@ async function main() {
   console.log(`       scanned ${await prisma.auditLog.count()} audit rows for ${PII.length} identifiers`);
 
   /* ---------------------------------------------------------------- */
+  section("7b. History — per-user recall of de-identified notes");
+  const hist = (await api("/api/history")).body as { notes: { id: string; deidentifiedInput: string; noteFormat: string | null }[] };
+  check("clinician A sees their own notes", hist.notes.length >= 2, `${hist.notes.length}`);
+  check("history records the note format", hist.notes.every((n) => n.noteFormat !== null));
+  check(
+    "history is de-identified — no identifier in any row",
+    hist.notes.every((n) => PII.every((p) => !n.deidentifiedInput.includes(p))),
+  );
+
+  const searchHit = (await api("/api/history?q=ORIF")).body as { notes: unknown[] };
+  const searchMiss = (await api("/api/history?q=zzzznotpresent")).body as { notes: unknown[] };
+  check("search finds matching notes", searchHit.notes.length > 0);
+  check("search excludes non-matching notes", searchMiss.notes.length === 0);
+
+  section("7c. Tenant isolation");
+  const bHist = (await api("/api/history", undefined, sessionB)).body as { notes: unknown[] };
+  check("clinician B sees none of A's notes", bHist.notes.length === 0, `${bHist.notes.length}`);
+
+  const bPrompts = (await api("/api/prompts", undefined, sessionB)).body as { templates: { id: string }[] };
+  check("clinician B does not see A's routine", !bPrompts.templates.some((t) => t.id === routine.id));
+
+  const steal = await api(`/api/prompts/${routine.id}`, { method: "DELETE" }, sessionB);
+  check("clinician B cannot delete A's routine", steal.status === 403, `got ${steal.status}`);
+
+  const stillThere = (await api("/api/prompts")).body as { templates: { id: string }[] };
+  check("A's routine survived B's attempt", stillThere.templates.some((t) => t.id === routine.id));
+
+  const aNoteId = hist.notes[0].id;
+  const stealNote = await api(`/api/history?id=${aNoteId}`, { method: "DELETE" }, sessionB);
+  check("clinician B cannot delete A's note", stealNote.status === 404, `got ${stealNote.status}`);
+  check("A's note survived", (await prisma.auditLog.findUnique({ where: { id: aNoteId } })) !== null);
+
+  /* ---------------------------------------------------------------- */
   section("8. Single-slot limit under concurrent load");
   const burst = await Promise.all(
     [1, 2, 3].map(async (n) => {
       try {
-        await runPipeline({ baseUrl: base, text: WARD_NOTE, format: "SOAP" });
+        await runPipeline({ baseUrl: base, text: WARD_NOTE, format: "SOAP", headers: sessionA.cookie });
         return { n, busy: false };
       } catch (e) {
         return { n, busy: e instanceof ComputeBusyError, err: e instanceof Error ? e.message : "" };
@@ -271,6 +336,10 @@ async function main() {
   check("routine deleted → 200", del.status === 200);
   const finalList = ((await api("/api/prompts")).body as { templates: unknown[] }).templates.length;
   check("library back to its original size", finalList === before, `${finalList} vs ${before}`);
+
+  await destroyTestUser(sessionA.userId);
+  await destroyTestUser(sessionB.userId);
+  check("test users removed", (await prisma.user.count({ where: { email: { endsWith: "@airlock.test" } } })) === 0);
 
   console.log(
     failures === 0

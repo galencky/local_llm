@@ -13,8 +13,11 @@ import {
   Cpu,
   Database,
   Eye,
+  Clock,
   HelpCircle,
   Loader2,
+  LogOut,
+  RotateCcw,
   Lock,
   Monitor,
   Pencil,
@@ -80,6 +83,23 @@ interface StatusPayload {
   gemini: { configured: boolean; model: string };
   vaults: { active: number; ttlMs: number };
   degradedScrubAllowed: boolean;
+}
+
+interface HistoryNote {
+  id: string;
+  createdAt: string;
+  deidentifiedInput: string;
+  deidentifiedOutput: string;
+  modelUsed: string;
+  noteFormat: string | null;
+  promptTemplateName: string | null;
+  processingTimeMs: number;
+}
+
+interface SessionUser {
+  name?: string | null;
+  email?: string | null;
+  image?: string | null;
 }
 
 interface ModelAvailability {
@@ -151,6 +171,8 @@ export default function AirlockPage() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [user, setUser] = useState<SessionUser | null>(null);
   const [copied, setCopied] = useState(false);
   const [queued, setQueued] = useState<BusyInfo | null>(null);
   const [models, setModels] = useState<ModelAvailability[]>([]);
@@ -202,6 +224,24 @@ export default function AirlockPage() {
       cancelled = true;
     };
   }, [applyTemplates]);
+
+  /* --- who is signed in ------------------------------------------------ */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await fetch("/api/auth/session", { cache: "no-store" });
+        if (!r.ok || cancelled) return;
+        const d = (await r.json()) as { user?: SessionUser };
+        if (d?.user) setUser(d.user);
+      } catch {
+        /* header just shows nothing */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /* --- model ladder ---------------------------------------------------- */
   const loadModels = useCallback(async () => {
@@ -406,12 +446,45 @@ export default function AirlockPage() {
             />
             <HealthPill icon={Lock} label={publicKey ? "E2EE armed" : "No key"} tone={publicKey ? "ok" : "bad"} />
             <button
+              onClick={() => setHistoryOpen(true)}
+              className="flex items-center gap-1.5 rounded-full border border-[var(--border)] px-2.5 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)]"
+            >
+              <Clock className="size-3.5" />
+              History
+            </button>
+            <button
               onClick={() => setHelpOpen(true)}
               className="flex items-center gap-1.5 rounded-full border border-[var(--border)] px-2.5 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)]"
             >
               <HelpCircle className="size-3.5" />
               How it works
             </button>
+            {user && (
+              <button
+                onClick={() => {
+                  // Auth.js requires a POST with the CSRF token to sign out.
+                  void (async () => {
+                    const { csrfToken } = (await (await fetch("/api/auth/csrf")).json()) as {
+                      csrfToken: string;
+                    };
+                    const form = document.createElement("form");
+                    form.method = "POST";
+                    form.action = "/api/auth/signout";
+                    const field = document.createElement("input");
+                    field.name = "csrfToken";
+                    field.value = csrfToken;
+                    form.appendChild(field);
+                    document.body.appendChild(form);
+                    form.submit();
+                  })();
+                }}
+                title={user.email ?? undefined}
+                className="flex items-center gap-1.5 rounded-full border border-[var(--border)] px-2.5 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)]"
+              >
+                <LogOut className="size-3.5" />
+                {(user.name ?? user.email ?? "").split(" ")[0] || "Sign out"}
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -652,6 +725,12 @@ export default function AirlockPage() {
         <Inspector result={result} onClose={() => setInspectorOpen(false)} />
       )}
       {helpOpen && <HowItWorks onClose={() => setHelpOpen(false)} />}
+      {historyOpen && (
+        <HistoryDrawer onClose={() => setHistoryOpen(false)} onReuse={(text) => {
+          setInput(text);
+          setHistoryOpen(false);
+        }} />
+      )}
       {libraryOpen && (
         <PromptLibrary
           templates={templates}
@@ -909,6 +988,218 @@ function QueuedPanel({
         16GB of unified memory runs one inference at a time. Your note is sealed and waiting —
         it starts automatically the moment the slot frees.
       </p>
+    </div>
+  );
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Past notes                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Everything here is de-identified and permanently so: the token→PII map is
+ * destroyed when each note finishes, so history can never show a real name.
+ * It is a record of what crossed to the cloud, not a second copy of the chart.
+ */
+function HistoryDrawer({
+  onClose,
+  onReuse,
+}: {
+  onClose: () => void;
+  onReuse: (text: string) => void;
+}) {
+  const [notes, setNotes] = useState<HistoryNote[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const load = useCallback(async (q: string, after: string | null) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (q.trim()) params.set("q", q.trim());
+      if (after) params.set("cursor", after);
+      const r = await fetch(`/api/history?${params}`, { cache: "no-store" });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
+      const d = (await r.json()) as { notes: HistoryNote[]; nextCursor: string | null };
+      setNotes((prev) => (after ? [...prev, ...d.notes] : d.notes));
+      setCursor(d.nextCursor);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Could not load history.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const id = setTimeout(() => void load(query, null), query ? 300 : 0);
+    return () => clearTimeout(id);
+  }, [query, load]);
+
+  const remove = async (id: string) => {
+    await fetch(`/api/history?id=${id}`, { method: "DELETE" });
+    setNotes((prev) => prev.filter((n) => n.id !== id));
+  };
+
+  const copy = async (n: HistoryNote) => {
+    await navigator.clipboard.writeText(n.deidentifiedOutput);
+    setCopiedId(n.id);
+    setTimeout(() => setCopiedId(null), 1800);
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <aside className="relative flex h-full w-full max-w-2xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+        <div className="flex items-start justify-between border-b border-[var(--border)] px-4 py-3">
+          <div>
+            <h3 className="text-sm font-semibold">Past notes</h3>
+            <p className="mt-0.5 text-[11px] text-[var(--muted)]">
+              De-identified copies only — the mapping back to real names was destroyed when each
+              note finished.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-[var(--muted)] hover:text-[var(--foreground)]"
+            aria-label="Close history"
+          >
+            <ChevronRight className="size-5" />
+          </button>
+        </div>
+
+        <div className="border-b border-[var(--border)] px-4 py-2">
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search past notes (diagnoses, drugs, routines…)"
+            className="w-full bg-transparent text-xs outline-none placeholder:text-[var(--muted)]/60"
+          />
+        </div>
+
+        <div className="flex-1 overflow-auto">
+          {error && (
+            <div className="m-4 flex gap-2 rounded border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-700 dark:text-rose-300">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {!error && notes.length === 0 && !loading && (
+            <p className="px-4 py-6 text-sm text-[var(--muted)]">
+              {query ? "Nothing matches that search." : "No notes yet. Your first run will appear here."}
+            </p>
+          )}
+
+          <ul className="divide-y divide-[var(--border)]">
+            {notes.map((n) => {
+              const open = openId === n.id;
+              return (
+                <li key={n.id} className="px-4 py-2.5">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setOpenId(open ? null : n.id)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[11px] tabular-nums text-[var(--muted)]">
+                          {new Date(n.createdAt).toLocaleString(undefined, {
+                            month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+                          })}
+                        </span>
+                        {n.noteFormat && (
+                          <span className="rounded bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] text-[var(--accent)]">
+                            {n.noteFormat.replace(/_/g, " ").toLowerCase()}
+                          </span>
+                        )}
+                        {n.promptTemplateName && (
+                          <span className="truncate text-[10px] text-[var(--muted)]">
+                            {n.promptTemplateName}
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-0.5 line-clamp-1 font-mono text-[11px] text-[var(--muted)]">
+                        {n.deidentifiedInput.replace(/\s+/g, " ").slice(0, 110)}
+                      </p>
+                    </button>
+
+                    <button
+                      onClick={() => void copy(n)}
+                      className="rounded p-1 text-[var(--muted)] hover:text-[var(--foreground)]"
+                      aria-label="Copy de-identified note"
+                    >
+                      {copiedId === n.id ? (
+                        <CheckCheck className="size-3.5 text-[var(--accent)]" />
+                      ) : (
+                        <Copy className="size-3.5" />
+                      )}
+                    </button>
+                    <button
+                      onClick={() => onReuse(n.deidentifiedInput)}
+                      title="Load the de-identified text back into the editor"
+                      className="rounded p-1 text-[var(--muted)] hover:text-[var(--foreground)]"
+                      aria-label="Reuse"
+                    >
+                      <RotateCcw className="size-3.5" />
+                    </button>
+                    <button
+                      onClick={() => void remove(n.id)}
+                      className="rounded p-1 text-[var(--muted)] hover:text-rose-500"
+                      aria-label="Delete"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  </div>
+
+                  {open && (
+                    <div className="mt-2 space-y-2">
+                      <Panel title="Sent to the cloud" body={n.deidentifiedInput} />
+                      <Panel title="Returned by the cloud" body={n.deidentifiedOutput} />
+                      <p className="font-mono text-[10px] text-[var(--muted)]">
+                        {n.modelUsed} · {n.processingTimeMs} ms
+                      </p>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+
+          {loading && (
+            <div className="flex items-center gap-2 px-4 py-3 text-xs text-[var(--muted)]">
+              <Loader2 className="size-3.5 animate-spin" />
+              Loading…
+            </div>
+          )}
+
+          {cursor && !loading && (
+            <button
+              onClick={() => void load(query, cursor)}
+              className="m-4 rounded border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
+            >
+              Load older notes
+            </button>
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function Panel({ title, body }: { title: string; body: string }) {
+  return (
+    <div>
+      <h4 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+        {title}
+      </h4>
+      <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[11px] leading-relaxed">
+        {body}
+      </pre>
     </div>
   );
 }
