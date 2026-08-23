@@ -101,11 +101,20 @@ export interface RunOptions {
  * @throws {PipelineError} for any server-reported pipeline failure.
  */
 export async function runPipeline<T>(opts: RunOptions): Promise<T> {
-  const base = opts.baseUrl ?? "";
+  return attempt<T>(opts, false);
+}
 
+/**
+ * @param bustKeyCache re-fetch the public key past any cache. Used for the one
+ * automatic retry after the server reports it could not decrypt, which means
+ * the key we sealed with was stale rather than anything being broken.
+ */
+async function attempt<T>(opts: RunOptions, bustKeyCache: boolean): Promise<T> {
+  const base = opts.baseUrl ?? "";
   const extra = opts.headers ?? {};
 
-  const keyRes = await fetch(`${base}/api/keys`, { signal: opts.signal, headers: extra });
+  const keyUrl = bustKeyCache ? `${base}/api/keys?fresh=${Date.now()}` : `${base}/api/keys`;
+  const keyRes = await fetch(keyUrl, { signal: opts.signal, headers: extra, cache: "no-store" });
   if (!keyRes.ok) throw new PipelineError(`Key endpoint returned ${keyRes.status}.`);
   const { publicKey } = (await keyRes.json()) as { publicKey: string };
 
@@ -173,7 +182,14 @@ export async function runPipeline<T>(opts: RunOptions): Promise<T> {
     }
   }
 
-  if (failure) throw failure;
+  if (failure) {
+    // A stale public key is recoverable: fetch the current one and try again,
+    // once. Telling a clinician to reload mid-note is not a fix.
+    if (failure.code === "DECRYPT_FAILED" && !bustKeyCache) {
+      return attempt<T>(opts, true);
+    }
+    throw failure;
+  }
   if (!sealed) throw new PipelineError("The stream ended before the note was returned.");
 
   return JSON.parse(await openResponse(aesKey, sealed)) as T;

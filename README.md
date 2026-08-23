@@ -451,6 +451,26 @@ The other way to lose it is a `TRUNCATE` run by hand. The acceptance suite is
 deliberately non-destructive: it creates its own users and removes only what it
 created.
 
+## On a 1024×768 ward screen
+
+The interface is built for the monitor you actually have, not the one the
+screenshots were taken on. Below `xl` the status chips collapse to icons with
+their label in the tooltip, the strapline drops, and the model chips shed their
+reset countdown — a three-line "Mac Mini Online" pill costs more than the words
+are worth. Measured at 1024×768: header 44px (it was 85px), no horizontal
+overflow, and **Encrypt & structure** on screen without scrolling.
+
+## Stale tabs fix themselves
+
+Every build gets an id, exposed in `/api/status` and baked into the browser
+bundle. A tab left open across a deploy notices the mismatch on its next poll
+and reloads once. This is what a removed banner surviving on screen until a
+manual reload actually was — old JS, not old code.
+
+The pipeline is similarly forgiving about the RSA key: if the server reports it
+could not decrypt, the client re-fetches the public key past any cache and
+retries once, rather than telling a clinician to reload mid-note.
+
 ## Housekeeping notes
 
 - `npm run db:inspect` is the fastest way to satisfy yourself that the audit

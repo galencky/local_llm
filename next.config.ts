@@ -1,7 +1,14 @@
 import path from "node:path";
 import type { NextConfig } from "next";
 
+// One id per build, readable from both the server and the browser bundle.
+// A tab left open across a deploy can otherwise keep running old JS — which is
+// how a removed UI element survived on screen until a manual reload.
+const buildId = process.env.BUILD_ID || String(Date.now());
+
 const nextConfig: NextConfig = {
+  generateBuildId: () => buildId,
+  env: { NEXT_PUBLIC_BUILD_ID: buildId },
   // Pin the workspace root: a stray package-lock.json in a parent directory
   // otherwise makes Turbopack guess wrong.
   turbopack: { root: path.join(__dirname) },

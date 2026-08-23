@@ -43,6 +43,8 @@ export async function GET() {
       },
       vaults: { active: vaultCount(), ttlMs: VAULT_TTL_MS },
       degradedScrubAllowed: process.env.ALLOW_DEGRADED_SCRUB === "true",
+      /** Lets an open tab notice its own JS is from a previous build. */
+      buildId: process.env.NEXT_PUBLIC_BUILD_ID ?? "dev",
       devLogin: { enabled: devLoginEnabled(), allowsRemote: devLoginAllowsRemote() },
     },
     { headers: { "Cache-Control": "no-store" } },

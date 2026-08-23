@@ -87,6 +87,7 @@ interface StatusPayload {
   vaults: { active: number; ttlMs: number };
   degradedScrubAllowed: boolean;
   devLogin: { enabled: boolean; allowsRemote: boolean };
+  buildId: string;
 }
 
 interface HistoryNote {
@@ -288,7 +289,17 @@ export default function AirlockPage() {
       try {
         const r = await fetch("/api/status", { cache: "no-store" });
         const d = (await r.json()) as StatusPayload;
-        if (!cancelled) setStatus(d);
+        if (cancelled) return;
+
+        // This tab is running JS from an older build than the server is now
+        // serving. Reload once rather than showing a stale interface — a
+        // removed element lingering on screen is worse than a flicker.
+        const mine = process.env.NEXT_PUBLIC_BUILD_ID;
+        if (mine && d.buildId && d.buildId !== "dev" && d.buildId !== mine) {
+          window.location.reload();
+          return;
+        }
+        setStatus(d);
       } catch {
         if (!cancelled) setStatus(null);
       }
@@ -423,18 +434,20 @@ export default function AirlockPage() {
     <div className="flex min-h-full flex-col">
       {/* ---------------- header ---------------- */}
       <header className="sticky top-0 z-20 border-b border-[var(--border)] bg-[var(--surface)]/85 backdrop-blur">
-        <div className="mx-auto flex max-w-[1600px] items-center gap-4 px-5 py-3">
-          <div className="flex items-baseline gap-2.5">
-            <ShieldCheck className="size-5 translate-y-0.5 text-[var(--accent)]" />
-            <span className="text-base font-semibold tracking-[0.18em]">
+        <div className="mx-auto flex max-w-[1600px] items-center gap-2 px-3 py-2 sm:px-5">
+          <div className="flex shrink-0 items-baseline gap-2">
+            <ShieldCheck className="size-5 shrink-0 translate-y-0.5 text-[var(--accent)]" />
+            <span className="whitespace-nowrap text-sm font-semibold tracking-[0.14em] sm:text-base sm:tracking-[0.18em]">
               PROJECT AIRLOCK
             </span>
-            <span className="hidden text-[11px] text-[var(--muted)] sm:inline">
+            {/* The tagline is the first thing to go: on a 1024px ward screen the
+                status pills matter more than the strapline. */}
+            <span className="hidden whitespace-nowrap text-[11px] text-[var(--muted)] 2xl:inline">
               a local AI strips patient identity before the cloud
             </span>
           </div>
 
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex min-w-0 items-center gap-1.5">
             <HealthPill
               icon={Cpu}
               label={busy ? "Mac Mini Busy" : status ? "Mac Mini Online" : "Offline"}
@@ -445,7 +458,7 @@ export default function AirlockPage() {
               icon={Sparkles}
               label={
                 status?.lmStudio.online
-                  ? `LM Studio${status.lmStudio.busy ? " (working)" : ""} · ${status.lmStudio.models[0]?.slice(0, 20) ?? "loaded"}`
+                  ? `LM Studio${status.lmStudio.busy ? " (working)" : ""} · ${status.lmStudio.models[0] ?? "loaded"}`
                   : "LM Studio down"
               }
               tone={status?.lmStudio.online ? "ok" : "bad"}
@@ -461,24 +474,24 @@ export default function AirlockPage() {
               target="_blank"
               rel="noopener noreferrer"
               title="Read the source on GitHub"
-              className="flex items-center gap-1.5 rounded-full border border-[var(--border)] px-2.5 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)]"
+              className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] xl:px-2.5"
             >
               <GithubMark className="size-3.5" />
-              Source
+              <span className="hidden xl:inline">Source</span>
             </a>
             <button
               onClick={() => setHistoryOpen(true)}
-              className="flex items-center gap-1.5 rounded-full border border-[var(--border)] px-2.5 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)]"
+              className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] xl:px-2.5"
             >
               <Clock className="size-3.5" />
-              History
+              <span className="hidden xl:inline">History</span>
             </button>
             <button
               onClick={() => setHelpOpen(true)}
-              className="flex items-center gap-1.5 rounded-full border border-[var(--border)] px-2.5 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)]"
+              className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] xl:px-2.5"
             >
               <HelpCircle className="size-3.5" />
-              How it works
+              <span className="hidden xl:inline">How it works</span>
             </button>
             {user && (
               <button
@@ -500,10 +513,12 @@ export default function AirlockPage() {
                   })();
                 }}
                 title={user.email ?? undefined}
-                className="flex items-center gap-1.5 rounded-full border border-[var(--border)] px-2.5 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)]"
+                className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] xl:px-2.5"
               >
-                <LogOut className="size-3.5" />
-                {(user.name ?? user.email ?? "").split(" ")[0] || "Sign out"}
+                <LogOut className="size-3.5 shrink-0" />
+                <span className="hidden max-w-[8rem] truncate xl:inline">
+                  {(user.name ?? user.email ?? "").split(" ")[0] || "Sign out"}
+                </span>
               </button>
             )}
           </div>
@@ -520,7 +535,7 @@ export default function AirlockPage() {
 
 
       {/* ---------------- workspace ---------------- */}
-      <main className="mx-auto grid w-full max-w-[1600px] flex-1 grid-cols-1 gap-4 p-5 lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)]">
+      <main className="mx-auto grid w-full max-w-[1600px] flex-1 grid-cols-1 gap-3 p-3 sm:gap-4 sm:p-5 lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)]">
         {/* ---- input ---- */}
         <section className="flex min-h-[60vh] flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)] lg:min-h-0">
           <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2.5">
@@ -543,7 +558,7 @@ export default function AirlockPage() {
               placeholder={
                 "Paste or dictate the ward narrative here — names, IDs, dates and MRNs are stripped on this machine before anything reaches the cloud.\n\nCmd/Ctrl + Enter to run."
               }
-              className="block min-h-[52vh] w-full resize-none overflow-hidden bg-transparent px-4 py-3 font-mono text-[13px] leading-relaxed outline-none placeholder:text-[var(--muted)]/60 disabled:opacity-50"
+              className="block min-h-[26vh] w-full resize-none overflow-hidden bg-transparent px-4 py-3 font-mono text-[13px] leading-relaxed outline-none placeholder:text-[var(--muted)]/60 disabled:opacity-50 md:min-h-[36vh] xl:min-h-[46vh]"
             />
           </div>
 
@@ -573,7 +588,7 @@ export default function AirlockPage() {
           )}
 
           {/* ---- extra instruction for this note only ---- */}
-          <div className="border-t border-[var(--border)] px-4 py-2">
+          <div className="border-t border-[var(--border)] px-3 py-1.5 sm:px-4 sm:py-2">
             <label className="flex items-center gap-2">
               <Wand2 className="size-3.5 shrink-0 text-[var(--muted)]" />
               <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
@@ -590,7 +605,7 @@ export default function AirlockPage() {
           </div>
 
           {/* ---- saved specialty routine ---- */}
-          <div className="flex items-center gap-2 border-t border-[var(--border)] px-4 py-2">
+          <div className="flex items-center gap-2 border-t border-[var(--border)] px-3 py-1.5 sm:px-4 sm:py-2">
             <BookMarked className="size-3.5 shrink-0 text-[var(--muted)]" />
             <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
               Saved routine
@@ -624,7 +639,7 @@ export default function AirlockPage() {
             disabled={submitting}
           />
 
-          <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] px-4 py-3">
+          <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] px-3 py-2 sm:px-4 sm:py-3">
             <div className="flex flex-wrap gap-1">
               {FORMATS.map((f) => (
                 <button
@@ -757,7 +772,7 @@ export default function AirlockPage() {
         </section>
       </main>
 
-      <footer className="border-t border-[var(--border)] px-5 py-3 text-center text-[11px] text-[var(--muted)]">
+      <footer className="flex flex-wrap items-center justify-center gap-x-1.5 border-t border-[var(--border)] px-3 py-2 text-center text-[11px] text-[var(--muted)] sm:px-5 sm:py-3">
         <span className="tracking-[0.15em]">PROJECT AIRLOCK</span> · created by{" "}
         <span className="text-[var(--foreground)]">Kuan-Yuan Chen</span> · built with{" "}
         <span className="text-[var(--foreground)]">Claude Code</span> ·{" "}
@@ -830,11 +845,12 @@ function ModelBar({
   };
 
   return (
-    <div className="border-t border-[var(--border)] px-4 py-2.5">
+    <div className="border-t border-[var(--border)] px-3 py-2 sm:px-4 sm:py-2.5">
       <div className="mb-1.5 flex items-center gap-2">
         <Cloud className="size-3.5 text-[var(--muted)]" />
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
-          Cloud model — best first, falls back rightward
+        <span className="whitespace-nowrap text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+          <span className="xl:hidden">Cloud model</span>
+          <span className="hidden xl:inline">Cloud model — best first, falls back rightward</span>
         </span>
         {nextUp && nextUp.id !== chosen && (
           <span className="text-[10px] text-amber-600 dark:text-amber-400">
@@ -871,7 +887,9 @@ function ModelBar({
                 <span className="text-[9px] uppercase opacity-60">lite</span>
               )}
               {m.label}
-              {spent && <span className="no-underline opacity-80">· {resetHint(m)}</span>}
+              {spent && (
+                <span className="hidden no-underline opacity-80 xl:inline">· {resetHint(m)}</span>
+              )}
             </button>
           );
         })}
@@ -1879,6 +1897,11 @@ function NoteBody({ markdown }: { markdown: string }) {
 
 /* ------------------------------------------------------------------ */
 
+/**
+ * Status chip. Sized for a 1024x768 ward screen: the text never wraps, and
+ * below `xl` it collapses to the icon alone with the label kept in the
+ * tooltip — a three-line "Mac Mini Online" pill is worse than no label.
+ */
 function HealthPill({
   icon: Icon,
   label,
@@ -1897,14 +1920,15 @@ function HealthPill({
   } as const;
   return (
     <span
+      title={label}
       className={cn(
-        "hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] md:inline-flex",
+        "hidden shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-1 text-[11px] sm:inline-flex xl:px-2.5",
         tones[tone],
         pulse && "animate-pulse",
       )}
     >
-      <Icon className="size-3.5" />
-      {label}
+      <Icon className="size-3.5 shrink-0" />
+      <span className="hidden max-w-[13rem] truncate xl:inline">{label}</span>
     </span>
   );
 }
