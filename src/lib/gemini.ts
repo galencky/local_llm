@@ -69,7 +69,7 @@ function getClient(): GoogleGenAI {
 }
 
 export function geminiModel(): string {
-  return process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  return process.env.GEMINI_MODEL || "gemini-3.6-flash";
 }
 
 export interface FormatNoteResult {

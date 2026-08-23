@@ -263,9 +263,9 @@ export default function ClinicalNotePage() {
       )}
 
       {/* ---------------- workspace ---------------- */}
-      <main className="mx-auto grid w-full max-w-[1600px] flex-1 grid-cols-1 gap-4 p-5 lg:grid-cols-2">
+      <main className="mx-auto grid w-full max-w-[1600px] flex-1 grid-cols-1 gap-4 p-5 lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)]">
         {/* ---- input ---- */}
-        <section className="flex min-h-[60vh] flex-col rounded-lg border border-[var(--border)] bg-[var(--surface)]">
+        <section className="flex min-h-[45vh] flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)] lg:min-h-0">
           <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2.5">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">
               Raw narrative
@@ -333,7 +333,7 @@ export default function ClinicalNotePage() {
         </section>
 
         {/* ---- output ---- */}
-        <section className="flex min-h-[60vh] flex-col rounded-lg border border-[var(--border)] bg-[var(--surface)]">
+        <section className="flex min-h-[45vh] flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)] lg:min-h-0">
           <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2.5">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">
               Structured note
@@ -385,11 +385,7 @@ export default function ClinicalNotePage() {
               </p>
             )}
 
-            {result && (
-              <pre className="whitespace-pre-wrap font-mono text-[13px] leading-relaxed">
-                {result.note}
-              </pre>
-            )}
+            {result && <NoteBody markdown={result.note} />}
           </div>
 
           {result && (
@@ -422,6 +418,78 @@ export default function ClinicalNotePage() {
 }
 
 /* ------------------------------------------------------------------ */
+
+/**
+ * Minimal Markdown renderer for the note body: headings, bold runs, and blank
+ * lines. Deliberately not a full parser and never `dangerouslySetInnerHTML` —
+ * this text is model output being shown to a clinician, so it renders as React
+ * nodes with no path to injected markup. "Copy clean note" still copies the raw
+ * Markdown, which is what an EMR paste target wants.
+ */
+function inline(text: string, keyBase: string): React.ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) =>
+    part.startsWith("**") && part.endsWith("**") && part.length > 4 ? (
+      <strong key={`${keyBase}-${i}`} className="font-semibold text-[var(--foreground)]">
+        {part.slice(2, -2)}
+      </strong>
+    ) : (
+      <span key={`${keyBase}-${i}`}>{part}</span>
+    ),
+  );
+}
+
+function NoteBody({ markdown }: { markdown: string }) {
+  return (
+    <div className="font-mono text-[13px] leading-relaxed">
+      {markdown.split("\n").map((line, i) => {
+        const key = `l${i}`;
+        if (!line.trim()) return <div key={key} className="h-3" />;
+
+        const heading = line.match(/^(#{1,4})\s+(.*)$/);
+        if (heading) {
+          return (
+            <h3
+              key={key}
+              className="mt-3 mb-1 text-[13px] font-semibold tracking-wide text-[var(--foreground)]"
+            >
+              {inline(heading[2], key)}
+            </h3>
+          );
+        }
+
+        // A line that is nothing but a bold run is a section header (**S (Subjective)**).
+        if (/^\*\*[^*]+\*\*$/.test(line.trim())) {
+          return (
+            <h3
+              key={key}
+              className="mt-3 mb-1 border-b border-[var(--border)] pb-1 text-[13px] font-semibold tracking-wide"
+            >
+              {line.trim().slice(2, -2)}
+            </h3>
+          );
+        }
+
+        const listItem = line.match(/^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$/);
+        if (listItem) {
+          return (
+            <div key={key} className="flex gap-2 pl-1">
+              <span className="select-none text-[var(--muted)]">
+                {line.trim().split(/\s+/)[0]}
+              </span>
+              <span className="flex-1">{inline(listItem[2], key)}</span>
+            </div>
+          );
+        }
+
+        return (
+          <div key={key} className="whitespace-pre-wrap">
+            {inline(line, key)}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 function HealthPill({
   icon: Icon,
