@@ -725,12 +725,12 @@ export default function AirlockPage() {
                 onClick={() => void copyNote("identified")}
                 disabled={!result}
                 title="The finished note with the real names, MRN and dates put back. This is what goes in the chart."
-                className="flex items-center gap-1.5 rounded border border-[var(--accent)]/40 bg-[var(--accent)]/8 px-2 py-1 text-[11px] text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/15 disabled:text-[var(--faint)] disabled:hover:text-[var(--faint)]"
+                className="flex items-center gap-1.5 rounded border border-[var(--accent-solid)] bg-[var(--accent-solid)] px-2 py-1 text-[11px] text-[var(--on-accent)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:border-[var(--border)] disabled:bg-transparent disabled:text-[var(--faint)]"
               >
                 {copied === "identified" ? (
-                  <CheckCheck className="size-3.5" />
+                  <CheckCheck className="size-3.5 shrink-0" />
                 ) : (
-                  <Copy className="size-3.5" />
+                  <Copy className="size-3.5 shrink-0" />
                 )}
                 {copied === "identified" ? "Copied" : "Copy note · with names"}
               </button>

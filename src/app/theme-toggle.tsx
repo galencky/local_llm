@@ -72,8 +72,9 @@ export function ThemeToggle() {
             aria-pressed={active}
             className={cn(
               "rounded-full p-1 transition-colors",
+              // A green fill always carries white, here as everywhere else.
               active
-                ? "bg-[var(--accent)]/12 text-[var(--accent)]"
+                ? "bg-[var(--accent-solid)] text-[var(--on-accent)]"
                 : "text-[var(--muted)] hover:text-[var(--foreground)]",
             )}
           >
