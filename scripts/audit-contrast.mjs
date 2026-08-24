@@ -58,7 +58,11 @@ function audit() {
     const bold = parseInt(s.fontWeight, 10) >= 700;
     const need = (size >= 24 || (size >= 18.66 && bold)) ? 3 : 4.5;
     const ratio = cr(fg, bg);
-    const greenish = bg[1] > bg[0] + 12 && lum(bg) > 0.02 && lum(bg) < 0.5;
+    // A saturated teal/green FILL — the brand colour used as a surface. Not a
+    // neutral grey with a faint cast, and not the pale category tints in the
+    // redaction legend, which are a colour key rather than a button.
+    const chroma = Math.max(bg[0], bg[1], bg[2]) - Math.min(bg[0], bg[1], bg[2]);
+    const greenish = chroma > 25 && bg[1] > bg[0] + 20;
     out.push({
       txt: txt.slice(0, 34), ratio, need, pass: ratio >= need, size,
       fg: `rgb(${fg[0]},${fg[1]},${fg[2]})`, bg: `rgb(${bg[0]},${bg[1]},${bg[2]})`,

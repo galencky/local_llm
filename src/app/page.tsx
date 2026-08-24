@@ -1024,7 +1024,7 @@ function PipelineProgress({
             key={stage}
             className={cn(
               "flex items-center gap-2.5 rounded px-2 py-1.5 text-xs transition-colors",
-              state === "running" && "bg-[var(--accent)]/8",
+              state === "running" && "border-l-2 border-[var(--accent-solid)] bg-[var(--border)]/30",
               // Not opacity: dimming a row drags its text toward the panel it
               // sits on. Pending steps are stated in a quieter colour instead.
               (state === "pending" || state === "waiting") && "text-[var(--faint)]",
@@ -1252,7 +1252,7 @@ function HistoryDrawer({
                           })}
                         </span>
                         {n.noteFormat && (
-                          <span className="rounded bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] text-[var(--accent)]">
+                          <span className="rounded bg-[var(--accent-solid)] px-1.5 py-0.5 text-[10px] text-[var(--on-accent)]">
                             {n.noteFormat.replace(/_/g, " ").toLowerCase()}
                           </span>
                         )}
@@ -1629,21 +1629,19 @@ function PromptsDrawer({ onClose }: { onClose: () => void }) {
                 ))}
               </ul>
 
-              <div className="mt-5 rounded-lg border border-[var(--accent)]/30 bg-[var(--accent)]/5 p-3">
-                <h4 className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-[var(--accent)]">
+              <div className="mt-5 rounded-lg bg-[var(--accent-solid)] p-3 text-[var(--on-accent)]">
+                <h4 className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider">
                   <BookMarked className="size-3.5" />
                   Where you change things
                 </h4>
-                <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--muted)]">
+                <p className="mt-1.5 text-[12px] leading-relaxed">
                   Everything above is fixed. Your instructions go in a{" "}
-                  <strong className="text-[var(--foreground)]">saved routine</strong> — or the
-                  one-off box, for a single note. Both are appended <em>beneath</em> these rules,
-                  so a routine can shape the note without being able to override the parts that
-                  protect the patient.
+                  <strong className="font-semibold">saved routine</strong> — or the one-off box,
+                  for a single note. Both are appended <em>beneath</em> these rules, so a routine
+                  can shape the note without being able to override the parts that protect the
+                  patient.
                 </p>
-                <p className="mt-2 text-[12px] leading-relaxed text-[var(--muted)]">
-                  {cfg.customisation.why}
-                </p>
+                <p className="mt-2 text-[12px] leading-relaxed">{cfg.customisation.why}</p>
               </div>
             </>
           )}
@@ -1949,7 +1947,7 @@ function PromptLibrary({
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium">{t.name}</span>
                     {t.specialty && (
-                      <span className="rounded bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] text-[var(--accent)]">
+                      <span className="rounded bg-[var(--accent-solid)] px-1.5 py-0.5 text-[10px] text-[var(--on-accent)]">
                         {t.specialty}
                       </span>
                     )}
