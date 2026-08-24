@@ -503,11 +503,22 @@ four real faults, all invisible to a quick look:
 | | |
 | --- | --- |
 | Disabled controls | `opacity-40` put them at **1.8:1** — WCAG exempts inactive controls, but exempt is not the same as invisible |
-| **Encrypt & structure** in dark | white text on the light-teal dark accent, **2.57:1** — the accent now carries its own `--accent-contrast` |
+| **Encrypt & structure** in dark | white text on the light-teal dark accent, **2.57:1** |
 | Theme toggle, inactive states | 3.58:1 light / 4.12:1 dark |
 | **Create routine** when disabled | kept its teal fill under grey text, **1.73:1** |
 
-Result: **159 controls per theme, zero below AA.**
+Result: **157 controls per theme, zero below AA.**
+
+Solid buttons stay **white-on-green in both themes**. The fix for the dark-mode
+contrast failure was to darken the *fill* (`--accent-solid`), not to flip the
+label to dark text — a green button with dark text stops reading as the primary
+action. `--accent` remains the lighter tint used for accent *text* and borders.
+
+Long prompts and payloads no longer look truncated. Where a box must stay
+capped it uses `.scroll-visible`, which forces a visible scrollbar: macOS
+overlay scrollbars hide until you gesture, so a clipped box reads as missing
+content rather than scrollable content. In the Prompts drawer the cap was
+removed altogether — one scroll region beats a scroller nested in a scroller.
 
 Light mode was rebalanced rather than inverted: `--muted` darkened so secondary
 text clears 4.5:1 on white, panels given a faint elevation because a border

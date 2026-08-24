@@ -686,7 +686,7 @@ export default function AirlockPage() {
             <button
               onClick={() => void submit()}
               disabled={!ready}
-              className="ml-auto flex items-center gap-2 rounded bg-[var(--accent)] px-4 py-1.5 text-sm font-medium text-[var(--accent-contrast)] transition-opacity disabled:cursor-not-allowed disabled:border-[var(--border)] disabled:bg-[var(--border)]/40 disabled:text-[var(--faint)]"
+              className="ml-auto flex items-center gap-2 rounded bg-[var(--accent-solid)] px-4 py-1.5 text-sm font-medium text-[var(--on-accent)] transition-opacity disabled:cursor-not-allowed disabled:border-[var(--border)] disabled:bg-[var(--border)]/40 disabled:text-[var(--faint)]"
             >
               {submitting ? <Loader2 className="size-4 animate-spin" /> : <Lock className="size-4" />}
               {submitting ? "Processing" : "Encrypt & structure"}
@@ -750,7 +750,7 @@ export default function AirlockPage() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-auto px-4 py-3">
+          <div className="scroll-visible flex-1 overflow-auto px-4 py-3">
             {error && (
               <div className="flex gap-2 rounded border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-700 dark:text-rose-300">
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" />
@@ -1208,7 +1208,7 @@ function HistoryDrawer({
           />
         </div>
 
-        <div className="flex-1 overflow-auto">
+        <div className="scroll-visible flex-1 overflow-auto">
           {error && (
             <div className="m-4 flex gap-2 rounded border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-700 dark:text-rose-300">
               <AlertTriangle className="mt-0.5 size-4 shrink-0" />
@@ -1323,7 +1323,7 @@ function Panel({ title, body }: { title: string; body: string }) {
       <h4 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
         {title}
       </h4>
-      <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[11px] leading-relaxed">
+      <pre className="scroll-visible max-h-56 overflow-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[11px] leading-relaxed">
         {body}
       </pre>
     </div>
@@ -1390,14 +1390,14 @@ function WireView({
           </button>
         </div>
 
-        <div className="flex-1 overflow-auto p-4">
+        <div className="scroll-visible flex-1 overflow-auto p-4">
           <div className="grid gap-3 md:grid-cols-2">
             <div>
               <h4 className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
                 <Monitor className="size-3.5 text-sky-600 dark:text-sky-400" />
                 What you typed — stays in this browser
               </h4>
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded border border-sky-500/30 bg-sky-500/5 p-2.5 font-mono text-[11px] leading-relaxed">
+              <pre className="scroll-visible max-h-64 overflow-auto whitespace-pre-wrap rounded border border-sky-500/30 bg-sky-500/5 p-2.5 font-mono text-[11px] leading-relaxed">
                 {note}
               </pre>
             </div>
@@ -1406,7 +1406,7 @@ function WireView({
                 <Radio className="size-3.5 text-violet-600 dark:text-violet-400" />
                 What went on the wire
               </h4>
-              <pre className="max-h-64 overflow-auto break-all whitespace-pre-wrap rounded border border-violet-500/30 bg-violet-500/5 p-2.5 font-mono text-[11px] leading-relaxed">
+              <pre className="scroll-visible max-h-64 overflow-auto break-all whitespace-pre-wrap rounded border border-violet-500/30 bg-violet-500/5 p-2.5 font-mono text-[11px] leading-relaxed">
                 {asText}
               </pre>
             </div>
@@ -1421,14 +1421,14 @@ function WireView({
           <h4 className="mt-4 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
             First 96 bytes, as hex
           </h4>
-          <pre className="overflow-x-auto rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[10px] leading-relaxed">
+          <pre className="scroll-visible overflow-x-auto rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[10px] leading-relaxed">
             {hex}
           </pre>
 
           <h4 className="mt-4 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
             The whole POST body
           </h4>
-          <pre className="max-h-48 overflow-auto break-all whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[10px] leading-relaxed">
+          <pre className="scroll-visible max-h-48 overflow-auto break-all whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[10px] leading-relaxed">
             {body}
           </pre>
 
@@ -1556,7 +1556,7 @@ function PromptsDrawer({ onClose }: { onClose: () => void }) {
           ))}
         </div>
 
-        <div className="flex-1 overflow-auto p-4">
+        <div className="scroll-visible flex-1 overflow-auto p-4">
           {error && (
             <div className="flex gap-2 rounded border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-700 dark:text-rose-300">
               <AlertTriangle className="mt-0.5 size-4 shrink-0" />
@@ -1608,7 +1608,7 @@ function PromptsDrawer({ onClose }: { onClose: () => void }) {
                       />
                     </button>
                     {openFormat === f.format && (
-                      <pre className="mx-3 mb-3 max-h-56 overflow-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[11px] leading-relaxed">
+                      <pre className="mx-3 mb-3 whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[11px] leading-relaxed">
                         {f.instruction}
                       </pre>
                     )}
@@ -1678,7 +1678,7 @@ function PromptBlock({ title, body }: { title: string; body: string }) {
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <pre className="max-h-[26rem] overflow-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-3 font-mono text-[11px] leading-relaxed">
+      <pre className="whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-3 font-mono text-[11px] leading-relaxed">
         {body}
       </pre>
     </div>
@@ -1763,7 +1763,7 @@ function HowItWorks({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
-        <div className="flex-1 overflow-auto px-5 py-4">
+        <div className="scroll-visible flex-1 overflow-auto px-5 py-4">
           <div className="mb-5 flex items-center justify-between gap-2 rounded-lg border border-[var(--border)] bg-[var(--background)] p-3 text-[11px]">
             {(["browser", "mac", "cloud"] as const).map((k, i) => {
               const L = LOCUS_STYLE[k];
@@ -1922,7 +1922,7 @@ function PromptLibrary({
           </button>
         </div>
 
-        <div className="flex-1 overflow-auto">
+        <div className="scroll-visible flex-1 overflow-auto">
           <ul className="divide-y divide-[var(--border)] border-b border-[var(--border)]">
             {templates.length === 0 && (
               <li className="px-4 py-3 text-sm text-[var(--muted)]">
@@ -2054,7 +2054,7 @@ function PromptLibrary({
             <button
               onClick={() => void save()}
               disabled={saving || !draft.name.trim() || !draft.instruction.trim()}
-              className="flex items-center gap-2 rounded bg-[var(--accent)] px-4 py-1.5 text-sm font-medium text-[var(--accent-contrast)] transition-opacity disabled:cursor-not-allowed disabled:bg-[var(--border)]/40 disabled:text-[var(--faint)]"
+              className="flex items-center gap-2 rounded bg-[var(--accent-solid)] px-4 py-1.5 text-sm font-medium text-[var(--on-accent)] transition-opacity disabled:cursor-not-allowed disabled:bg-[var(--border)]/40 disabled:text-[var(--faint)]"
             >
               {saving && <Loader2 className="size-4 animate-spin" />}
               {editingId ? "Save changes" : "Create routine"}
@@ -2226,7 +2226,7 @@ function Inspector({ result, onClose }: { result: ProcessNoteResult; onClose: ()
           </button>
         </div>
 
-        <div className="flex-1 overflow-auto">
+        <div className="scroll-visible flex-1 overflow-auto">
           <div className="grid grid-cols-3 gap-px border-b border-[var(--border)] bg-[var(--border)] text-center">
             <Stat
               label="Regex hits"
@@ -2265,7 +2265,7 @@ function Inspector({ result, onClose }: { result: ProcessNoteResult; onClose: ()
             <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--muted)]">
               De-identified prompt sent to Gemini
             </h4>
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-3 font-mono text-[11px] leading-relaxed">
+            <pre className="scroll-visible max-h-80 overflow-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-3 font-mono text-[11px] leading-relaxed">
               {deidentifiedInput}
             </pre>
           </div>

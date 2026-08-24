@@ -31,7 +31,12 @@
   --muted: #4f5a65;
   --faint: #656f7a;
   --accent: #0a6a6a;
-  --accent-contrast: #ffffff;
+  /* Fill for solid buttons. Kept dark enough in BOTH themes that white label
+     text clears AA — the dark-theme accent (#2fb3ac) is a light teal, and
+     white on it measured 2.57:1. Changing the fill keeps every solid button
+     white-on-green, which is what reads as "primary action". */
+  --accent-solid: #0a6a6a;
+  --on-accent: #ffffff;
   --ring: rgb(10 106 106 / 0.35);
   --elevate: 0 1px 2px rgb(15 20 24 / 0.04), 0 1px 3px rgb(15 20 24 / 0.06);
 }
@@ -46,7 +51,8 @@
     --muted: #97a3b0;
     --faint: #8e9aa8;
     --accent: #2fb3ac;
-    --accent-contrast: #06211f;
+    --accent-solid: #12736d;
+    --on-accent: #ffffff;
     --ring: rgb(47 179 172 / 0.35);
     --elevate: none;
   }
@@ -60,7 +66,8 @@
   --muted: #97a3b0;
   --faint: #8e9aa8;
   --accent: #2fb3ac;
-  --accent-contrast: #06211f;
+  --accent-solid: #12736d;
+  --on-accent: #ffffff;
   --ring: rgb(47 179 172 / 0.35);
   --elevate: none;
 }
@@ -73,6 +80,7 @@
   --color-muted: var(--muted);
   --color-faint: var(--faint);
   --color-accent: var(--accent);
+  --color-accent-solid: var(--accent-solid);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -102,6 +110,29 @@ body {
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
+}
+
+/**
+ * A box that scrolls must LOOK like it scrolls. macOS overlay scrollbars stay
+ * hidden until a gesture, so a capped region reads as truncated content with
+ * no way to reach the rest.
+ */
+.scroll-visible {
+  scrollbar-width: thin;
+  scrollbar-color: var(--faint) transparent;
+  scrollbar-gutter: stable;
+}
+.scroll-visible::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.scroll-visible::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-visible::-webkit-scrollbar-thumb {
+  background: var(--faint);
+  border: 3px solid var(--surface);
+  border-radius: 999px;
 }
 
 /* Panels read as raised in light, flat in dark — a border alone is too weak on
