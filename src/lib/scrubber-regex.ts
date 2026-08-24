@@ -49,6 +49,43 @@ export const REGEX_RULES: readonly RegexRule[] = [
     pattern: /(?:\d{2,4})\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日/g,
   },
   {
+    // The CJK name printed beside a staff code in tabular EMR output. The local
+    // NER missed these: in a header row like "DOC4674E   劉展瑋   [Progress
+    // Note]" there is no sentence around the name to recognise it by.
+    // Deliberately anchored to the code so it cannot fire on clinical text.
+    //
+    // MUST run before the staff-code rule below, which would otherwise replace
+    // the very anchor this looks behind for.
+    category: "DOCTOR",
+    label: "Name beside a staff code",
+    pattern: /(?<=\bDOC\d{3,6}[A-Z]?\s{1,8})[\u4e00-\u9fff]{2,4}/gi,
+  },
+  {
+    // Staff/physician code as printed in EMR exports, e.g. "DOC4674E". These
+    // identify a named clinician as surely as the name does, and were reaching
+    // the cloud intact because they are neither 7-8 digits nor a word.
+    category: "DOCTOR",
+    label: "Staff code",
+    pattern: /\bDOC\d{3,6}[A-Z]?\b/gi,
+  },
+  {
+    // Ward-bed as printed by the EMR, e.g. "A092- 36", "A121- 6".
+    category: "WARD",
+    label: "Ward and bed",
+    pattern: /\b[A-Z]\d{2,3}-\s?\d{1,3}\b/g,
+  },
+  {
+    // Month/day with no year — overwhelmingly common in ward notes ("surgery
+    // on 1/21") and previously invisible, because the date rule above needs
+    // three components. Bounded to real months and days, and kept away from
+    // anything that reads as a dose or a ratio, since mangling "1/2 tab" is a
+    // patient-safety problem rather than a formatting one.
+    category: "DATE",
+    label: "Date (month/day, no year)",
+    pattern:
+      /(?<![\d/.])(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12]\d|3[01])(?![\d/])(?!\.\d)(?!\s*(?:tab|tabs|tablet|cap|caps|amp|vial|mg|ml|mL|%|units?)\b)/gi,
+  },
+  {
     // Hospital medical record number. Must run last — see note above.
     category: "MRN",
     label: "Medical record number",

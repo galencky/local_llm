@@ -420,6 +420,26 @@ row records which routine was in effect by name.
 | `docker-compose.yml` | app + Postgres + migrate, and an opt-in `tunnel` profile |
 | `Dockerfile` | Multi-stage build to a standalone Next server |
 
+## Known limits of the regex pass
+
+Rules added after real notes leaked through them, kept here because the list is
+the honest statement of what this layer does and does not catch:
+
+| Shape | Example | Why it was missed |
+| --- | --- | --- |
+| Staff code | `DOC4674E` | Neither 7-8 digits nor a word |
+| Name beside a staff code | `DOC4674E   劉展瑋` | In a tabular header there is no sentence for the NER to recognise a name by |
+| Ward-bed cell | `A092- 36` | Not the `8B病房` form the NER was shown |
+| Month/day, no year | `1/21`, `2/3-2/5` | The date rule needs three components |
+
+Month/day is deliberately bounded to real months and days and refuses anything
+that reads as a dose (`1/2 tab`, `1/2 vial`), because mangling a paediatric dose
+is a patient-safety problem rather than a formatting one. `152/94 mmHg` and
+`(L/R) 5+/6+` are unaffected.
+
+**This layer is still not a guarantee.** It catches shapes it has been taught.
+Read the redaction list before filing a note — that is what it is for.
+
 ## The rule that matters
 
 `TokenVault` contents must never be written to Postgres, a file, a log line, or

@@ -57,6 +57,18 @@ const CLINICAL = [
   "morphine 2mg", "9.2", "11,300", "4.6", "37.8",
 ];
 
+/**
+ * EMR-export shapes that reached the cloud intact in real use: a staff code and
+ * the physician name printed beside it, a ward-bed cell, and month/day dates
+ * with no year — the commonest date format in a ward note, and invisible to a
+ * rule that expects three components.
+ */
+const EMR_HEADER = `[病程紀錄內容] 2024/08/12 18:08:00  A092- 36  PNS   DOC4674E   劉展瑋   [Progress Note]
+Urgent surgery was done on 1/21. Follow-up MRI on 1/23. Re-do surgery on 2/2.
+Albumin and lasix since 2/3-2/5. BP 152/94 mmHg. Pupil (L/R) 5+/6+. Give 1/2 tab BID.`;
+const EMR_MUST_GO = ["劉展瑋", "DOC4674E", "A092- 36", "1/21", "1/23", "2/2", "2/3"];
+const EMR_MUST_STAY = ["152/94", "5+/6+", "1/2 tab", "PNS"];
+
 interface RunResult {
   note: string;
   deidentifiedInput: string;
@@ -366,6 +378,16 @@ async function main() {
   });
   check("NO audit row contains any identifier", leaked === 0, `${leaked} row(s) leaked`);
   console.log(`       scanned ${await prisma.auditLog.count()} audit rows for ${PII.length} identifiers`);
+
+  /* ---------------------------------------------------------------- */
+  section("6b. EMR-export shapes that leaked in real use");
+  {
+    const vault = new (await import("../src/lib/memory-cache")).TokenVault();
+    const { scrubWithRegex } = await import("../src/lib/scrubber-regex");
+    const out = scrubWithRegex(EMR_HEADER, vault).text;
+    for (const bad of EMR_MUST_GO) check(`redacted ${bad}`, !out.includes(bad));
+    for (const good of EMR_MUST_STAY) check(`preserved ${good}`, out.includes(good));
+  }
 
   /* ---------------------------------------------------------------- */
   section("7b. History — per-user recall of de-identified notes");
