@@ -183,7 +183,7 @@ export default function AirlockPage() {
   const [promptsOpen, setPromptsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [user, setUser] = useState<SessionUser | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"identified" | "deidentified" | null>(null);
   const [queued, setQueued] = useState<BusyInfo | null>(null);
   const [models, setModels] = useState<ModelAvailability[]>([]);
   const [chosenModel, setChosenModel] = useState<string>("");
@@ -383,7 +383,7 @@ export default function AirlockPage() {
     setSubmitting(true);
     setError(null);
     setResult(null);
-    setCopied(false);
+    setCopied(null);
     setQueued(null);
     queuedRef.current = true;
     setStage("Encrypting in browser…");
@@ -417,12 +417,24 @@ export default function AirlockPage() {
     setQueued(null);
   }, []);
 
-  const copyNote = useCallback(async () => {
-    if (!result) return;
-    await navigator.clipboard.writeText(result.note);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }, [result]);
+  /**
+   * Two copies, named for what they contain.
+   *
+   * "Clean" was ambiguous in the worst possible direction: a clinician could
+   * reasonably read it as "de-identified" and paste a note full of real names
+   * somewhere it should not go.
+   */
+  const copyNote = useCallback(
+    async (which: "identified" | "deidentified") => {
+      if (!result) return;
+      await navigator.clipboard.writeText(
+        which === "identified" ? result.note : result.deidentifiedOutput,
+      );
+      setCopied(which);
+      setTimeout(() => setCopied(null), 2000);
+    },
+    [result],
+  );
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -710,12 +722,30 @@ export default function AirlockPage() {
                 </button>
               )}
               <button
-                onClick={() => void copyNote()}
+                onClick={() => void copyNote("identified")}
                 disabled={!result}
+                title="The finished note with the real names, MRN and dates put back. This is what goes in the chart."
+                className="flex items-center gap-1.5 rounded border border-[var(--accent)]/40 bg-[var(--accent)]/8 px-2 py-1 text-[11px] text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/15 disabled:opacity-40"
+              >
+                {copied === "identified" ? (
+                  <CheckCheck className="size-3.5" />
+                ) : (
+                  <Copy className="size-3.5" />
+                )}
+                {copied === "identified" ? "Copied" : "Copy note · with names"}
+              </button>
+              <button
+                onClick={() => void copyNote("deidentified")}
+                disabled={!result}
+                title="The placeholder version — [PATIENT_1], [MRN_1] and so on. This is exactly what was sent to Gemini, and carries no identifiers."
                 className="flex items-center gap-1.5 rounded border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] disabled:opacity-40"
               >
-                {copied ? <CheckCheck className="size-3.5 text-[var(--accent)]" /> : <Copy className="size-3.5" />}
-                {copied ? "Copied" : "Copy clean note"}
+                {copied === "deidentified" ? (
+                  <CheckCheck className="size-3.5 text-[var(--accent)]" />
+                ) : (
+                  <Copy className="size-3.5" />
+                )}
+                {copied === "deidentified" ? "Copied" : "Copy de-identified"}
               </button>
             </div>
           </div>
@@ -889,7 +919,13 @@ function ModelBar({
               className={cn(
                 "flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed",
                 spent
-                  ? "border-[var(--border)] bg-[var(--border)]/40 text-[var(--muted)]/60 line-through"
+                  // Was muted/60 on border/40 with a strikethrough — in light
+                  // mode those two converge and the label vanished entirely.
+                  // Spent now reads as "off", not as "erased".
+                  // Solid tokens, not an alpha wash: a translucent fill over a
+                  // white surface is hard to reason about and was how these
+                  // ended up invisible in the first place.
+                  ? "border-[var(--border)] bg-[var(--background)] text-[var(--muted)]"
                   : isChosen
                     ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]"
                     : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
@@ -900,7 +936,7 @@ function ModelBar({
                 <span className="text-[9px] uppercase opacity-60">lite</span>
               )}
               {m.label}
-              {spent && <span className="no-underline opacity-80">· {resetHint(m)}</span>}
+              {spent && <span className="text-[var(--muted)]">· {resetHint(m)}</span>}
             </button>
           );
         })}

@@ -478,6 +478,22 @@ Two details that matter more than they look:
   `useSyncExternalStore`. That avoids both a hydration mismatch and a
   render-time `localStorage` read.
 
+Two light-mode bugs the toggle exposed, both worth naming:
+
+- Spent model chips were `text-[var(--muted)]/60` on `bg-[var(--border)]/40`
+  with a strikethrough. In light mode those two converge — the labels measured
+  **1:1**, i.e. the text was exactly the colour of its own background and
+  simply vanished. Spent now reads as "off", not "erased", and clears AA in
+  both themes (7.04:1 light, 7.08:1 dark). Translucent fills over a white
+  surface are also gone: solid tokens only, since an alpha wash is what made
+  this hard to see coming.
+- **"Copy clean note" was dangerously ambiguous.** In a de-identification tool
+  "clean" reads as "de-identified" — but it copied the *re-hydrated* note, full
+  of real names. It is now two buttons that say what they contain:
+  **Copy note · with names** (accent-coloured, for the chart) and
+  **Copy de-identified** (for anywhere else). Verified: the first contains real
+  identifiers and no placeholders, the second the reverse.
+
 Light mode was rebalanced rather than inverted: `--muted` darkened so secondary
 text clears 4.5:1 on white, panels given a faint elevation because a border
 alone is too weak on an off-white monitor, and a visible focus ring added.
