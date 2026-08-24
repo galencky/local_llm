@@ -494,27 +494,22 @@ Two light-mode bugs the toggle exposed, both worth naming:
   **Copy de-identified** (for anywhere else). Verified: the first contains real
   identifiers and no placeholders, the second the reverse.
 
-Every interactive control is checked in both themes by
-`npm run audit:contrast`, which walks the main page and all four drawers,
-resolves colours through a canvas (so `oklab`, alpha layers and `opacity` are
-composited exactly as rendered) and reports anything under WCAG AA. It found
-four real faults, all invisible to a quick look:
+`npm run audit:contrast` walks **every text node on every surface** — sign-in,
+the main page empty / typed / processing / with a result, and all six drawers —
+in both themes. It composites through alpha layers and `opacity` exactly as
+rendered, so nothing is judged by the class name alone.
 
-| | |
+Widening it from "controls" to "all text", and from resting states to
+in-flight ones, turned 0 known problems into **135**. They were three causes,
+not 135 bugs:
+
+| Cause | Effect |
 | --- | --- |
-| Disabled controls | `opacity-40` put them at **1.8:1** — WCAG exempts inactive controls, but exempt is not the same as invisible |
-| **Encrypt & structure** in dark | white text on the light-teal dark accent, **2.57:1** |
-| Theme toggle, inactive states | 3.58:1 light / 4.12:1 dark |
-| **Create routine** when disabled | kept its teal fill under grey text, **1.73:1** |
+| `opacity` used to dim things | Pending pipeline steps 2.59:1, model chips 2.21:1 while a note ran. Dimming drags text toward whatever it sits on — the same mistake that once made spent chips **1:1**, i.e. literally invisible. |
+| Tailwind `-600`/`-500` shades on white | Status pills 3.62:1, redaction tags 3.2:1. Fine in dark at `-400`; the light half needed `-700`. |
+| `animate-pulse` on the busy pill | The "Mac Mini Busy" label dipped to **2.14:1** mid-cycle — unreadable exactly when it matters. The icon pulses now, not the text. |
 
-Result: **157 controls per theme, zero below AA.**
-
-**Anything green carries white text, in both themes** — the primary button and
-every selected chip (note format, cloud model, prompt tab). Selected used to be
-a 10% accent tint under accent-coloured text, which was marginal at rest and
-fell to **2.16:1** once `disabled:opacity-50` applied during processing. Dimming
-a control with `opacity` drags its text toward its own background, so disabled
-states now name their colours instead.
+Result: **1,763 text nodes checked, zero below AA, in both themes.**
 
 Solid buttons stay white-on-green in both themes. The fix for the dark-mode
 contrast failure was to darken the *fill* (`--accent-solid`), not to flip the

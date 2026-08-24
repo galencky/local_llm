@@ -140,16 +140,16 @@ const FORMATS = [
 ] as const;
 
 const CATEGORY_TINT: Record<string, string> = {
-  TAIWAN_ID: "bg-rose-500/10 text-rose-600 dark:text-rose-400",
-  MRN: "bg-orange-500/10 text-orange-600 dark:text-orange-400",
-  PHONE: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  DATE: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
-  PATIENT: "bg-violet-500/10 text-violet-600 dark:text-violet-400",
-  RELATIVE: "bg-fuchsia-500/10 text-fuchsia-600 dark:text-fuchsia-400",
-  DOCTOR: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  WARD: "bg-teal-500/10 text-teal-600 dark:text-teal-400",
-  LOCATION: "bg-blue-500/10 text-blue-600 dark:text-blue-400",
-  ORG: "bg-slate-500/10 text-slate-600 dark:text-slate-400",
+  TAIWAN_ID: "bg-rose-500/10 text-rose-700 dark:text-rose-400",
+  MRN: "bg-orange-500/10 text-orange-700 dark:text-orange-400",
+  PHONE: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+  DATE: "bg-sky-500/10 text-sky-700 dark:text-sky-400",
+  PATIENT: "bg-violet-500/10 text-violet-700 dark:text-violet-400",
+  RELATIVE: "bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-400",
+  DOCTOR: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+  WARD: "bg-teal-500/10 text-teal-700 dark:text-teal-400",
+  LOCATION: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+  ORG: "bg-slate-500/10 text-slate-700 dark:text-slate-400",
 };
 
 /** The prompt library is optional — a dead audit DB must not break formatting. */
@@ -583,7 +583,7 @@ export default function AirlockPage() {
               placeholder={
                 "Paste or dictate the ward narrative here — names, IDs, dates and MRNs are stripped on this machine before anything reaches the cloud.\n\nCmd/Ctrl + Enter to run."
               }
-              className="block min-h-[26vh] w-full resize-none overflow-hidden bg-transparent px-4 py-3 font-mono text-[13px] leading-relaxed outline-none placeholder:text-[var(--muted)]/60 disabled:opacity-50 md:min-h-[36vh] xl:min-h-[46vh]"
+              className="block min-h-[26vh] w-full resize-none overflow-hidden bg-transparent px-4 py-3 font-mono text-[13px] leading-relaxed outline-none placeholder:text-[var(--muted)]/60 md:min-h-[36vh] xl:min-h-[46vh]"
             />
           </div>
 
@@ -785,7 +785,7 @@ export default function AirlockPage() {
           {result && (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-[var(--border)] px-4 py-2 font-mono text-[11px] text-[var(--muted)]">
               <span
-                className={cn(result.meta.modelFallbacks.length > 0 && "text-amber-500")}
+                className={cn(result.meta.modelFallbacks.length > 0 && "text-amber-700 dark:text-amber-400")}
                 title={
                   result.meta.modelFallbacks.length > 0
                     ? `Fell back from ${result.meta.modelFallbacks.map((f) => `${f.model} (${f.reason})`).join(", ")}`
@@ -803,10 +803,10 @@ export default function AirlockPage() {
               {result.meta.auditLogId ? (
                 <span>audit {result.meta.auditLogId.slice(0, 8)}</span>
               ) : (
-                <span className="text-amber-500">audit write failed</span>
+                <span className="text-amber-700 dark:text-amber-400">audit write failed</span>
               )}
               {result.meta.unresolvedTokens.length > 0 && (
-                <span className="text-amber-500">
+                <span className="text-amber-700 dark:text-amber-400">
                   {result.meta.unresolvedTokens.length} token(s) unresolved — verify before filing
                 </span>
               )}
@@ -896,7 +896,7 @@ function ModelBar({
           Cloud model — best first, falls back rightward
         </span>
         {nextUp && nextUp.id !== chosen && (
-          <span className="text-[10px] text-amber-600 dark:text-amber-400">
+          <span className="text-[10px] text-amber-700 dark:text-amber-400">
             starts on {nextUp.label}
           </span>
         )}
@@ -929,7 +929,7 @@ function ModelBar({
                   : isChosen
                     ? "border-[var(--accent-solid)] bg-[var(--accent-solid)] text-[var(--on-accent)]"
                     : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
-                disabled && "opacity-50",
+                disabled && "cursor-not-allowed",
               )}
             >
               {m.tier === "lite" && !spent && (
@@ -950,7 +950,7 @@ function ModelBar({
       </div>
 
       {!nextUp && (
-        <p className="mt-1.5 text-[10px] text-rose-600 dark:text-rose-400">
+        <p className="mt-1.5 text-[10px] text-rose-700 dark:text-rose-400">
           Every model is spent. De-identification still runs locally, but there is nothing left to
           format with until quota resets.
         </p>
@@ -974,9 +974,9 @@ function GithubMark({ className }: { className?: string }) {
 
 function WordCounter({ size }: { size: ReturnType<typeof measure> }) {
   const tone = size.overHard
-    ? "text-rose-600 dark:text-rose-400"
+    ? "text-rose-700 dark:text-rose-400"
     : size.overSoft
-      ? "text-amber-600 dark:text-amber-400"
+      ? "text-amber-700 dark:text-amber-400"
       : "text-[var(--muted)]";
   const bar = size.overHard ? "bg-rose-500" : size.overSoft ? "bg-amber-500" : "bg-[var(--accent)]";
 
@@ -998,9 +998,9 @@ function WordCounter({ size }: { size: ReturnType<typeof measure> }) {
 }
 
 const LOCUS_STYLE = {
-  browser: { icon: Monitor, tint: "text-sky-600 dark:text-sky-400", where: "your browser" },
-  mac: { icon: Cpu, tint: "text-emerald-600 dark:text-emerald-400", where: "Mac Mini" },
-  cloud: { icon: Cloud, tint: "text-violet-600 dark:text-violet-400", where: "Gemini" },
+  browser: { icon: Monitor, tint: "text-sky-700 dark:text-sky-400", where: "your browser" },
+  mac: { icon: Cpu, tint: "text-emerald-700 dark:text-emerald-400", where: "Mac Mini" },
+  cloud: { icon: Cloud, tint: "text-violet-700 dark:text-violet-400", where: "Gemini" },
 } as const;
 
 /** The pipeline as it actually happens, one row per server stage. */
@@ -1025,8 +1025,9 @@ function PipelineProgress({
             className={cn(
               "flex items-center gap-2.5 rounded px-2 py-1.5 text-xs transition-colors",
               state === "running" && "bg-[var(--accent)]/8",
-              state === "pending" && "opacity-40",
-              state === "waiting" && "opacity-30",
+              // Not opacity: dimming a row drags its text toward the panel it
+              // sits on. Pending steps are stated in a quieter colour instead.
+              (state === "pending" || state === "waiting") && "text-[var(--faint)]",
             )}
           >
             <span className="flex size-4 shrink-0 items-center justify-center">
@@ -1035,13 +1036,18 @@ function PipelineProgress({
               ) : state === "done" ? (
                 <Check className="size-3.5 text-[var(--accent)]" />
               ) : state === "failed" ? (
-                <AlertTriangle className="size-3.5 text-amber-500" />
+                <AlertTriangle className="size-3.5 text-amber-700 dark:text-amber-400" />
               ) : (
                 <Circle className="size-2 text-[var(--muted)]" />
               )}
             </span>
 
-            <Icon className={cn("size-3.5 shrink-0", locus.tint)} />
+            <Icon
+              className={cn(
+                "size-3.5 shrink-0",
+                state === "pending" || state === "waiting" ? "text-[var(--faint)]" : locus.tint,
+              )}
+            />
             <span className="flex-1 truncate">{STAGE_TITLES[stage]}</span>
 
             {ev?.detail && (
@@ -1097,7 +1103,7 @@ function QueuedPanel({
   return (
     <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
       <div className="flex items-center gap-2">
-        <Loader2 className="size-4 animate-spin text-amber-600 dark:text-amber-400" />
+        <Loader2 className="size-4 animate-spin text-amber-700 dark:text-amber-400" />
         <span className="text-sm font-medium text-amber-700 dark:text-amber-300">
           Queued — the Mac Mini is running another note
         </span>
@@ -1282,7 +1288,7 @@ function HistoryDrawer({
                     </button>
                     <button
                       onClick={() => void remove(n.id)}
-                      className="rounded p-1 text-[var(--muted)] hover:text-rose-500"
+                      className="rounded p-1 text-[var(--muted)] hover:text-rose-700 dark:hover:text-rose-400"
                       aria-label="Delete"
                     >
                       <Trash2 className="size-3.5" />
@@ -1401,7 +1407,7 @@ function WireView({
           <div className="grid gap-3 md:grid-cols-2">
             <div>
               <h4 className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
-                <Monitor className="size-3.5 text-sky-600 dark:text-sky-400" />
+                <Monitor className="size-3.5 text-sky-700 dark:text-sky-400" />
                 What you typed — stays in this browser
               </h4>
               <pre className="scroll-visible max-h-64 overflow-auto whitespace-pre-wrap rounded border border-sky-500/30 bg-sky-500/5 p-2.5 font-mono text-[11px] leading-relaxed">
@@ -1410,7 +1416,7 @@ function WireView({
             </div>
             <div>
               <h4 className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
-                <Radio className="size-3.5 text-violet-600 dark:text-violet-400" />
+                <Radio className="size-3.5 text-violet-700 dark:text-violet-400" />
                 What went on the wire
               </h4>
               <pre className="scroll-visible max-h-64 overflow-auto break-all whitespace-pre-wrap rounded border border-violet-500/30 bg-violet-500/5 p-2.5 font-mono text-[11px] leading-relaxed">
@@ -1972,7 +1978,7 @@ function PromptLibrary({
                 </button>
                 <button
                   onClick={() => void remove(t.id)}
-                  className="rounded p-1 text-[var(--muted)] hover:text-rose-500"
+                  className="rounded p-1 text-[var(--muted)] hover:text-rose-700 dark:hover:text-rose-400"
                   aria-label={`Delete ${t.name}`}
                 >
                   <Trash2 className="size-3.5" />
@@ -2190,9 +2196,9 @@ function HealthPill({
   title?: string;
 }) {
   const tones = {
-    ok: "border-emerald-500/30 text-emerald-600 dark:text-emerald-400",
-    warn: "border-amber-500/40 text-amber-600 dark:text-amber-400",
-    bad: "border-rose-500/30 text-rose-600 dark:text-rose-400",
+    ok: "border-emerald-500/30 text-emerald-700 dark:text-emerald-400",
+    warn: "border-amber-500/40 text-amber-700 dark:text-amber-400",
+    bad: "border-rose-500/30 text-rose-700 dark:text-rose-400",
   } as const;
   return (
     <span
@@ -2200,10 +2206,9 @@ function HealthPill({
       className={cn(
         "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-1 text-[11px] xl:px-2.5",
         tones[tone],
-        pulse && "animate-pulse",
       )}
     >
-      <Icon className="size-3.5 shrink-0" />
+      <Icon className={cn("size-3.5 shrink-0", pulse && "animate-pulse")} />
       <span className="max-w-[9rem] truncate xl:max-w-[15rem]">{label}</span>
     </span>
   );

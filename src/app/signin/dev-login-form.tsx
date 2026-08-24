@@ -70,7 +70,7 @@ export function DevLoginForm({ from, remote }: { from: string; remote: boolean }
         Signs in as <code>airlock_dev</code> with a normal session — same ownership and history
         rules as any account.{" "}
         {remote ? (
-          <span className="text-amber-600 dark:text-amber-400">
+          <span className="text-amber-700 dark:text-amber-400">
             DEV_LOGIN_ALLOW_REMOTE is on, so this password works from the internet too. Turn it off
             before this instance sees real patients.
           </span>
