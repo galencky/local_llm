@@ -509,7 +509,14 @@ four real faults, all invisible to a quick look:
 
 Result: **157 controls per theme, zero below AA.**
 
-Solid buttons stay **white-on-green in both themes**. The fix for the dark-mode
+**Anything green carries white text, in both themes** — the primary button and
+every selected chip (note format, cloud model, prompt tab). Selected used to be
+a 10% accent tint under accent-coloured text, which was marginal at rest and
+fell to **2.16:1** once `disabled:opacity-50` applied during processing. Dimming
+a control with `opacity` drags its text toward its own background, so disabled
+states now name their colours instead.
+
+Solid buttons stay white-on-green in both themes. The fix for the dark-mode
 contrast failure was to darken the *fill* (`--accent-solid`), not to flip the
 label to dark text — a green button with dark text stops reading as the primary
 action. `--accent` remains the lighter tint used for accent *text* and borders.

@@ -624,7 +624,7 @@ export default function AirlockPage() {
                 onChange={(e) => setInstruction(e.target.value)}
                 disabled={submitting}
                 placeholder="e.g. 以中文輸出 · emphasise the renal course · keep the plan to one line per problem"
-                className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-[var(--muted)]/60 disabled:opacity-50"
+                className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-[var(--muted)]/60 disabled:cursor-not-allowed disabled:text-[var(--muted)]"
               />
             </label>
           </div>
@@ -639,7 +639,7 @@ export default function AirlockPage() {
               value={activeTemplateId}
               onChange={(e) => setActiveTemplateId(e.target.value)}
               disabled={submitting}
-              className="min-w-0 flex-1 cursor-pointer truncate bg-transparent text-xs outline-none disabled:opacity-50"
+              className="min-w-0 flex-1 cursor-pointer truncate bg-transparent text-xs outline-none disabled:cursor-not-allowed disabled:text-[var(--muted)]"
             >
               <option value="">None — no saved routine</option>
               {templates.map((t) => (
@@ -672,9 +672,9 @@ export default function AirlockPage() {
                   onClick={() => setFormat(f.id)}
                   disabled={submitting}
                   className={cn(
-                    "rounded border px-2.5 py-1 text-xs transition-colors disabled:opacity-50",
+                    "rounded border px-2.5 py-1 text-xs transition-colors disabled:cursor-not-allowed",
                     format === f.id
-                      ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]"
+                      ? "border-[var(--accent-solid)] bg-[var(--accent-solid)] text-[var(--on-accent)]"
                       : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
                   )}
                 >
@@ -927,13 +927,20 @@ function ModelBar({
                   // ended up invisible in the first place.
                   ? "border-[var(--border)] bg-[var(--background)] text-[var(--muted)]"
                   : isChosen
-                    ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]"
+                    ? "border-[var(--accent-solid)] bg-[var(--accent-solid)] text-[var(--on-accent)]"
                     : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
                 disabled && "opacity-50",
               )}
             >
               {m.tier === "lite" && !spent && (
-                <span className="text-[9px] uppercase opacity-60">lite</span>
+                <span
+                  className={cn(
+                    "text-[9px] uppercase",
+                    isChosen ? "text-[var(--on-accent)]/80" : "text-[var(--muted)]",
+                  )}
+                >
+                  lite
+                </span>
               )}
               {m.label}
               {spent && <span className="text-[var(--muted)]">· {resetHint(m)}</span>}
@@ -1546,7 +1553,7 @@ function PromptsDrawer({ onClose }: { onClose: () => void }) {
               className={cn(
                 "flex items-center gap-1.5 rounded border px-2.5 py-1 text-[11px] transition-colors",
                 tab === id
-                  ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]"
+                  ? "border-[var(--accent-solid)] bg-[var(--accent-solid)] text-[var(--on-accent)]"
                   : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
               )}
             >
