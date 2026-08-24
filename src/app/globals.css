@@ -29,7 +29,7 @@
   /* Darkened from #5b6670: secondary text sits at 4.5:1 on white, and
      placeholders at 70% opacity still clear 3:1. */
   --muted: #4f5a65;
-  --faint: #7c8894;
+  --faint: #656f7a;
   --accent: #0a6a6a;
   --accent-contrast: #ffffff;
   --ring: rgb(10 106 106 / 0.35);
@@ -44,7 +44,7 @@
     --border: #232a33;
     --foreground: #e6eaef;
     --muted: #97a3b0;
-    --faint: #6c7987;
+    --faint: #8e9aa8;
     --accent: #2fb3ac;
     --accent-contrast: #06211f;
     --ring: rgb(47 179 172 / 0.35);
@@ -58,7 +58,7 @@
   --border: #232a33;
   --foreground: #e6eaef;
   --muted: #97a3b0;
-  --faint: #6c7987;
+  --faint: #8e9aa8;
   --accent: #2fb3ac;
   --accent-contrast: #06211f;
   --ring: rgb(47 179 172 / 0.35);

@@ -52,7 +52,7 @@ export function DevLoginForm({ from, remote }: { from: string; remote: boolean }
         <button
           type="submit"
           disabled={busy || !password}
-          className="flex items-center gap-1.5 rounded border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--muted)] transition-colors hover:text-[var(--foreground)] disabled:opacity-40"
+          className="flex items-center gap-1.5 rounded border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--muted)] transition-colors hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:bg-[var(--border)]/40 disabled:text-[var(--faint)]"
         >
           {busy && <Loader2 className="size-3.5 animate-spin" />}
           Enter

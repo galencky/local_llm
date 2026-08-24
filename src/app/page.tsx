@@ -686,7 +686,7 @@ export default function AirlockPage() {
             <button
               onClick={() => void submit()}
               disabled={!ready}
-              className="ml-auto flex items-center gap-2 rounded bg-[var(--accent)] px-4 py-1.5 text-sm font-medium text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+              className="ml-auto flex items-center gap-2 rounded bg-[var(--accent)] px-4 py-1.5 text-sm font-medium text-[var(--accent-contrast)] transition-opacity disabled:cursor-not-allowed disabled:border-[var(--border)] disabled:bg-[var(--border)]/40 disabled:text-[var(--faint)]"
             >
               {submitting ? <Loader2 className="size-4 animate-spin" /> : <Lock className="size-4" />}
               {submitting ? "Processing" : "Encrypt & structure"}
@@ -725,7 +725,7 @@ export default function AirlockPage() {
                 onClick={() => void copyNote("identified")}
                 disabled={!result}
                 title="The finished note with the real names, MRN and dates put back. This is what goes in the chart."
-                className="flex items-center gap-1.5 rounded border border-[var(--accent)]/40 bg-[var(--accent)]/8 px-2 py-1 text-[11px] text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/15 disabled:opacity-40"
+                className="flex items-center gap-1.5 rounded border border-[var(--accent)]/40 bg-[var(--accent)]/8 px-2 py-1 text-[11px] text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/15 disabled:text-[var(--faint)] disabled:hover:text-[var(--faint)]"
               >
                 {copied === "identified" ? (
                   <CheckCheck className="size-3.5" />
@@ -738,7 +738,7 @@ export default function AirlockPage() {
                 onClick={() => void copyNote("deidentified")}
                 disabled={!result}
                 title="The placeholder version — [PATIENT_1], [MRN_1] and so on. This is exactly what was sent to Gemini, and carries no identifiers."
-                className="flex items-center gap-1.5 rounded border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] disabled:opacity-40"
+                className="flex items-center gap-1.5 rounded border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] disabled:text-[var(--faint)] disabled:hover:text-[var(--faint)]"
               >
                 {copied === "deidentified" ? (
                   <CheckCheck className="size-3.5 text-[var(--accent)]" />
@@ -2054,7 +2054,7 @@ function PromptLibrary({
             <button
               onClick={() => void save()}
               disabled={saving || !draft.name.trim() || !draft.instruction.trim()}
-              className="flex items-center gap-2 rounded bg-[var(--accent)] px-4 py-1.5 text-sm font-medium text-white disabled:opacity-40"
+              className="flex items-center gap-2 rounded bg-[var(--accent)] px-4 py-1.5 text-sm font-medium text-[var(--accent-contrast)] transition-opacity disabled:cursor-not-allowed disabled:bg-[var(--border)]/40 disabled:text-[var(--faint)]"
             >
               {saving && <Loader2 className="size-4 animate-spin" />}
               {editingId ? "Save changes" : "Create routine"}

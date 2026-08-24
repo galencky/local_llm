@@ -494,6 +494,21 @@ Two light-mode bugs the toggle exposed, both worth naming:
   **Copy de-identified** (for anywhere else). Verified: the first contains real
   identifiers and no placeholders, the second the reverse.
 
+Every interactive control is checked in both themes by
+`npm run audit:contrast`, which walks the main page and all four drawers,
+resolves colours through a canvas (so `oklab`, alpha layers and `opacity` are
+composited exactly as rendered) and reports anything under WCAG AA. It found
+four real faults, all invisible to a quick look:
+
+| | |
+| --- | --- |
+| Disabled controls | `opacity-40` put them at **1.8:1** — WCAG exempts inactive controls, but exempt is not the same as invisible |
+| **Encrypt & structure** in dark | white text on the light-teal dark accent, **2.57:1** — the accent now carries its own `--accent-contrast` |
+| Theme toggle, inactive states | 3.58:1 light / 4.12:1 dark |
+| **Create routine** when disabled | kept its teal fill under grey text, **1.73:1** |
+
+Result: **159 controls per theme, zero below AA.**
+
 Light mode was rebalanced rather than inverted: `--muted` darkened so secondary
 text clears 4.5:1 on white, panels given a faint elevation because a border
 alone is too weak on an off-white monitor, and a visible focus ring added.

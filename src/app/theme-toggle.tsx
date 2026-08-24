@@ -74,7 +74,7 @@ export function ThemeToggle() {
               "rounded-full p-1 transition-colors",
               active
                 ? "bg-[var(--accent)]/12 text-[var(--accent)]"
-                : "text-[var(--faint)] hover:text-[var(--foreground)]",
+                : "text-[var(--muted)] hover:text-[var(--foreground)]",
             )}
           >
             <Icon className="size-3.5" />
