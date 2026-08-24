@@ -459,6 +459,31 @@ dropped. Measured at 1024×768: all eight chips readable, no horizontal
 overflow, and **Encrypt & structure** on screen without scrolling (it used to
 be below the fold). Verified at 1024, 1280, 1600 and 1920.
 
+## Light and dark
+
+A three-state control in the header: **Light**, **Dark**, **Follow system**.
+"System" is a real state rather than the absence of a choice — a ward monitor
+that dims at dusk should keep doing so unless someone says otherwise. The choice
+is written to `<html data-theme>` and mirrored to `localStorage`, and an inline
+script applies it before first paint so there is no white flash on a night
+shift.
+
+Two details that matter more than they look:
+
+- Tailwind v4 ties `dark:` to `prefers-color-scheme`. With ~70 `dark:`
+  utilities in the UI, an explicit toggle would have left them fighting the CSS
+  variables — so the variant is redefined to honour the attribute *and* the OS
+  preference.
+- The theme lives in the DOM, not React state, and the toggle reads it through
+  `useSyncExternalStore`. That avoids both a hydration mismatch and a
+  render-time `localStorage` read.
+
+Light mode was rebalanced rather than inverted: `--muted` darkened so secondary
+text clears 4.5:1 on white, panels given a faint elevation because a border
+alone is too weak on an off-white monitor, and a visible focus ring added.
+Measured in light mode — body 17.1:1, headings 7.0:1, submit button 6.4:1,
+footer 6.5:1; all AA.
+
 ## Multiple clinicians
 
 Yes, with one caveat worth understanding.

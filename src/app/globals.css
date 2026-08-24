@@ -1,23 +1,68 @@
 @import "tailwindcss";
 
-:root {
-  --background: #f6f7f9;
-  --surface: #ffffff;
-  --border: #dfe3e8;
-  --foreground: #101418;
-  --muted: #5b6670;
-  --accent: #0d6e6e;
+/**
+ * Theme has three states: an explicit `data-theme` on <html>, or nothing at
+ * all, which follows the OS.
+ *
+ * Tailwind v4 ties `dark:` to `prefers-color-scheme` by default. With 70-odd
+ * `dark:` utilities in the UI, an explicit toggle would leave them fighting the
+ * CSS variables — so the variant is redefined to honour both the attribute and
+ * the OS preference.
+ */
+@custom-variant dark {
+  &:where([data-theme="dark"], [data-theme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme="light"]), :root:not([data-theme="light"]) *) {
+      @slot;
+    }
+  }
 }
 
+/* --- light: the default, and the one a ward monitor is usually set to --- */
+:root {
+  --background: #f4f6f8;
+  --surface: #ffffff;
+  --border: #d7dde4;
+  --foreground: #0f1418;
+  /* Darkened from #5b6670: secondary text sits at 4.5:1 on white, and
+     placeholders at 70% opacity still clear 3:1. */
+  --muted: #4f5a65;
+  --faint: #7c8894;
+  --accent: #0a6a6a;
+  --accent-contrast: #ffffff;
+  --ring: rgb(10 106 106 / 0.35);
+  --elevate: 0 1px 2px rgb(15 20 24 / 0.04), 0 1px 3px rgb(15 20 24 / 0.06);
+}
+
+/* --- dark --- */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --background: #0b0d10;
     --surface: #12161b;
     --border: #232a33;
     --foreground: #e6eaef;
-    --muted: #8b97a4;
+    --muted: #97a3b0;
+    --faint: #6c7987;
     --accent: #2fb3ac;
+    --accent-contrast: #06211f;
+    --ring: rgb(47 179 172 / 0.35);
+    --elevate: none;
   }
+}
+
+:root[data-theme="dark"] {
+  --background: #0b0d10;
+  --surface: #12161b;
+  --border: #232a33;
+  --foreground: #e6eaef;
+  --muted: #97a3b0;
+  --faint: #6c7987;
+  --accent: #2fb3ac;
+  --accent-contrast: #06211f;
+  --ring: rgb(47 179 172 / 0.35);
+  --elevate: none;
 }
 
 @theme inline {
@@ -26,9 +71,25 @@
   --color-border-subtle: var(--border);
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
+  --color-faint: var(--faint);
   --color-accent: var(--accent);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+}
+
+html {
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme="light"]) {
+    color-scheme: dark;
+  }
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+html[data-theme="light"] {
+  color-scheme: light;
 }
 
 body {
@@ -41,4 +102,15 @@ body {
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
+}
+
+/* Panels read as raised in light, flat in dark — a border alone is too weak on
+   an off-white ward monitor. */
+.panel {
+  box-shadow: var(--elevate);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
