@@ -672,6 +672,11 @@ Stubs LM Studio on `:1234` with a deliberate 2-second latency so three requests
 overlap, then asserts exactly one is admitted and two get 429, and that the lock
 is released afterwards.
 
+**Port collision.** This script and `e2e:full` both bind `:1234`, which is where
+the real LM Studio lives. Stop LM Studio first, or point the server at a
+different port and use `e2e:custom`, which takes its stub ports from the
+environment for exactly this reason.
+
 ### `npm run e2e:routine` — `scripts/e2e-routine.ts`
 
 Runs the same narrative twice, once bare and once through a saved routine, to
