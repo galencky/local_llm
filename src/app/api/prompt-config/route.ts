@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { NER_SYSTEM_PROMPT } from "@/lib/scrubber-llm";
+import { PLACEHOLDER_KERNEL } from "@/lib/custom-mode";
 import {
   builtInFormatInstruction,
   NOTE_FORMATS,
@@ -28,6 +29,12 @@ export const dynamic = "force-dynamic";
  * Everything a clinician should tune goes in a **saved routine**, which is
  * versioned, owned, PII-screened on save, and recorded by name on every audit
  * row. That is the supported customisation path.
+ *
+ * Custom mode is the other one, and it is deliberately a different door: it
+ * replaces both prompts wholesale for a single run, keeps nothing, and is
+ * marked as such on the audit row. This endpoint is where its editor reads the
+ * built-in text from, so "start from the built-in prompt" cannot drift from
+ * what guided mode actually sends.
  */
 export async function GET() {
   const session = await auth();
@@ -49,6 +56,10 @@ export async function GET() {
           label: NOTE_FORMATS[f],
           instruction: builtInFormatInstruction(f),
         })),
+      },
+      custom: {
+        /** Appended to any custom system instruction; re-hydration needs it. */
+        placeholderKernel: PLACEHOLDER_KERNEL,
       },
       customisation: {
         where: "saved routine",

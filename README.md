@@ -185,6 +185,13 @@ npm run db:smoke         # audit database round-trip
 # whole pipeline with both externals stubbed (no Gemini key, no model needed):
 GEMINI_API_KEY=stub GEMINI_BASE_URL=http://localhost:8899 npm run dev
 npm run e2e:full
+
+# custom mode: that the user's prompts and parameters reach both models, and
+# that what custom mode may NOT switch off held anyway. Stub ports are
+# configurable, because a dev box usually has the real LM Studio on :1234.
+GEMINI_API_KEY=stub GEMINI_BASE_URL=http://localhost:8899 \
+  LMSTUDIO_BASE_URL=http://localhost:1299/v1 npm run dev -- -p 3100
+AIRLOCK_BASE=http://localhost:3100 LMSTUDIO_STUB_PORT=1299 npm run e2e:custom
 ```
 
 `npm run verify` needs no database, no API key, and no model — it stubs LM
@@ -218,6 +225,7 @@ Studio on port 11234.
 | `src/lib/auth.ts` | Google sign-in, with the mandatory email allowlist |
 | `src/lib/model-registry.ts` | The Gemini ladder and observed availability |
 | `src/lib/prompts.ts` | Specialty routine CRUD + the guard that keeps PHI out of saved prompts |
+| `src/lib/custom-mode.ts` | Custom mode's contract: defaults, parameter ranges, the placeholder kernel, and the clamp both sides of the wire run |
 
 ## Nightly backups
 
@@ -403,6 +411,73 @@ forever. The API therefore runs every saved routine through the deterministic
 scrubber and **rejects it with HTTP 422 if any identifier matches** — a patient
 name pasted into a template would quietly defeat the whole pipeline. The audit
 row records which routine was in effect by name.
+
+## Guided and custom mode
+
+A **Mode** strip sits directly under the header, because which mode you are in
+changes what every control below it means.
+
+**Guided** is the default and the one a ward should stay on. Both system
+prompts and the five note skeletons are compiled in; your instructions go in a
+saved routine, appended beneath them.
+
+**Custom** hands both prompts and both models' sampling parameters over —
+selecting it opens the editor, with every box already carrying a worked
+example, and a **Load built-in** button that pulls the real guided-mode text
+from `/api/prompt-config` so you can start from what actually ships and change
+one rule rather than reinventing the whole thing.
+
+| | You own | Range |
+| --- | --- | --- |
+| Local | De-identification prompt, LM Studio model | — |
+| Local | `temperature`, `top_p`, `max_tokens` | 0–2, 0–1, 256–16384 |
+| Cloud | System instruction, formatting instruction | ≤ 8000 chars each |
+| Cloud | `temperature`, `topP`, `topK`, `maxOutputTokens` | 0–2, 0–1, 0–200, 0–65536 |
+
+Custom prompts live in `localStorage` and nowhere else. They are deliberately
+not in Postgres: a saved routine is PII-screened on write and recorded by name
+on every audit row, and a free-form prompt store would be neither. They travel
+to the Mac Mini inside the sealed envelope, are used once, and are gone when
+the request ends — so the audit row records **"Custom mode — prompts not
+stored"** rather than implying the built-in prompts produced that note.
+
+### What custom mode cannot switch off
+
+These four hold because they are structural rather than prompt-borne. Nothing
+in the editor reaches them, and `npm run e2e:custom` asserts each one:
+
+1. **The pattern scrub runs first, always.** Taiwan IDs, MRNs, phone numbers
+   and dates are gone before a custom prompt sees the note. The floor is
+   regex-only, never nothing.
+2. **The local pass must still return entity JSON** in the six known
+   categories. A prompt that talks the model out of that shape fails the run
+   closed, exactly as an unreachable LM Studio does — it does not quietly pass
+   a narrative full of names to the cloud.
+3. **Every span is still checked verbatim** against the source, screened
+   against the clinical stoplist, and length-capped, so an invented or
+   mislabelled span cannot be redacted out of the note.
+4. **The placeholder-integrity kernel is appended** to whatever system
+   instruction you write. Without it Gemini renumbers `[DATE_2]` and the note
+   can no longer be re-hydrated — that is every run broken rather than any
+   particular judgement call, so it is not a setting. It is shown in full in
+   the editor, and served at `/api/prompt-config`.
+
+What custom mode *can* do is catch fewer names than the built-in prompt does,
+and what it misses goes to Google. The mode strip says so while custom is
+selected, and the redaction list is the check to read before filing.
+
+Prompts are validated on both sides of the wire. The editor blocks the run
+button and names the problem; the route re-runs the same check on arrival,
+because the payload is assembled in the browser and a hand-rolled client could
+put anything in it. Numbers are clamped; empty or over-long prompts are
+refused rather than silently defaulted, since running a note under instructions
+the clinician never saw is worse than not running it.
+
+In custom mode the format buttons are marked **label only** — your formatting
+instruction decides the note's shape, and the format survives just as the label
+on the audit row and in History. The saved routine and the one-off box are
+still appended beneath your instruction, in that order; leave them empty if you
+want the editor to be the whole of it.
 
 ## Documentation
 
@@ -591,6 +666,11 @@ Both are appended *beneath* the fixed rules, so a routine can shape the note
 without overriding what protects the patient. Routines are owned, PII-screened
 on save, and recorded by name on every audit row — so a note can always be
 traced back to the instructions that produced it.
+
+The other door is **custom mode**, which replaces both prompts wholesale for a
+single run. It is deliberately a different door: it keeps nothing, it is marked
+as such on the audit row, and it carries a standing warning while it is on. See
+[Guided and custom mode](#guided-and-custom-mode).
 
 ## Stale tabs fix themselves
 

@@ -1,5 +1,6 @@
 import "server-only";
 import { GoogleGenAI } from "@google/genai";
+import { withPlaceholderKernel, type CustomCloudConfig } from "./custom-mode";
 import {
   chainFrom,
   defaultModel,
@@ -90,10 +91,15 @@ export function assemblePrompt(opts: {
   template?: { name: string; instruction: string } | null;
   adHoc?: string | null;
   narrative: string;
+  /**
+   * Custom mode's replacement for the built-in format skeleton. When set,
+   * `format` is only a label — it no longer chooses the note's shape.
+   */
+  skeleton?: string | null;
 }): string {
   const adHoc = opts.adHoc?.trim();
   return [
-    FORMAT_INSTRUCTIONS[opts.format],
+    opts.skeleton?.trim() || FORMAT_INSTRUCTIONS[opts.format],
     opts.template?.instruction?.trim()
       ? `\n\nDepartmental charting routine ("${opts.template.name}") — follow this unless it conflicts with the placeholder rules:\n${opts.template.instruction.trim()}`
       : "",
@@ -211,10 +217,11 @@ export interface FormatNoteResult {
 /**
  * Format a fully de-identified narrative into a structured note.
  *
- * Instruction precedence, weakest to strongest: the built-in format skeleton,
- * then the saved specialty template, then the clinician's ad-hoc steer. The
- * placeholder rules in the system instruction outrank all three — a template
- * cannot talk the model into inventing a name.
+ * Instruction precedence, weakest to strongest: the format skeleton (built-in,
+ * or custom mode's replacement for it), then the saved specialty template,
+ * then the clinician's ad-hoc steer. The placeholder rules in the system
+ * instruction outrank all three — neither a template nor a custom instruction
+ * can talk the model into inventing a name.
  *
  * @param deidentifiedText text containing placeholders only — never raw PHI
  * @param format target note structure
@@ -226,6 +233,7 @@ export async function formatClinicalNote(
   instructions: NoteInstructions = {},
   onFallback?: (step: FallbackStep, next: string) => void,
   startModel?: string,
+  custom: CustomCloudConfig | null = null,
 ): Promise<FormatNoteResult> {
   const started = Date.now();
 
@@ -234,7 +242,24 @@ export async function formatClinicalNote(
     template: instructions.template,
     adHoc: instructions.adHoc,
     narrative: deidentifiedText,
+    skeleton: custom?.instruction,
   });
+
+  // Custom mode owns the system instruction, except for the placeholder
+  // kernel: without it the model renumbers [DATE_2] and the note can no longer
+  // be re-hydrated, which breaks every run rather than any particular one.
+  const system = custom
+    ? withPlaceholderKernel(custom.systemInstruction)
+    : SYSTEM_INSTRUCTION;
+
+  const generation = custom
+    ? {
+        temperature: custom.temperature,
+        topP: custom.topP,
+        ...(custom.topK > 0 ? { topK: custom.topK } : {}),
+        ...(custom.maxOutputTokens > 0 ? { maxOutputTokens: custom.maxOutputTokens } : {}),
+      }
+    : { temperature: 0.2 };
 
   // Persisted cooldowns must be loaded before we decide which rung to try.
   await ensureCooldownsLoaded();
@@ -258,7 +283,7 @@ export async function formatClinicalNote(
       const response = await getClient().models.generateContent({
         model,
         contents: prompt,
-        config: { systemInstruction: SYSTEM_INSTRUCTION, temperature: 0.2 },
+        config: { systemInstruction: system, ...generation },
       });
 
       const text = response.text?.trim();

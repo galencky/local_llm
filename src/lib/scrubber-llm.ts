@@ -1,4 +1,5 @@
 import type { PiiCategory, TokenVault } from "./memory-cache";
+import type { CustomLocalConfig } from "./custom-mode";
 
 /**
  * Pass 3B — probabilistic NER via LM Studio on localhost.
@@ -140,21 +141,23 @@ async function callLmStudio(
   prompt: string,
   signal: AbortSignal,
   useSchema: boolean,
+  custom: CustomLocalConfig | null,
 ): Promise<Response> {
   return fetch(`${baseUrl()}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal,
     body: JSON.stringify({
-      model: process.env.LMSTUDIO_MODEL || "local-model",
-      temperature: 0,
+      model: custom?.model || process.env.LMSTUDIO_MODEL || "local-model",
+      temperature: custom ? custom.temperature : 0,
+      ...(custom && custom.topP < 1 ? { top_p: custom.topP } : {}),
       // A long shift note can carry 60+ entities. Too low a cap truncates the
       // JSON mid-array, which fails closed and looks to the user like an
       // unexplained 503 — so the cap is generous but still bounded, to stop a
       // looping model pinning the single compute slot for minutes.
-      max_tokens: 6144,
+      max_tokens: custom ? custom.maxTokens : 6144,
       messages: [
-        { role: "system", content: NER_SYSTEM_PROMPT },
+        { role: "system", content: custom?.systemPrompt || NER_SYSTEM_PROMPT },
         { role: "user", content: prompt },
       ],
       ...(useSchema
@@ -233,14 +236,22 @@ export async function checkLmStudioHealth(): Promise<LmStudioHealth> {
 /**
  * Run the local NER pass over regex-scrubbed text and replace what it finds.
  *
+ * Custom mode swaps the system prompt and the sampling parameters, and nothing
+ * else: the output still has to be parsable entity JSON in the six known
+ * categories, every span is still checked verbatim against the source, and an
+ * unusable answer still fails the run closed. A custom prompt can therefore
+ * change what gets caught — it cannot turn the check into a rubber stamp.
+ *
  * @param input text that has already been through {@link scrubWithRegex}
  * @param vault volatile token store, mutated in place
+ * @param custom per-run overrides from custom mode; null uses the built-ins
  * @throws {LocalScrubUnavailableError} when LM Studio is unreachable and
  *         `ALLOW_DEGRADED_SCRUB` is not explicitly enabled.
  */
 export async function scrubWithLlm(
   input: string,
   vault: TokenVault,
+  custom: CustomLocalConfig | null = null,
 ): Promise<LlmScrubResult> {
   const started = Date.now();
   const controller = new AbortController();
@@ -248,10 +259,10 @@ export async function scrubWithLlm(
 
   let content: string;
   try {
-    let res = await callLmStudio(input, controller.signal, true);
+    let res = await callLmStudio(input, controller.signal, true, custom);
     if (res.status === 400) {
       // Older LM Studio builds / GGUFs without grammar support.
-      res = await callLmStudio(input, controller.signal, false);
+      res = await callLmStudio(input, controller.signal, false, custom);
     }
     if (!res.ok) {
       throw new Error(`LM Studio responded ${res.status}: ${await res.text()}`);

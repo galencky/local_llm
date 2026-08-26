@@ -1,6 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   AlertTriangle,
   BookMarked,
@@ -23,6 +31,7 @@ import {
   Pencil,
   Plus,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Radio,
   ScrollText,
@@ -41,6 +50,17 @@ import {
   type ProgressEvent,
 } from "@/lib/pipeline-client";
 import { base64ToBytes, type CryptoEnvelope } from "@/lib/crypto";
+import {
+  blankCustomConfig,
+  CLOUD_PARAMS,
+  CustomConfigError,
+  LOCAL_PARAMS,
+  MAX_CUSTOM_PROMPT_LENGTH,
+  normaliseCustomConfig,
+  PLACEHOLDER_KERNEL,
+  type CustomConfig,
+  type NumericParam,
+} from "@/lib/custom-mode";
 import { HARD_CHAR_LIMIT, measure } from "@/lib/limits";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "./theme-toggle";
@@ -66,6 +86,7 @@ interface ProcessNoteResult {
     model: string;
     format: string;
     promptTemplateName: string | null;
+    mode: "guided" | "custom";
     modelFallbacks: { model: string; reason: string }[];
     processingTimeMs: number;
     scrubMs: number;
@@ -152,6 +173,130 @@ const CATEGORY_TINT: Record<string, string> = {
   ORG: "bg-slate-500/10 text-slate-700 dark:text-slate-400",
 };
 
+/**
+ * The two ways to drive the pipeline.
+ *
+ * Guided is the default and the one a ward should stay on: the prompts that do
+ * the de-identifying and the placeholder bookkeeping are compiled in, and the
+ * only thing a clinician changes is a saved routine appended beneath them.
+ *
+ * Custom hands both prompts and both models' sampling parameters over. It is
+ * for tuning, for a different entity taxonomy, for a note shape the built-in
+ * skeletons do not cover — and it is where you find out what the guided
+ * defaults are actually buying you.
+ */
+type RunMode = "guided" | "custom";
+
+const MODES: {
+  id: RunMode;
+  label: string;
+  icon: typeof ShieldCheck;
+  blurb: string;
+}[] = [
+  {
+    id: "guided",
+    label: "Guided",
+    icon: ShieldCheck,
+    blurb:
+      "Built-in prompts, fixed note skeletons, tuned sampling. Your instructions go in a saved routine.",
+  },
+  {
+    id: "custom",
+    label: "Custom",
+    icon: SlidersHorizontal,
+    blurb:
+      "You write both prompts — the local de-identifier and Gemini — and set both models' parameters.",
+  },
+];
+
+/**
+ * The chosen mode and the custom prompts live in localStorage, with React as a
+ * subscriber rather than the owner — the same shape as the theme toggle, and
+ * for the same reason: it survives a reload, it cannot hydrate-mismatch, and a
+ * second tab editing the prompts is seen here rather than silently overwritten.
+ *
+ * They are deliberately not in Postgres. A saved routine is PII-screened on
+ * write and recorded by name on every audit row; a free-form prompt store would
+ * be neither. These travel to the Mac Mini inside the sealed envelope, are used
+ * once, and are gone when the request ends.
+ */
+const CUSTOM_STORAGE_KEY = "airlock.custom-config.v1";
+const CUSTOM_MODE_KEY = "airlock.run-mode.v1";
+
+interface RunSettings {
+  mode: RunMode;
+  config: CustomConfig;
+}
+
+const runListeners = new Set<() => void>();
+
+/**
+ * `useSyncExternalStore` compares snapshots by identity, so this has to be a
+ * cached object rather than a fresh parse per call — otherwise every render
+ * looks like a change and the component never settles.
+ */
+let runCache: RunSettings | null = null;
+
+function readRunSettings(): RunSettings {
+  const fresh = blankCustomConfig();
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_STORAGE_KEY);
+    const saved = raw ? (JSON.parse(raw) as Partial<CustomConfig>) : {};
+    return {
+      mode: window.localStorage.getItem(CUSTOM_MODE_KEY) === "custom" ? "custom" : "guided",
+      // Merged field by field: a config written by an older build is missing
+      // whatever was added since, and a half-applied one is worse than none.
+      config: {
+        local: { ...fresh.local, ...(saved.local ?? {}) },
+        cloud: { ...fresh.cloud, ...(saved.cloud ?? {}) },
+      },
+    };
+  } catch {
+    // Private window, disabled storage, or a corrupt entry. Guided is the
+    // right thing to fall back to — never a half-read custom prompt.
+    return { mode: "guided", config: fresh };
+  }
+}
+
+function subscribeRunSettings(fn: () => void) {
+  runListeners.add(fn);
+  // Another tab writing the prompts fires `storage` here, never in the tab
+  // that wrote them — hence the explicit notify in `writeRunSettings` too.
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === CUSTOM_STORAGE_KEY || e.key === CUSTOM_MODE_KEY) {
+      runCache = null;
+      runListeners.forEach((l) => l());
+    }
+  };
+  window.addEventListener("storage", onStorage);
+  return () => {
+    runListeners.delete(fn);
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
+function getRunSettings(): RunSettings {
+  return (runCache ??= readRunSettings());
+}
+
+/** The server cannot know what this browser saved; guided is the honest default. */
+const SERVER_RUN_SETTINGS: RunSettings = { mode: "guided", config: blankCustomConfig() };
+
+function getServerRunSettings(): RunSettings {
+  return SERVER_RUN_SETTINGS;
+}
+
+function writeRunSettings(next: RunSettings): void {
+  runCache = next;
+  try {
+    window.localStorage.setItem(CUSTOM_STORAGE_KEY, JSON.stringify(next.config));
+    window.localStorage.setItem(CUSTOM_MODE_KEY, next.mode);
+  } catch {
+    // The setting still applies to this session; it just will not survive.
+  }
+  runListeners.forEach((fn) => fn());
+}
+
 /** The prompt library is optional — a dead audit DB must not break formatting. */
 async function fetchTemplates(): Promise<PromptTemplate[] | null> {
   try {
@@ -189,7 +334,32 @@ export default function AirlockPage() {
   const [chosenModel, setChosenModel] = useState<string>("");
   const [templates, setTemplates] = useState<PromptTemplate[]>([]);
   const [activeTemplateId, setActiveTemplateId] = useState<string>("");
+  const [customOpen, setCustomOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  /* --- run mode, remembered per browser -------------------------------- */
+  const { mode, config: custom } = useSyncExternalStore(
+    subscribeRunSettings,
+    getRunSettings,
+    getServerRunSettings,
+  );
+
+  const setCustom = useCallback((config: CustomConfig) => {
+    writeRunSettings({ ...getRunSettings(), config });
+  }, []);
+
+  /**
+   * Entering custom mode opens the editor.
+   *
+   * A mode whose whole point is "you write the prompts" is a trap if switching
+   * into it silently changes what the next note runs under. Both boxes arrive
+   * filled with a worked example, so the first thing seen is what a custom
+   * prompt looks like rather than an empty field.
+   */
+  const chooseMode = useCallback((next: RunMode) => {
+    writeRunSettings({ ...getRunSettings(), mode: next });
+    if (next === "custom") setCustomOpen(true);
+  }, []);
 
   /* --- server public key ---------------------------------------------- */
   useEffect(() => {
@@ -326,8 +496,27 @@ export default function AirlockPage() {
   }, [input]);
 
   const size = measure(input);
+  /**
+   * The same check the route runs, run early so a broken custom prompt is
+   * caught while the note is still on screen — rather than after the input has
+   * been cleared and the note sealed.
+   */
+  const customError = useMemo(() => {
+    if (mode !== "custom") return null;
+    try {
+      normaliseCustomConfig(custom);
+      return null;
+    } catch (e) {
+      return e instanceof CustomConfigError ? e.message : "Custom configuration is not usable.";
+    }
+  }, [mode, custom]);
+
   const ready =
-    Boolean(publicKey) && !submitting && input.trim().length > 0 && !size.overHard;
+    Boolean(publicKey) &&
+    !submitting &&
+    input.trim().length > 0 &&
+    !size.overHard &&
+    !customError;
   const activeTemplate = templates.find((t) => t.id === activeTemplateId) ?? null;
 
   /** Live pipeline stages for the current run. */
@@ -346,6 +535,7 @@ export default function AirlockPage() {
           instruction: instruction.trim() || undefined,
           promptId: activeTemplateId || undefined,
           model: chosenModel || undefined,
+          custom: mode === "custom" ? custom : null,
           onSealed: (sealed) => {
             setWire(sealed);
             setStage("Sealed in the browser — sending");
@@ -372,7 +562,7 @@ export default function AirlockPage() {
         throw e;
       }
     },
-    [format, instruction, activeTemplateId, chosenModel, loadModels],
+    [format, instruction, activeTemplateId, chosenModel, mode, custom, loadModels],
   );
 
   const submit = useCallback(async () => {
@@ -559,6 +749,18 @@ export default function AirlockPage() {
       )}
 
 
+      {/* ---------------- run mode ---------------- */}
+      {/* Full-width and directly under the header, because it changes what
+          every other control on the page means. */}
+      <ModeBar
+        mode={mode}
+        onChoose={chooseMode}
+        custom={custom}
+        error={customError}
+        disabled={submitting}
+        onEdit={() => setCustomOpen(true)}
+      />
+
       {/* ---------------- workspace ---------------- */}
       <main className="mx-auto grid w-full max-w-[1600px] flex-1 grid-cols-1 gap-3 p-3 sm:gap-4 sm:p-5 lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)]">
         {/* ---- input ---- */}
@@ -666,6 +868,14 @@ export default function AirlockPage() {
 
           <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] px-3 py-2 sm:px-4 sm:py-3">
             <div className="flex flex-wrap gap-1">
+              {mode === "custom" && (
+                <span
+                  title="Your custom instruction decides the note's shape. The format is kept only as the label on the audit row and in History."
+                  className="mr-1 self-center whitespace-nowrap text-[10px] uppercase tracking-wider text-[var(--muted)]"
+                >
+                  label only
+                </span>
+              )}
               {FORMATS.map((f) => (
                 <button
                   key={f.id}
@@ -796,6 +1006,14 @@ export default function AirlockPage() {
                 {result.meta.modelFallbacks.length > 0 &&
                   ` — downgraded from ${result.meta.modelFallbacks[0].model} (${result.meta.modelFallbacks[0].reason})`}
               </span>
+              {result.meta.mode === "custom" && (
+                <span
+                  title="Produced by your own prompts and parameters. They were not stored — the audit row records that, not the text."
+                  className="text-amber-700 dark:text-amber-400"
+                >
+                  custom prompts
+                </span>
+              )}
               {result.meta.promptTemplateName && <span>routine {result.meta.promptTemplateName}</span>}
               <span>scrub {result.meta.scrubMs} ms</span>
               <span>cloud {result.meta.geminiMs} ms</span>
@@ -835,6 +1053,14 @@ export default function AirlockPage() {
       )}
       {helpOpen && <HowItWorks onClose={() => setHelpOpen(false)} />}
       {promptsOpen && <PromptsDrawer onClose={() => setPromptsOpen(false)} />}
+      {customOpen && (
+        <CustomModeDrawer
+          config={custom}
+          onChange={setCustom}
+          localModels={status?.lmStudio.models ?? []}
+          onClose={() => setCustomOpen(false)}
+        />
+      )}
       {wireOpen && wire && <WireView wire={wire} onClose={() => setWireOpen(false)} />}
       {historyOpen && (
         <HistoryDrawer onClose={() => setHistoryOpen(false)} onReuse={(text) => {
@@ -854,6 +1080,540 @@ export default function AirlockPage() {
 }
 
 
+
+/* ------------------------------------------------------------------ */
+/* Run mode                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Guided or custom, across the full width of the page.
+ *
+ * It sits above the workspace rather than inside a menu because it changes
+ * what every control below it means: in custom mode the format buttons stop
+ * choosing the note's shape, and the prompts behind the whole pipeline are the
+ * ones in the drawer rather than the ones compiled in.
+ */
+function ModeBar({
+  mode,
+  onChoose,
+  custom,
+  error,
+  disabled,
+  onEdit,
+}: {
+  mode: RunMode;
+  onChoose: (mode: RunMode) => void;
+  custom: CustomConfig;
+  error: string | null;
+  disabled: boolean;
+  onEdit: () => void;
+}) {
+  const active = MODES.find((m) => m.id === mode) ?? MODES[0];
+
+  return (
+    <div className="border-b border-[var(--border)] bg-[var(--surface)]">
+      <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2 sm:px-5">
+        <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+          Mode
+        </span>
+
+        <div className="flex shrink-0 gap-1">
+          {MODES.map((m) => {
+            const Icon = m.icon;
+            const chosen = m.id === mode;
+            return (
+              <button
+                key={m.id}
+                onClick={() => onChoose(m.id)}
+                disabled={disabled}
+                title={m.blurb}
+                className={cn(
+                  "flex items-center gap-1.5 rounded border px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed",
+                  chosen
+                    ? "border-[var(--accent-solid)] bg-[var(--accent-solid)] text-[var(--on-accent)]"
+                    : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
+                )}
+              >
+                <Icon className="size-3.5 shrink-0" />
+                {m.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <p className="min-w-0 flex-1 text-[11px] leading-relaxed text-[var(--muted)]">
+          {active.blurb}
+        </p>
+
+        {mode === "custom" && (
+          <>
+            <span
+              title="What the two models are running with right now"
+              className="hidden shrink-0 font-mono text-[10px] text-[var(--muted)] xl:inline"
+            >
+              local {custom.local.temperature.toFixed(2)} · {custom.local.maxTokens} tok
+              {" · "}cloud {custom.cloud.temperature.toFixed(2)} / {custom.cloud.topP.toFixed(2)}
+            </span>
+            <button
+              onClick={onEdit}
+              className="flex shrink-0 items-center gap-1.5 rounded border border-[var(--accent-solid)] bg-[var(--accent-solid)] px-3 py-1.5 text-xs font-medium text-[var(--on-accent)] transition-opacity hover:opacity-90"
+            >
+              <Pencil className="size-3.5 shrink-0" />
+              Edit prompts &amp; parameters
+            </button>
+          </>
+        )}
+      </div>
+
+      {mode === "custom" && (
+        <div
+          className={cn(
+            "border-t px-3 py-2 text-[11px] sm:px-5",
+            error
+              ? "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
+              : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+          )}
+        >
+          <div className="mx-auto flex max-w-[1600px] items-start gap-2">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+            {error ? (
+              <span>
+                {error}{" "}
+                <button onClick={onEdit} className="underline underline-offset-2">
+                  Fix it in the editor
+                </button>
+                .
+              </span>
+            ) : (
+              <span>
+                Your prompt is now the de-identification step. The pattern scrub, the
+                verbatim-span check and the fail-closed rule still run underneath it — but a
+                weaker prompt catches fewer names, and what it misses goes to Google. Read the
+                redaction list before filing.
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Custom mode editor                                                  */
+/* ------------------------------------------------------------------ */
+
+/** The built-in text, fetched so "load the built-in" cannot drift from it. */
+interface BuiltInPrompts {
+  local: { model: string; prompt: string };
+  cloud: {
+    model: string;
+    systemInstruction: string;
+    formats: { format: string; label: string; instruction: string }[];
+  };
+}
+
+/**
+ * Both prompts and both models' parameters, in one drawer.
+ *
+ * It opens the moment custom mode is selected, with every box already carrying
+ * a worked example — the point of the mode is the prompts, so landing on empty
+ * fields would just be a puzzle. "Load the built-in" pulls the real guided-mode
+ * text from the server, so a user can start from what actually ships and edit
+ * one rule rather than reinventing the whole thing.
+ */
+function CustomModeDrawer({
+  config,
+  onChange,
+  localModels,
+  onClose,
+}: {
+  config: CustomConfig;
+  onChange: (next: CustomConfig) => void;
+  localModels: string[];
+  onClose: () => void;
+}) {
+  const [tab, setTab] = useState<"local" | "cloud">("local");
+  const [builtIn, setBuiltIn] = useState<BuiltInPrompts | null>(null);
+  const [skeletonFormat, setSkeletonFormat] = useState<string>("SOAP");
+  const [kernelOpen, setKernelOpen] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await fetch("/api/prompt-config", { cache: "no-store" });
+        if (!r.ok || cancelled) return;
+        setBuiltIn((await r.json()) as BuiltInPrompts);
+      } catch {
+        /* the examples still work; only "load the built-in" goes quiet */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const setLocal = (patch: Partial<CustomConfig["local"]>) =>
+    onChange({ ...config, local: { ...config.local, ...patch } });
+  const setCloud = (patch: Partial<CustomConfig["cloud"]>) =>
+    onChange({ ...config, cloud: { ...config.cloud, ...patch } });
+
+  const fresh = blankCustomConfig();
+
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <aside className="relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+        <div className="flex items-start justify-between border-b border-[var(--border)] px-4 py-3">
+          <div>
+            <h3 className="flex items-center gap-2 text-sm font-semibold">
+              <SlidersHorizontal className="size-4 text-[var(--accent)]" />
+              Custom mode
+            </h3>
+            <p className="mt-0.5 text-[11px] text-[var(--muted)]">
+              You write both prompts and set both models&rsquo; parameters. Kept in this browser,
+              sent inside the sealed envelope, never stored on the server.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-[var(--muted)] hover:text-[var(--foreground)]"
+            aria-label="Close custom mode editor"
+          >
+            <ChevronRight className="size-5" />
+          </button>
+        </div>
+
+        <div className="flex gap-1 border-b border-[var(--border)] px-4 py-2">
+          {(
+            [
+              ["local", Cpu, "Local model — de-identification"],
+              ["cloud", Cloud, "Gemini — formatting"],
+            ] as const
+          ).map(([id, Icon, label]) => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              className={cn(
+                "flex items-center gap-1.5 rounded border px-2.5 py-1 text-[11px] transition-colors",
+                tab === id
+                  ? "border-[var(--accent-solid)] bg-[var(--accent-solid)] text-[var(--on-accent)]"
+                  : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
+              )}
+            >
+              <Icon className="size-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="scroll-visible flex-1 overflow-auto p-4">
+          {tab === "local" && (
+            <div className="space-y-4">
+              <StillInForce
+                heading="What still holds, whatever you write here"
+                points={[
+                  "The pattern scrub runs first, always. Taiwan IDs, MRNs, phone numbers and dates are gone before your prompt sees the note — the floor is regex-only, never nothing.",
+                  "The answer must still be entity JSON in the six known categories. A prompt that talks the model out of that shape fails the run closed rather than passing names to the cloud.",
+                  "Every span is still matched verbatim against the source, screened against the clinical stoplist, and length-capped, so an invented or mislabelled span cannot be redacted out of the note.",
+                ]}
+              />
+
+              <label className="block">
+                <span className="text-[11px] uppercase tracking-wider text-[var(--muted)]">
+                  LM Studio model
+                </span>
+                <select
+                  value={config.local.model}
+                  onChange={(e) => setLocal({ model: e.target.value })}
+                  className="mt-1 w-full cursor-pointer rounded border border-[var(--border)] bg-[var(--background)] px-2 py-1.5 text-sm outline-none"
+                >
+                  <option value="">
+                    Server default{builtIn ? ` — ${builtIn.local.model}` : ""}
+                  </option>
+                  {localModels.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                  {config.local.model && !localModels.includes(config.local.model) && (
+                    <option value={config.local.model}>{config.local.model} (not loaded)</option>
+                  )}
+                </select>
+                <span className="mt-1 block text-[11px] text-[var(--muted)]">
+                  Only models LM Studio currently has loaded will answer. Anything else fails the
+                  run closed.
+                </span>
+              </label>
+
+              <PromptEditor
+                label="De-identification prompt"
+                value={config.local.systemPrompt}
+                onChange={(v) => setLocal({ systemPrompt: v })}
+                rows={16}
+                seeds={[
+                  ["Example", fresh.local.systemPrompt],
+                  ...(builtIn ? ([["Built-in", builtIn.local.prompt]] as const) : []),
+                ]}
+              />
+
+              <ParamGrid
+                params={LOCAL_PARAMS}
+                values={config.local as unknown as Record<string, number>}
+                onChange={(key, value) => setLocal({ [key]: value } as Partial<CustomConfig["local"]>)}
+              />
+            </div>
+          )}
+
+          {tab === "cloud" && (
+            <div className="space-y-4">
+              <StillInForce
+                heading="What still holds, whatever you write here"
+                points={[
+                  "Only placeholder text ever reaches Google. That is settled two stages earlier, on this machine, and nothing on this tab can change it.",
+                  "The placeholder-integrity rules below are appended to your system instruction. Without them the model renumbers [DATE_2] and the note can no longer be re-hydrated — that is every run broken, not a judgement call.",
+                ]}
+              />
+
+              <PromptEditor
+                label="System instruction"
+                value={config.cloud.systemInstruction}
+                onChange={(v) => setCloud({ systemInstruction: v })}
+                rows={12}
+                seeds={[
+                  ["Example", fresh.cloud.systemInstruction],
+                  ...(builtIn
+                    ? ([["Built-in", builtIn.cloud.systemInstruction]] as const)
+                    : []),
+                ]}
+              />
+
+              <div className="rounded border border-[var(--border)] bg-[var(--background)]">
+                <button
+                  onClick={() => setKernelOpen(!kernelOpen)}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px]"
+                >
+                  <Lock className="size-3.5 shrink-0 text-[var(--muted)]" />
+                  <span className="font-medium">Always appended — placeholder integrity</span>
+                  <ChevronRight
+                    className={cn(
+                      "ml-auto size-3.5 text-[var(--muted)] transition-transform",
+                      kernelOpen && "rotate-90",
+                    )}
+                  />
+                </button>
+                {kernelOpen && (
+                  <pre className="mx-3 mb-3 whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--surface)] p-2.5 font-mono text-[11px] leading-relaxed">
+                    {PLACEHOLDER_KERNEL}
+                  </pre>
+                )}
+              </div>
+
+              <PromptEditor
+                label="Formatting instruction — replaces the note skeleton"
+                value={config.cloud.instruction}
+                onChange={(v) => setCloud({ instruction: v })}
+                rows={12}
+                seeds={[
+                  ["Example", fresh.cloud.instruction],
+                  ...(builtIn
+                    ? ([
+                        [
+                          `Built-in ${skeletonFormat.replace(/_/g, " ").toLowerCase()}`,
+                          builtIn.cloud.formats.find((f) => f.format === skeletonFormat)
+                            ?.instruction ?? "",
+                        ],
+                      ] as const)
+                    : []),
+                ]}
+                extra={
+                  builtIn ? (
+                    <select
+                      value={skeletonFormat}
+                      onChange={(e) => setSkeletonFormat(e.target.value)}
+                      title="Which built-in skeleton the button above loads"
+                      className="cursor-pointer rounded border border-[var(--border)] bg-[var(--background)] px-1.5 py-0.5 text-[10px] text-[var(--muted)] outline-none"
+                    >
+                      {builtIn.cloud.formats.map((f) => (
+                        <option key={f.format} value={f.format}>
+                          {f.label}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null
+                }
+              />
+
+              <ParamGrid
+                params={CLOUD_PARAMS}
+                values={config.cloud as unknown as Record<string, number>}
+                onChange={(key, value) => setCloud({ [key]: value } as Partial<CustomConfig["cloud"]>)}
+              />
+
+              <p className="text-[11px] leading-relaxed text-[var(--muted)]">
+                The saved routine and the one-off instruction box are still appended beneath your
+                formatting instruction, in that order — leave them empty if you want the prompt on
+                this tab to be the whole of it. Which Gemini model runs is still the ladder on the
+                main screen.
+              </p>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2 border-t border-[var(--border)] px-4 py-3">
+          <button
+            onClick={() => onChange(blankCustomConfig())}
+            className="flex items-center gap-1.5 rounded border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
+          >
+            <RotateCcw className="size-3.5" />
+            Reset both tabs to the examples
+          </button>
+          <button
+            onClick={onClose}
+            className="ml-auto rounded bg-[var(--accent-solid)] px-4 py-1.5 text-sm font-medium text-[var(--on-accent)] transition-opacity hover:opacity-90"
+          >
+            Done
+          </button>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+/** The properties a custom prompt cannot switch off, stated where it is written. */
+function StillInForce({ heading, points }: { heading: string; points: string[] }) {
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--background)] p-3">
+      <div className="flex items-center gap-1.5">
+        <ShieldCheck className="size-3.5 shrink-0 text-[var(--accent)]" />
+        <span className="text-[11px] font-semibold">{heading}</span>
+      </div>
+      <ul className="mt-1.5 space-y-1">
+        {points.map((p) => (
+          <li key={p} className="flex gap-1.5 text-[11px] leading-relaxed text-[var(--muted)]">
+            <Check className="mt-0.5 size-3 shrink-0 text-[var(--accent)]" />
+            <span>{p}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** A prompt box with its length budget and one-click starting points. */
+function PromptEditor({
+  label,
+  value,
+  onChange,
+  rows,
+  seeds,
+  extra,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  rows: number;
+  seeds: readonly (readonly [string, string])[];
+  extra?: React.ReactNode;
+}) {
+  const over = value.length > MAX_CUSTOM_PROMPT_LENGTH;
+  return (
+    <div>
+      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+        <span className="text-[11px] uppercase tracking-wider text-[var(--muted)]">{label}</span>
+        <span
+          className={cn(
+            "font-mono text-[10px] tabular-nums",
+            over ? "text-rose-700 dark:text-rose-400" : "text-[var(--muted)]",
+          )}
+        >
+          {value.length.toLocaleString()} / {MAX_CUSTOM_PROMPT_LENGTH.toLocaleString()}
+        </span>
+        <div className="ml-auto flex items-center gap-1.5">
+          {extra}
+          {seeds
+            .filter(([, body]) => body.length > 0)
+            .map(([name, body]) => (
+              <button
+                key={name}
+                onClick={() => onChange(body)}
+                title={`Replace this box with the ${name.toLowerCase()} text`}
+                className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:text-[var(--foreground)]"
+              >
+                Load {name.toLowerCase()}
+              </button>
+            ))}
+        </div>
+      </div>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={rows}
+        spellCheck={false}
+        className={cn(
+          "w-full resize-y rounded border bg-[var(--background)] px-3 py-2 font-mono text-[12px] leading-relaxed outline-none",
+          over ? "border-rose-500/50" : "border-[var(--border)]",
+        )}
+      />
+    </div>
+  );
+}
+
+/** Sampling parameters: a slider for the feel, a number box for the exact value. */
+function ParamGrid({
+  params,
+  values,
+  onChange,
+}: {
+  params: NumericParam[];
+  values: Record<string, number>;
+  onChange: (key: string, value: number) => void;
+}) {
+  return (
+    <div className="rounded-lg border border-[var(--border)]">
+      <div className="border-b border-[var(--border)] px-3 py-2 text-[11px] uppercase tracking-wider text-[var(--muted)]">
+        Parameters
+      </div>
+      <ul className="divide-y divide-[var(--border)]">
+        {params.map((p) => {
+          const value = values[p.key] ?? p.min;
+          return (
+            <li key={p.key} className="px-3 py-2.5">
+              <div className="flex items-center gap-3">
+                <span className="w-36 shrink-0 text-xs font-medium">{p.label}</span>
+                <input
+                  type="range"
+                  min={p.min}
+                  max={p.max}
+                  step={p.step}
+                  value={value}
+                  onChange={(e) => onChange(p.key, Number(e.target.value))}
+                  className="min-w-0 flex-1 accent-[var(--accent-solid)]"
+                />
+                <input
+                  type="number"
+                  min={p.min}
+                  max={p.max}
+                  step={p.step}
+                  value={value}
+                  onChange={(e) => {
+                    const n = Number(e.target.value);
+                    // An empty or half-typed box parses as NaN; hold the last
+                    // usable value rather than writing a broken config.
+                    if (Number.isFinite(n)) onChange(p.key, Math.min(p.max, Math.max(p.min, n)));
+                  }}
+                  className="w-24 shrink-0 rounded border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-right font-mono text-xs tabular-nums outline-none"
+                />
+              </div>
+              <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{p.hint}</p>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
 
 /**
  * The model ladder, best on the left.

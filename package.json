@@ -17,6 +17,7 @@
     "db:smoke": "tsx scripts/db-smoke.ts",
     "e2e:full": "tsx scripts/e2e-full-stubbed.ts",
     "e2e:routine": "tsx scripts/e2e-routine.ts",
+    "e2e:custom": "tsx scripts/e2e-custom-mode.ts",
     "e2e:system": "tsx scripts/e2e-full-system.ts",
     "prove:e2ee": "tsx scripts/prove-e2ee.ts",
     "db:inspect": "tsx scripts/inspect-audit-db.ts",

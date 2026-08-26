@@ -24,6 +24,11 @@ import {
   type NoteFormat,
 } from "@/lib/gemini";
 import { getTemplate } from "@/lib/prompts";
+import {
+  CustomConfigError,
+  normaliseCustomConfig,
+  type CustomConfig,
+} from "@/lib/custom-mode";
 import { HARD_CHAR_LIMIT, measure } from "@/lib/limits";
 import { prisma } from "@/lib/db";
 import { auth } from "@/lib/auth";
@@ -57,6 +62,8 @@ interface DecryptedPayload {
   promptId?: string;
   /** Rung of the model ladder to start from. Falls back downward from here. */
   model?: string;
+  /** Custom mode: the user's own prompts and parameters for both models. */
+  custom?: unknown;
 }
 
 export interface ProcessNoteResult {
@@ -69,6 +76,8 @@ export interface ProcessNoteResult {
     model: string;
     format: NoteFormat;
     promptTemplateName: string | null;
+    /** Which prompt set produced this note. */
+    mode: "guided" | "custom";
     /** Models exhausted or unavailable before the one that served this note. */
     modelFallbacks: { model: string; reason: string }[];
     processingTimeMs: number;
@@ -173,6 +182,7 @@ export async function POST(req: NextRequest) {
         let instruction: string | undefined = body.instruction;
         let promptId: string | undefined;
         let startModel: string | undefined;
+        let rawCustom: unknown;
         if (plaintext.trimStart().startsWith("{")) {
           try {
             const payload = JSON.parse(plaintext) as DecryptedPayload;
@@ -182,9 +192,26 @@ export async function POST(req: NextRequest) {
               instruction = payload.instruction ?? instruction;
               promptId = payload.promptId ?? undefined;
               startModel = payload.model ?? undefined;
+              rawCustom = payload.custom ?? undefined;
             }
           } catch {
             /* not a payload object; treat the whole thing as the narrative */
+          }
+        }
+
+        // Re-clamp on this side of the wire. The editor's own bounds are a
+        // courtesy to the person typing; these are the ones that hold, because
+        // the payload is assembled in the browser.
+        let custom: CustomConfig | null = null;
+        if (rawCustom) {
+          try {
+            custom = normaliseCustomConfig(rawCustom);
+          } catch (err) {
+            if (err instanceof CustomConfigError) {
+              emit("error", { error: err.message, code: "CUSTOM_CONFIG_INVALID" });
+              return;
+            }
+            throw err;
           }
         }
 
@@ -226,7 +253,7 @@ export async function POST(req: NextRequest) {
         // 4. Probabilistic local NER scrub. Fails closed by default.
         setStage(lock, "ner", `${size.chars.toLocaleString()} characters`);
         emit("progress", { stage: "ner", status: "running" });
-        const llmResult = await scrubWithLlm(regexResult.text, vault);
+        const llmResult = await scrubWithLlm(regexResult.text, vault, custom?.local ?? null);
         const scrubMs = Date.now() - scrubStarted;
         const deidentifiedInput = llmResult.text;
         emit("progress", {
@@ -260,11 +287,16 @@ export async function POST(req: NextRequest) {
         }
 
         // 6. Cloud formatting — placeholders only cross the wire.
-        setStage(lock, "cloud", template ? `routine: ${template.name}` : resolvedFormat);
+        const cloudLabel = custom
+          ? "custom instruction"
+          : template
+            ? `routine: ${template.name}`
+            : resolvedFormat;
+        setStage(lock, "cloud", cloudLabel);
         emit("progress", {
           stage: "cloud",
           status: "running",
-          detail: template ? `routine: ${template.name}` : undefined,
+          detail: custom || template ? cloudLabel : undefined,
         });
         const gemini = await formatClinicalNote(
           deidentifiedInput,
@@ -279,6 +311,7 @@ export async function POST(req: NextRequest) {
               detail: `${step.model} ${step.reason} → ${next}`,
             }),
           startModel,
+          custom?.cloud ?? null,
         );
         emit("progress", {
           stage: "cloud",
@@ -310,7 +343,13 @@ export async function POST(req: NextRequest) {
               deidentifiedOutput: gemini.text,
               modelUsed: gemini.model,
               processingTimeMs,
-              promptTemplateName: template?.name ?? null,
+              // Custom prompts are never persisted — they arrive sealed and
+              // die with the request — so the row records that this note came
+              // from prompts nobody can look up, rather than implying the
+              // built-in ones produced it.
+              promptTemplateName: custom
+                ? "Custom mode — prompts not stored"
+                : template?.name ?? null,
               noteFormat: resolvedFormat,
               userId,
             },
@@ -337,6 +376,7 @@ export async function POST(req: NextRequest) {
             model: gemini.model,
             format: resolvedFormat,
             promptTemplateName: template?.name ?? null,
+            mode: custom ? "custom" : "guided",
             modelFallbacks: gemini.fallbacks,
             processingTimeMs,
             scrubMs,

@@ -1,4 +1,5 @@
 import { openResponse, sealRequest, type CryptoEnvelope } from "./crypto";
+import type { CustomConfig } from "./custom-mode";
 
 /**
  * Client half of the streaming pipeline: seals the note, POSTs it, and reports
@@ -82,6 +83,12 @@ export interface RunOptions {
   promptId?: string;
   /** Starting rung of the model ladder; the server falls back downward. */
   model?: string;
+  /**
+   * Custom mode: the user's own prompts and sampling parameters for both
+   * models. Travels inside the sealed envelope like the note itself, so a
+   * prompt never sits in a query string or a server log.
+   */
+  custom?: CustomConfig | null;
   onProgress?: (event: ProgressEvent) => void;
   /**
    * Called with the exact bytes that are about to go on the wire, plus the
@@ -124,6 +131,7 @@ async function attempt<T>(opts: RunOptions, bustKeyCache: boolean): Promise<T> {
     instruction: opts.instruction || undefined,
     promptId: opts.promptId || undefined,
     model: opts.model || undefined,
+    custom: opts.custom ?? undefined,
   });
   const { envelope, aesKey } = await sealRequest(publicKey, plaintext);
   opts.onSealed?.({ envelope, plaintext });
