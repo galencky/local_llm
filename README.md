@@ -2,732 +2,196 @@
 
 > *A local AI strips patient identity before the cloud.*
 
-Structures Taiwanese hospital narratives into formal notes (SOAP, discharge
-summary, hospital course, …) without any identifier leaving the Mac Mini.
-
-An airlock joins two environments that must never meet. A language model running
-on your own Mac reads each note and removes every name, ID, date and ward before
-the outer door opens onto the cloud — and puts them back only after it shuts.
+Airlock turns a messy Taiwanese ward narrative into a formal hospital note — SOAP,
+discharge summary, hospital course, admission note, progress note — **without any
+patient identifier leaving the Mac Mini it runs on**.
 
 Created by **Kuan-Yuan Chen**. Built with **Claude Code**.
 Source: <https://github.com/galencky/local_llm>
 
+- **New here? Keep reading.** This page explains what it does and why that matters.
+- **Working on it, or fixing it?** The full mechanism, every script, and the
+  debugging playbook are in **[TECHNICAL.md](TECHNICAL.md)**.
+
+---
+
+## The problem
+
+Cloud language models are very good at turning a shift's worth of scribbled
+observations into a properly structured chart entry. They are also, legally and
+ethically, the last place a Taiwanese clinician can put a patient's name.
+
+Under Taiwan's Personal Data Protection Act, a medical record is special-category
+personal data. Pasting a ward note into a chatbot sends the patient's name, ID,
+medical record number, ward, bed, phone numbers and admission dates to a company
+on another continent. The obvious workaround — "I'll take the names out myself" —
+fails in practice for the same reason charting is hard in the first place: it is
+tedious, it happens at 3 a.m., and one missed surname is a disclosure.
+
+## The idea
+
+An airlock joins two environments that must never meet directly.
+
+A language model running **on your own Mac** reads the note first and takes out
+every name, ID, date, ward and address — replacing each with a numbered
+placeholder. Only then does the outer door open onto the cloud. The cloud model
+sees `[PATIENT_1]` and `[MRN_1]`, never the patient's name and never their chart
+number. It writes the structured note around those placeholders, and the real
+identifiers are put back **on the Mac, after the door has shut again**.
+
 ```
-browser ──AES-GCM sealed──▶ Cloudflare ──ciphertext──▶ Mac Mini (M4/16GB)
+browser ──AES-GCM sealed──▶ Cloudflare ──ciphertext──▶ Mac Mini (M4 / 16 GB)
                                                           │
-                                       regex scrub ───────┤  raw PHI never
-                                       LM Studio NER ─────┤  leaves this box
-                                                          ▼
+                                       pattern scrub ─────┤  raw patient data
+                                       local AI scrub ────┤  never leaves
+                                                          ▼  this box
                                          [PATIENT_1] [MRN_1] … ──▶ Gemini
                                                           │
-                                       re-hydrate ────────┤
+                                       put names back ────┤
 browser ◀──AES-GCM sealed──  Cloudflare ◀──ciphertext─────┘
 ```
 
-## Guarantees, and their limits
+## What happens to one note
 
-**What holds.** Cloudflare terminates TLS at its edge, so the tunnel is treated
-as hostile. Every payload is sealed in the browser with a per-request
-AES-256-GCM key, wrapped with the Mac Mini's RSA-OAEP-2048 public key. The reply
-— which does contain re-hydrated PHI — is sealed with the same ephemeral key.
-Cloudflare relays ciphertext in both directions. Gemini receives placeholders
-only. Postgres stores de-identified text only. The PII↔token map lives in a
-volatile `Map` with a 10-minute TTL and is explicitly purged in the request's
-`finally` block.
+1. **You paste the narrative** and pick a note format.
+2. **Your browser locks it.** The note is encrypted in the browser itself, with a
+   fresh key made for this one note.
+3. **It crosses the internet as ciphertext.** Cloudflare, which carries it, can
+   only relay bytes it cannot read.
+4. **The Mac Mini opens it** and runs two de-identification passes:
+   - **Pattern rules** catch the things that always look the same — national IDs,
+     medical record numbers, phone numbers, dates, staff codes, ward-bed cells.
+     These are deterministic: what they catch, they always catch.
+   - **A local AI model** catches what patterns cannot — a patient's name, a
+     relative, an attending, an address, an employer, a hospital. This runs on
+     your Mac, so the narrative with the names still in it never travels.
+5. **Only placeholders go to the cloud.** Gemini formats the note it is given and
+   is told, in the strongest terms, to copy every placeholder back exactly.
+6. **The Mac puts the identifiers back**, using a map that exists only in memory
+   and is destroyed the moment the request ends.
+7. **The finished note comes home sealed**, and you get two copies: one with the
+   real names for the chart, one still de-identified for anywhere else.
 
-**What does not hold, and you should know it.** The public key is served from
-`/api/keys` over the same tunnel it protects. An attacker who controls the edge
-could substitute their own key and read everything. This design defeats passive
-inspection and incidental logging at the edge — not an active edge adversary.
-To close that gap, pin the key: after first run, copy the value from
-`/api/keys` into `NEXT_PUBLIC_PINNED_KEY_ID` and have the client refuse any
-`keyId` that does not match, or distribute the SPKI out of band.
+The whole round trip takes roughly 15–70 seconds, most of it the two model calls.
 
-Two other honest caveats: the NER pass is probabilistic, so the inspector drawer
-exists to be read, not skipped; and `[MRN]` matching (`\b\d{7,8}\b`) is
-deliberately over-eager and will sometimes swallow an accession number.
+## Why it matters
 
-## Running it with Docker (recommended)
+**The cloud never sees a patient.** Not "we told it not to look" — it is not sent.
+You can check this yourself: after any run, **Wire view** shows the literal bytes
+that crossed the internet, and the **redaction list** shows every identifier that
+was taken out, masked.
+
+**Nothing identifying is written down.** The audit database stores the
+de-identified note only. There is no column for the raw text and none for the
+name-to-placeholder map — that map lives in RAM for one request and is then
+wiped. This is why History can never show you a real name: it is a record of what
+went to the cloud, not a second copy of the chart.
+
+**It fails closed.** If the local model is unreachable, the request is refused
+rather than sent to the cloud with weaker scrubbing. Refusing to write a note is
+an inconvenience; leaking a name is not.
+
+**Only people you name can use it.** Sign-in is Google, gated by an email
+allowlist that denies everyone when it is empty. An instance published to the
+internet with no allowlist would otherwise accept any Google account on earth.
+
+## What it does not promise
+
+This is stated plainly because a de-identification tool that oversells itself is
+worse than none.
+
+- **The local AI pass is probabilistic.** It is very good and it is not perfect.
+  That is exactly why the redaction list exists — read it before you file a note.
+- **The pattern rules catch shapes they have been taught.** A format they have
+  never met has no rule. The current list, and what once slipped through it, is
+  in [TECHNICAL.md](TECHNICAL.md).
+- **Over-redaction happens, and is the safe failure.** A seven-digit accession
+  number can be mistaken for a medical record number. An odd-looking note is a
+  cost worth paying for a name that never left.
+- **The encryption defeats a passive eavesdropper, not an active one.** The
+  server's public key is served over the same tunnel it protects, so someone who
+  controlled that edge could substitute their own. Pinning the key closes this;
+  see [TECHNICAL.md](TECHNICAL.md).
+- **One note at a time.** 16 GB of unified memory runs one model pass, so several
+  clinicians can use it at once but their notes queue rather than run in parallel.
+
+## Running it
+
+You need a Mac with [LM Studio](https://lmstudio.ai), Docker Desktop, and a
+Google Gemini API key.
 
 ```bash
-lms server start --port 1234          # LM Studio stays on the HOST
-lms load google/gemma-4-e4b
-docker compose up -d --build
+cp .env.example .env          # then fill it in — see the comments in the file
+
+lms server start --port 1234  # LM Studio stays on the HOST, not in Docker
+lms load google/gemma-4-12b   # any instruction model that reads Traditional Chinese
+
+docker compose up -d --build  # app + Postgres + migrations
 ```
 
-That brings up the app and Postgres, applies migrations, and serves on
-<http://localhost:3000>.
+Then open <http://localhost:3000>.
 
-**LM Studio is deliberately not containerised.** Docker Desktop on macOS runs a
-Linux VM with no GPU passthrough, so a containerised model would lose Metal/MLX
-acceleration entirely. It runs on the host; the container reaches it at
+LM Studio is deliberately **not** containerised: Docker Desktop on macOS has no
+GPU passthrough, so a model inside a container would lose Metal acceleration
+entirely. It runs on the host and the container reaches it at
 `host.docker.internal:1234`.
 
-**Set Docker Desktop's VM to 2 GB** (Settings → Resources). Measured on this
-box, with `gemma-4-e4b` loaded:
+Two settings that matter more than they look:
 
-| Docker VM | Stack usage | Host free |
-| --- | --- | --- |
-| 8 GB (default) | 215 MB | 2.7 GB |
-| 2 GB | 215 MB | **6.2 GB** |
+- `AUTH_ALLOWED_EMAILS` is **mandatory**. Empty means nobody, not everybody.
+- `AIRLOCK_DATA_DIR` is where Postgres and the server's keypair actually live, on
+  the Mac's own filesystem rather than inside Docker. A Docker Desktop upgrade
+  destroyed this database once; a bind mount survives that.
 
-The whole stack peaks around 215 MB, so the default 8 GB is pure waste — and on
-a 16 GB Mac every gigabyte the VM reserves is a gigabyte the model cannot use.
-The full acceptance suite passes 62/62 at 2 GB.
-
-Two things that will bite you:
-
-- **Do not scale the `app` service.** The single-slot compute lock lives in that
-  process's memory; a second replica would silently break it.
-- **`docker compose` auto-loads `.env` for interpolation**, so a host-specific
-  value there can override a compose default. `LMSTUDIO_BASE_URL` is the trap —
-  the host's `127.0.0.1` means "this container" inside the container. That one
-  is pinned to `DOCKER_LMSTUDIO_URL` in the compose file for exactly this
-  reason.
-
-The `airlock-keys` volume holds the RSA identity and **must** persist: a
-regenerated keypair breaks decryption for every browser tab still holding the
-old public key.
-
-## Setup (running directly on the host)
-
-```bash
-npm install
-```
-
-**1. Postgres** (audit log, de-identified text only)
-
-```bash
-brew install postgresql@17 && brew services start postgresql@17
-# postgresql@17 is keg-only; add it to your PATH for psql/createdb:
-echo 'export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"' >> ~/.zshrc
-createdb clinical_notes
-```
-
-Set `DATABASE_URL` in `.env`, then:
-
-```bash
-npm run db:migrate
-npm run db:smoke       # inserts and deletes one de-identified row
-```
-
-**2. LM Studio** — launch it, load an instruction-following model that handles
-Traditional Chinese (Qwen2.5-7B-Instruct or Llama-3.1-8B-Instruct fit 16GB
-comfortably), and start the local server on port 1234.
-
-**3. Gemini** — put `GEMINI_API_KEY` in `.env`.
-
-**4. Run**
-
-```bash
-npm run dev          # http://localhost:3000
-npm run build && npm start
-```
-
-**5. Publish it** — easiest via a dashboard token, which needs no browser login
-on the Mac:
-
-```bash
-# Zero Trust > Networks > Tunnels > Create a tunnel > Cloudflared
-# Copy the token into .env as TUNNEL_TOKEN, then in the tunnel's
-# "Public Hostname" tab route llm.galenchen.uk -> HTTP -> app:3000
-docker compose --profile tunnel up -d
-```
-
-Or via the CLI (`cloudflared tunnel login` then `bash ops/setup-tunnel.sh`).
-
-Then set `AUTH_URL="https://llm.galenchen.uk"` in `.env` and add the matching
-redirect URI to the Google OAuth client. Details and the pre-flight checklist:
+To publish it to a hospital over a Cloudflare Tunnel, see
 [ops/PUBLISH.md](ops/PUBLISH.md).
 
-Verified end to end through a live Cloudflare tunnel: the auth gate, the
-`__Secure-` session cookie, the full de-identification pipeline, and — the one
-that could have failed silently — **Cloudflare does not buffer the progress
-stream**, so the stage list stays live over the tunnel.
+## Using it
 
-## Seeing it for yourself
+**Formats.** Five built-in note shapes. The format you pick is recorded on the
+audit row, so two notes labelled "SOAP" are comparable.
 
-After any run, **Wire view** in the output panel shows the literal request body
-that crossed the internet, beside the plaintext it replaced: the RSA-wrapped AES
-key, the GCM nonce, the ciphertext decoded as text (gibberish, by design), the
-first 96 bytes as hex, and the whole POST body. Nothing extra is fetched to
-render it — those bytes are already in the browser.
+**Routines.** A saved instruction block per department — "always call out
+dialysis access and dry weight under Objective". Written once, appended to every
+note that uses it. Routines are screened for patient data when you save them and
+refused if any is found.
 
-## Proving it, rather than asserting it
+**Custom mode.** Hands you both models' prompts and sampling parameters for a
+single run. Four things it still cannot switch off: the pattern scrub, the
+requirement that the local pass return usable output, the verbatim check on every
+span it returns, and the placeholder rules the cloud model is given. Custom
+prompts are never stored — the audit row says so rather than implying the
+built-in prompts wrote the note.
+
+**Checking the work.** Four drawers: the **redaction list** (what was taken out),
+**Wire view** (what crossed the internet), **Prompts** (exactly what each model
+is told, read live from the running server), and **History** (your past notes,
+de-identified, searchable).
+
+## Proving it rather than asserting it
 
 ```bash
-npm run prove:e2ee     # wiretap the traffic and try to read the note
-npm run db:inspect     # dump the audit schema and scan every row for identifiers
+npm run verify        # offline: encryption, both scrubbers, re-hydration, the lock
+npm run prove:e2ee    # wiretap the traffic and try to read the note out of it
+npm run db:inspect    # dump the audit schema and scan every row for identifiers
+npm run e2e:system    # full acceptance run against the live stack
 ```
 
-`prove:e2ee` runs a proxy between the browser and the app — exactly where
-Cloudflare sits — records every byte in both directions, then tries to recover
-the note from the capture. It reports the wrapped-key and ciphertext sizes,
-shows the ciphertext decoded as text, and checks that no identifier appears
-anywhere in the traffic, that the AES key cannot be unwrapped without the Mac
-Mini's private key, and that GCM rejects tampered ciphertext.
-
-`db:inspect` prints every table and row count, the full `AuditLog` column list,
-one real row in both directions, and then scans the whole table for known
+`prove:e2ee` puts a recording proxy exactly where Cloudflare sits, captures every
+byte in both directions, and then tries to recover the note from the capture.
+`db:inspect` prints what the database holds and scans the whole table for known
 identifiers.
 
-## Verification
-
-```bash
-npm run verify           # offline: crypto, scrubbers, re-hydration, lock
-npm run e2e              # against a running server: sealed round-trip
-npm run e2e:concurrency  # proves the 429 single-slot limit
-npm run e2e:routine      # same note with and without a specialty routine
-npm run e2e:system       # full acceptance run: routines, PHI guard, ward note,
-                         # audit invariant, input cap, streaming, 429
-npm run db:smoke         # audit database round-trip
-
-# whole pipeline with both externals stubbed (no Gemini key, no model needed):
-GEMINI_API_KEY=stub GEMINI_BASE_URL=http://localhost:8899 npm run dev
-npm run e2e:full
-
-# custom mode: that the user's prompts and parameters reach both models, and
-# that what custom mode may NOT switch off held anyway. Stub ports are
-# configurable, because a dev box usually has the real LM Studio on :1234.
-GEMINI_API_KEY=stub GEMINI_BASE_URL=http://localhost:8899 \
-  LMSTUDIO_BASE_URL=http://localhost:1299/v1 npm run dev -- -p 3100
-AIRLOCK_BASE=http://localhost:3100 LMSTUDIO_STUB_PORT=1299 npm run e2e:custom
-```
-
-`npm run verify` needs no database, no API key, and no model — it stubs LM
-Studio on port 11234.
-
-## Configuration
-
-| Variable | Purpose |
-| --- | --- |
-| `DATABASE_URL` | Local Postgres for the audit log |
-| `GEMINI_API_KEY` / `GEMINI_MODEL` | Cloud formatting layer. Free-tier keys are capped per model per day (20/day on `gemini-3.6-flash` at time of writing). |
-| `GEMINI_MODEL` | Default starting rung of the ladder. |
-| `GEMINI_MODEL_LADDER` | Optional override of the whole ladder, best first, comma separated. |
-| `LMSTUDIO_BASE_URL` / `LMSTUDIO_MODEL` / `LMSTUDIO_TIMEOUT_MS` | Local NER pass |
-| `ALLOW_DEGRADED_SCRUB` | `false` (default) aborts the request when the local NER pass is unavailable. Setting `true` permits regex-only scrubbing — it weakens de-identification and the UI shows a standing warning. |
-| `KEY_STORE_FILE` | Filename inside `./.keys/` for the RSA keypair |
-| `GEMINI_BASE_URL` | Optional endpoint override (egress proxy, regional endpoint, local stub). Unset in normal operation. |
-
-## Layout
-
-| File | Role |
-| --- | --- |
-| `src/lib/crypto.ts` | Isomorphic WebCrypto. No Node imports — it ships to the browser. |
-| `src/lib/keystore.ts` | Server RSA keypair, persisted to `./.keys/` |
-| `src/lib/concurrency.ts` | Single-slot lock with stale reclaim |
-| `src/lib/scrubber-regex.ts` | Taiwan ID / MRN / phone / ROC+Gregorian dates. Rule order is load-bearing. |
-| `src/lib/scrubber-llm.ts` | LM Studio NER, open tag vocabulary, verbatim-span validation, clinical stop-list, fail-closed |
-| `src/lib/memory-cache.ts` | `TokenVault` + 10-minute TTL store. **The only place raw PHI lives on the server.** |
-| `src/lib/gemini.ts` | Note formats and the placeholder-preserving system prompt |
-| `src/lib/db.ts` | Prisma singleton (`@prisma/adapter-pg`) |
-| `src/lib/auth.ts` | Google sign-in, with the mandatory email allowlist |
-| `src/lib/model-registry.ts` | The Gemini ladder and observed availability |
-| `src/lib/prompts.ts` | Specialty routine CRUD + the guard that keeps PHI out of saved prompts |
-| `src/lib/custom-mode.ts` | Custom mode's contract: defaults, parameter ranges, the placeholder kernel, and the clamp both sides of the wire run |
-
-## Nightly backups
-
-`ops/backup-airlock.sh` dumps the database with the container's own `pg_dump`
-(always the right version), gzips it into `~/Documents/airlock-backups/` so Time
-Machine picks it up, and prunes dumps older than 30 days. Files are `chmod 600`,
-the directory `700`.
-
-Installed as a launchd job that fires **hourly at :59** — daily was tried first
-and a 24-hour window is precisely what lost a day of history. Each dump is a few
-KB, so 30 days of hourly retention costs single-digit megabytes. If the Mac is
-asleep, launchd runs it at next wake.
-
-```bash
-cp ops/uk.galenchen.airlock.backup.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/uk.galenchen.airlock.backup.plist
-bash ops/backup-airlock.sh          # run once by hand to check
-tail ~/Documents/airlock-backups/backup.log
-```
-
-Restoring is a plain `psql` load — verified end to end, all seven tables and
-their rows:
-
-```bash
-gunzip -c ~/Documents/airlock-backups/airlock_YYYY-MM-DD_HHMM.sql.gz \
-  | docker compose exec -T db psql -U airlock -d clinical_notes
-```
-
-This is the answer to "a Docker reset would nuke my data" — the volume is
-already durable across restarts and `compose down`, and the dump covers the one
-case that is not: `compose down -v` or a Docker factory reset.
-
-## Sign-in
-
-Google sign-in via Auth.js, gating **everything** — `/` redirects anonymous
-browsers to `/signin`, and every API route returns 401. Before this, anything
-that could reach the tunnel could submit clinical text.
-
-```bash
-# 1. Google Cloud Console → APIs & Services → Credentials → OAuth client ID
-#    Type: Web application. Authorised redirect URIs:
-#      http://localhost:3000/api/auth/callback/google
-#      https://llm.galenchen.uk/api/auth/callback/google
-# 2. Put the client id/secret in .env, plus:
-openssl rand -base64 32        # -> AUTH_SECRET
-```
-
-**`AUTH_ALLOWED_EMAILS` is mandatory and fails closed.** An unset or empty
-allowlist denies *everyone* rather than allowing everyone — without it, any
-Google account on earth could sign in to a tunnelled instance. Accepts
-addresses and whole domains:
-
-```
-AUTH_ALLOWED_EMAILS="you@example.com,@yourhospital.org.tw"
-```
-
-Airlock stores only what OAuth returns: name, email, avatar.
-
-### Developer bypass
-
-For working on the UI without Google, `DEV_LOGIN_ENABLED=true` adds a password
-form to `/signin` that signs you in as `airlock_dev`.
-
-It mints a **real** session row rather than threading a special case through the
-app, so ownership, history scoping and tenant isolation behave exactly as they
-do for a Google account — a bypass that takes a different code path is a bypass
-that hides bugs.
-
-Two guards, because `llm` on a public hostname is not authentication: it is off
-unless explicitly enabled, and it refuses any request whose `Host` is not
-localhost unless `DEV_LOGIN_ALLOW_REMOTE=true`. While enabled, a standing amber
-banner says so at the top of every page.
-
-## Past notes
-
-Each run is filed against the clinician who made it, and the **History** drawer
-recalls them — searchable, expandable, copyable, deletable.
-
-Everything in history is de-identified and permanently so. The token→PII map is
-destroyed when the request that created it ends, so history *cannot* show a
-real name; it is a record of what crossed to the cloud, not a second copy of
-the chart. One clinician can never see, reuse or delete another's notes or
-routines — the acceptance suite asserts this both ways.
-
-## Input budget
-
-The cap is a **safety** limit before it is a performance limit: the local NER
-pass runs on a ~4B model with a 34k context, and a note longer than it can
-attend to reliably starts losing names — a PHI leak, not a quality dip.
+## Reading further
 
 | | |
 | --- | --- |
-| Comfortable | up to 6,000 characters — a full shift handover fits easily |
-| Soft warning | past 6,000, the UI warns and asks you to check the redaction list |
-| Hard refusal | past 20,000, the request is rejected client- and server-side |
-
-Both limits live in `src/lib/limits.ts` and are shared by the browser counter
-and the server, so the two can never disagree. The live counter reports words
-(Latin words plus CJK characters, since Chinese is unspaced) and characters
-against the cap.
-
-## Live progress and the queue
-
-`/api/process-note` streams Server-Sent Events, one per pipeline stage, so the
-clinician watches real work rather than a spinner. Only the final `result`
-event carries the sealed payload; progress events never contain note content.
-
-The server still refuses rather than queues — that is what protects the single
-compute slot. The queue is client-side: on a 429 the browser retries every two
-seconds while displaying what the Mac Mini is actually busy with, read live from
-`/api/status`. `src/lib/concurrency.ts` publishes the held slot's current stage
-for exactly this.
-
-## The model ladder
-
-The cloud model is a ladder, best first, ending on the lite models — on the
-free tier those carry **500 requests/day** against the flagships' 20, which is
-the difference between "the tool died at lunchtime" and "the tool kept working,
-in a lighter voice". Pro models are deliberately absent: the free tier grants
-them zero quota, so they would only ever be a button that fails.
-
-| Rung | Free-tier RPD |
-| --- | --- |
-| 3.7 / 3.6 / 3.5 / 3 / 2.5 Flash | 20 each |
-| 3.5 Flash Lite, 3.1 Flash Lite | 500 each |
-| 2.5 Flash Lite | 20 |
-
-The selector bar on the page picks where a run **starts**.
-
-**Availability is observed, never predicted.** Airlock cannot see your Google AI
-Studio dashboard — no API reports remaining quota — so a rung greys out only
-after Google has actually refused it. That observation is written to the
-`ModelCooldown` table, so a container restart does not forget which models are
-spent and burn a request per rung rediscovering it.
-
-The cooldown is honest about which kind of refusal it was: a per-day exhaustion
-is held until midnight US Pacific, not retried in 25 seconds because a
-`retryDelay` hint said so.
-
-The 2.5-era models are deliberately absent — Google returns NOT_FOUND for them
-on keys issued after their retirement, so listing them would only spend a
-request rediscovering that daily.
-
-When a rung is spent the request walks down from there rather than failing:
-
-```
-cloud   running
-cloud   running   gemini-3.6-flash quota → gemini-3.5-flash
-cloud   done      gemini-3.5-flash
-```
-
-The downgrade is **never silent**. It streams as a progress event while it
-happens, the button greys out live, the footer shows the downgrade in amber,
-and `AuditLog.modelUsed` records the model
-that actually wrote the note. A lighter model is a different clinical draft, so
-the clinician is told which one they are reading.
-
-Auth failures and safety-filter blocks do **not** trigger fallback — only
-quota, overload, and retired-model errors, which are the ones another model can
-actually solve.
-
-## Specialty routines
-
-A *routine* is a saved instruction block appended to the Gemini prompt, so each
-department encodes its charting habits once — "always call out dialysis access
-and dry weight under Objective", "number the Plan, one line per problem". Manage
-them from **Manage** next to the routine selector, or over the API:
-
-```
-GET    /api/prompts        list
-POST   /api/prompts        create   { name, specialty?, instruction, format?, isDefault? }
-PATCH  /api/prompts/:id    update
-DELETE /api/prompts/:id    delete
-```
-
-Instruction precedence, weakest to strongest: the built-in format skeleton, then
-the saved routine, then the one-off steer typed under the input box. All three
-sit *below* the placeholder rules in the system instruction — a routine cannot
-talk the model into inventing a name.
-
-Routines are configuration, not clinical data, and they live in Postgres
-forever. The API therefore runs every saved routine through the deterministic
-scrubber and **rejects it with HTTP 422 if any identifier matches** — a patient
-name pasted into a template would quietly defeat the whole pipeline. The audit
-row records which routine was in effect by name.
-
-## Guided and custom mode
-
-A **Mode** strip sits directly under the header, because which mode you are in
-changes what every control below it means.
-
-**Guided** is the default and the one a ward should stay on. Both system
-prompts and the five note skeletons are compiled in; your instructions go in a
-saved routine, appended beneath them.
-
-**Custom** hands both prompts and both models' sampling parameters over —
-selecting it opens the editor, with every box already carrying a worked
-example, and a **Load built-in** button that pulls the real guided-mode text
-from `/api/prompt-config` so you can start from what actually ships and change
-one rule rather than reinventing the whole thing.
-
-| | You own | Range |
-| --- | --- | --- |
-| Local | De-identification prompt, LM Studio model | — |
-| Local | `temperature`, `top_p`, `max_tokens` | 0–2, 0–1, 256–16384 |
-| Cloud | System instruction, formatting instruction | ≤ 8000 chars each |
-| Cloud | `temperature`, `topP`, `topK`, `maxOutputTokens` | 0–2, 0–1, 0–200, 0–65536 |
-
-Custom prompts live in `localStorage` and nowhere else. They are deliberately
-not in Postgres: a saved routine is PII-screened on write and recorded by name
-on every audit row, and a free-form prompt store would be neither. They travel
-to the Mac Mini inside the sealed envelope, are used once, and are gone when
-the request ends — so the audit row records **"Custom mode — prompts not
-stored"** rather than implying the built-in prompts produced that note.
-
-### What custom mode cannot switch off
-
-These four hold because they are structural rather than prompt-borne. Nothing
-in the editor reaches them, and `npm run e2e:custom` asserts each one:
-
-1. **The pattern scrub runs first, always.** Taiwan IDs, MRNs, phone numbers
-   and dates are gone before a custom prompt sees the note. The floor is
-   regex-only, never nothing.
-2. **The local pass must still return entity JSON** in the six known
-   categories. A prompt that talks the model out of that shape fails the run
-   closed, exactly as an unreachable LM Studio does — it does not quietly pass
-   a narrative full of names to the cloud.
-3. **Every span is still checked verbatim** against the source, screened
-   against the clinical stoplist, and length-capped, so an invented or
-   mislabelled span cannot be redacted out of the note.
-4. **The placeholder-integrity kernel is appended** to whatever system
-   instruction you write. Without it Gemini renumbers `[DATE_2]` and the note
-   can no longer be re-hydrated — that is every run broken rather than any
-   particular judgement call, so it is not a setting. It is shown in full in
-   the editor, and served at `/api/prompt-config`.
-
-What custom mode *can* do is catch fewer names than the built-in prompt does,
-and what it misses goes to Google. The mode strip says so while custom is
-selected, and the redaction list is the check to read before filing.
-
-Prompts are validated on both sides of the wire. The editor blocks the run
-button and names the problem; the route re-runs the same check on arrival,
-because the payload is assembled in the browser and a hand-rolled client could
-put anything in it. Numbers are clamped; empty or over-long prompts are
-refused rather than silently defaulted, since running a note under instructions
-the clinician never saw is worse than not running it.
-
-In custom mode the format buttons are marked **label only** — your formatting
-instruction decides the note's shape, and the format survives just as the label
-on the audit row and in History. The saved routine and the one-off box are
-still appended beneath your instruction, in that order; leave them empty if you
-want the editor to be the whole of it.
-
-## Documentation
-
-| | |
-| --- | --- |
-| [docs/DATABASE.md](docs/DATABASE.md) | Schema diagram, what each table holds, and what is deliberately absent |
-| [ops/PUBLISH.md](ops/PUBLISH.md) | Cloudflare Tunnel, both routes, and the pre-flight checklist |
-
-## Configuration files
-
-| | |
-| --- | --- |
-| `.env` | **Never committed.** Holds the Gemini key, Google OAuth secret, `AUTH_SECRET` and the tunnel token. |
-| `.env.example` | The tracked template. Copy to `.env` and fill in. |
-| `docker-compose.yml` | app + Postgres + migrate, and an opt-in `tunnel` profile |
-| `Dockerfile` | Multi-stage build to a standalone Next server |
-
-## Known limits of the regex pass
-
-Rules added after real notes leaked through them, kept here because the list is
-the honest statement of what this layer does and does not catch:
-
-| Shape | Example | Why it was missed |
-| --- | --- | --- |
-| Staff code | `DOC4674E` | Neither 7-8 digits nor a word |
-| Name beside a staff code | `DOC4674E   劉展瑋` | In a tabular header there is no sentence for the NER to recognise a name by |
-| Ward-bed cell | `A092- 36` | Not the `8B病房` form the NER was shown |
-| Month/day, no year | `1/21`, `2/3-2/5` | The date rule needs three components |
-
-Month/day is deliberately bounded to real months and days and refuses anything
-that reads as a dose (`1/2 tab`, `1/2 vial`), because mangling a paediatric dose
-is a patient-safety problem rather than a formatting one. `152/94 mmHg` and
-`(L/R) 5+/6+` are unaffected.
-
-**This layer is still not a guarantee.** It catches shapes it has been taught.
-Read the redaction list before filing a note — that is what it is for.
-
-## What the NER pass catches, and why its tags are open
-
-The local model is asked for the semantic identifiers regex cannot see — names,
-wards, employers, addresses — **and also for the structured ones the regex pass
-already covers**. That overlap is deliberate. Regex catches shapes it was
-taught; a format it has never met (a passport, an insurance number, a Line ID)
-has no rule, and before this the model had no category to report it under
-either, so a correct detection was dropped on the floor.
-
-So the category list in the prompt is a *suggestion, not a whitelist*. If the
-model meets an identifier that fits nothing listed, it is told to coin its own
-tag — `PASSPORT`, `VEHICLE_PLATE`, `BANK_ACCOUNT`. Nothing downstream needs to
-know the vocabulary: a token is a label plus a number, and re-hydration is a
-literal lookup.
-
-What is **not** negotiable is the shape. `normaliseCategory` folds anything
-outside `[A-Z_]` away and length-caps the result before it reaches the vault,
-so `[LABEL_1]` can never collide with clinical text, break the placeholder
-guard, or survive re-hydration. The model chooses the name; the code guarantees
-the round trip.
-
-Measured on `gemma-4-12b` over a 17-identifier synthetic note, three trials,
-temperature 0:
-
-| Prompt | LLM alone | regex → NER |
-| --- | --- | --- |
-| Six semantic categories (previous) | 9/17 | 15/17 |
-| Open vocabulary (current) | **17/17** | **17/17** |
-
-No clinical term was wrongly redacted in any arm — `Troponin I`, `Crohn's
-disease`, `Glasgow Coma Scale`, `Foley`, `1 tab` and `CCU` all survive, which
-is what rules 5–7 of the system prompt are for.
-
-Two things this does **not** change. The pass is still probabilistic, so the
-inspector drawer is still there to be read. And the regex pass is still first
-and still load-bearing: on the same note, the model alone caught **zero**
-structured identifiers under the old prompt, and regex is deterministic where
-the model is not. Widening the prompt is defence in depth, not a replacement.
+| [TECHNICAL.md](TECHNICAL.md) | How every part works, every script, and how to debug it |
+| [docs/DATABASE.md](docs/DATABASE.md) | Schema, what each table holds, what is deliberately absent |
+| [ops/PUBLISH.md](ops/PUBLISH.md) | Cloudflare Tunnel and the pre-flight checklist |
 
 ## The rule that matters
 
-`TokenVault` contents must never be written to Postgres, a file, a log line, or
-telemetry. If you add logging to the pipeline route, log `deidentifiedInput` —
-never `plaintext`, never `noteText`, never `vault`.
-
-## Where the data lives, and why not in a Docker volume
-
-Postgres and the RSA keypair are **bind-mounted to the Mac's own filesystem**,
-under `AIRLOCK_DATA_DIR` (default
-`~/Library/Application Support/ProjectAirlock`). They are deliberately *not*
-Docker named volumes.
-
-This is not a preference. Named volumes live inside Docker Desktop's VM disk
-image, and **a Docker Desktop major upgrade can reset that image** — going from
-28.x to 29.x destroyed this database, the routines, the sessions and the RSA
-keypair in one step, with no warning and nothing in `docker volume ls`
-afterwards. A bind mount survives Docker upgrades, factory resets, and
-uninstalling Docker altogether.
-
-Verified end to end: write a note and a routine through the site, quit Docker
-Desktop entirely, relaunch, and read both back — along with the same session
-and the *same* RSA `keyId`.
-
-What still destroys data: deleting `AIRLOCK_DATA_DIR` yourself. `docker compose
-down`, `down -v`, rebuilds and Docker upgrades no longer touch it.
-
-The other way to lose it is a `TRUNCATE` run by hand. The acceptance suite is
-deliberately non-destructive: it creates its own users and removes only what it
-created.
-
-## On a 1024×768 ward screen
-
-Built for the monitor you actually have. **No control ever loses its label** —
-the header wraps to a second row instead, and only the decorative strapline is
-dropped. Measured at 1024×768: all eight chips readable, no horizontal
-overflow, and **Encrypt & structure** on screen without scrolling (it used to
-be below the fold). Verified at 1024, 1280, 1600 and 1920.
-
-## Light and dark
-
-A three-state control in the header: **Light**, **Dark**, **Follow system**.
-"System" is a real state rather than the absence of a choice — a ward monitor
-that dims at dusk should keep doing so unless someone says otherwise. The choice
-is written to `<html data-theme>` and mirrored to `localStorage`, and an inline
-script applies it before first paint so there is no white flash on a night
-shift.
-
-Two details that matter more than they look:
-
-- Tailwind v4 ties `dark:` to `prefers-color-scheme`. With ~70 `dark:`
-  utilities in the UI, an explicit toggle would have left them fighting the CSS
-  variables — so the variant is redefined to honour the attribute *and* the OS
-  preference.
-- The theme lives in the DOM, not React state, and the toggle reads it through
-  `useSyncExternalStore`. That avoids both a hydration mismatch and a
-  render-time `localStorage` read.
-
-Two light-mode bugs the toggle exposed, both worth naming:
-
-- Spent model chips were `text-[var(--muted)]/60` on `bg-[var(--border)]/40`
-  with a strikethrough. In light mode those two converge — the labels measured
-  **1:1**, i.e. the text was exactly the colour of its own background and
-  simply vanished. Spent now reads as "off", not "erased", and clears AA in
-  both themes (7.04:1 light, 7.08:1 dark). Translucent fills over a white
-  surface are also gone: solid tokens only, since an alpha wash is what made
-  this hard to see coming.
-- **"Copy clean note" was dangerously ambiguous.** In a de-identification tool
-  "clean" reads as "de-identified" — but it copied the *re-hydrated* note, full
-  of real names. It is now two buttons that say what they contain:
-  **Copy note · with names** (accent-coloured, for the chart) and
-  **Copy de-identified** (for anywhere else). Verified: the first contains real
-  identifiers and no placeholders, the second the reverse.
-
-`npm run audit:contrast` walks **every text node on every surface** — sign-in,
-the main page empty / typed / processing / with a result, and all six drawers —
-in both themes. It composites through alpha layers and `opacity` exactly as
-rendered, so nothing is judged by the class name alone.
-
-Widening it from "controls" to "all text", and from resting states to
-in-flight ones, turned 0 known problems into **135**. They were three causes,
-not 135 bugs:
-
-| Cause | Effect |
-| --- | --- |
-| `opacity` used to dim things | Pending pipeline steps 2.59:1, model chips 2.21:1 while a note ran. Dimming drags text toward whatever it sits on — the same mistake that once made spent chips **1:1**, i.e. literally invisible. |
-| Tailwind `-600`/`-500` shades on white | Status pills 3.62:1, redaction tags 3.2:1. Fine in dark at `-400`; the light half needed `-700`. |
-| `animate-pulse` on the busy pill | The "Mac Mini Busy" label dipped to **2.14:1** mid-cycle — unreadable exactly when it matters. The icon pulses now, not the text. |
-
-Result: **1,763 text nodes checked, zero below AA, in both themes.**
-
-Solid buttons stay white-on-green in both themes. The fix for the dark-mode
-contrast failure was to darken the *fill* (`--accent-solid`), not to flip the
-label to dark text — a green button with dark text stops reading as the primary
-action. `--accent` remains the lighter tint used for accent *text* and borders.
-
-Long prompts and payloads no longer look truncated. Where a box must stay
-capped it uses `.scroll-visible`, which forces a visible scrollbar: macOS
-overlay scrollbars hide until you gesture, so a clipped box reads as missing
-content rather than scrollable content. In the Prompts drawer the cap was
-removed altogether — one scroll region beats a scroller nested in a scroller.
-
-Light mode was rebalanced rather than inverted: `--muted` darkened so secondary
-text clears 4.5:1 on white, panels given a faint elevation because a border
-alone is too weak on an off-white monitor, and a visible focus ring added.
-Measured in light mode — body 17.1:1, headings 7.0:1, submit button 6.4:1,
-footer 6.5:1; all AA.
-
-## Multiple clinicians
-
-Yes, with one caveat worth understanding.
-
-Sign-in, history and routines are fully per-user: three clinicians can work at
-once and each sees only their own notes. But **the compute slot is global, not
-per user** — 16 GB of unified memory runs one model pass at a time, so notes
-queue rather than run in parallel. A waiting client shows what the box is busy
-with and starts automatically when the slot frees.
-
-Measured with three simultaneous users:
-
-```
-carol   done at  9.5s  (waited out 0 busy replies)
-bob     done at 13.9s  (waited out 5 busy replies)
-alice   done at 17.9s  (waited out 7 busy replies)
-3/3 completed, each seeing only their own note
-```
-
-So it is genuinely multi-user, but throughput is one note at a time. For a ward
-round where several people submit at once, expect the last person to wait
-roughly *n* × the time of one note.
-
-## What each model is told
-
-The **Prompts** drawer shows both system prompts verbatim — the local NER
-prompt and the Gemini system instruction — plus every format skeleton, with a
-copy button.
-
-All of it is **read-only, deliberately**:
-
-- The local prompt *is* the de-identification step. Weakening it would silently
-  widen what reaches the cloud.
-- The Gemini system instruction carries the placeholder rules that let a note be
-  re-hydrated at all, and the rules that stop the model inventing findings.
-- The format skeletons are what `AuditLog.noteFormat` refers to. If they drifted
-  per user, two rows both labelled "SOAP" would not be comparable.
-
-Customisation goes in a **saved routine**, or the one-off box for a single note.
-Both are appended *beneath* the fixed rules, so a routine can shape the note
-without overriding what protects the patient. Routines are owned, PII-screened
-on save, and recorded by name on every audit row — so a note can always be
-traced back to the instructions that produced it.
-
-The other door is **custom mode**, which replaces both prompts wholesale for a
-single run. It is deliberately a different door: it keeps nothing, it is marked
-as such on the audit row, and it carries a standing warning while it is on. See
-[Guided and custom mode](#guided-and-custom-mode).
-
-## Stale tabs fix themselves
-
-Every build gets an id, exposed in `/api/status` and baked into the browser
-bundle. A tab left open across a deploy notices the mismatch on its next poll
-and reloads once. This is what a removed banner surviving on screen until a
-manual reload actually was — old JS, not old code.
-
-The pipeline is similarly forgiving about the RSA key: if the server reports it
-could not decrypt, the client re-fetches the public key past any cache and
-retries once, rather than telling a clinician to reload mid-note.
-
-## Housekeeping notes
-
-- `npm run db:inspect` is the fastest way to satisfy yourself that the audit
-  table holds nothing identifying.
-- The container healthcheck hits `/api/health`, which is public and returns
-  `{"ok":true}` and nothing else. Every other route is behind sign-in, so a
-  probe against `/api/status` would fail forever with a 401.
-- Docker build cache grows quickly across rebuilds. `docker builder prune -af`
-  reclaims it without touching the `airlock-db` or `airlock-keys` volumes.
+If you change the pipeline: the name-to-placeholder map must never be written to
+Postgres, to a file, to a log line, or to telemetry. Log the de-identified text.
+Never the note, never the map.

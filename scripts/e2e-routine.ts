@@ -3,10 +3,18 @@
  * routine — to confirm the routine reaches Gemini and shapes the output.
  *
  *   npx tsx scripts/e2e-routine.ts "<routine name>"
+ *
+ * Every route is behind sign-in, so the harness mints a real Auth.js session
+ * row. Note that a routine is per-owner: a brand-new test user sees only
+ * shared (ownerless) routines, so pass the name of one of those, or run this
+ * against a routine you created as a shared one.
  */
+import "dotenv/config";
 import { runPipeline } from "../src/lib/pipeline-client";
+import { createTestSession, destroyTestUser, type TestSession } from "./test-session";
 
 const base = "http://localhost:3000";
+let who: TestSession;
 const wanted = process.argv[2] ?? "Nephrology ward round";
 
 const NOTE = `病歷號 4471902，患者林淑惠，身分證 H284549486，女性 74 歲，8B病房 15-2床。
@@ -21,15 +29,25 @@ async function run(promptId?: string) {
     text: NOTE,
     format: "PROGRESS_NOTE",
     promptId,
+    headers: who.cookie,
   });
 }
 
 async function main() {
-  const { templates } = (await (await fetch(`${base}/api/prompts`)).json()) as {
+  who = await createTestSession("routine");
+  const { templates } = (await (
+    await fetch(`${base}/api/prompts`, { headers: who.cookie })
+  ).json()) as {
     templates: { id: string; name: string }[];
   };
   const routine = templates.find((t) => t.name === wanted);
-  if (!routine) throw new Error(`No routine named "${wanted}"`);
+  if (!routine) {
+    await destroyTestUser(who.userId);
+    throw new Error(
+      `No routine named "${wanted}" is visible to a fresh user. ` +
+        `Visible: ${templates.map((t) => t.name).join(", ") || "(none)"}`,
+    );
+  }
 
   console.log("=== WITHOUT routine ===");
   const plain = await run();
@@ -41,6 +59,7 @@ async function main() {
 
   console.log("\nroutine recorded in meta:", styled.meta.promptTemplateName);
   console.log("routine recorded in audit row:", styled.meta.auditLogId);
+  await destroyTestUser(who.userId);
   process.exit(0);
 
 }

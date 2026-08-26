@@ -63,10 +63,10 @@ const CLINICAL = [
  * with no year — the commonest date format in a ward note, and invisible to a
  * rule that expects three components.
  */
-const EMR_HEADER = `[病程紀錄內容] 2024/08/12 18:08:00  A092- 36  PNS   DOC4674E   劉展瑋   [Progress Note]
+const EMR_HEADER = `[病程紀錄內容] 2024/08/12 18:08:00  A092- 36  PNS   DOC1234X   林建宏   [Progress Note]
 Urgent surgery was done on 1/21. Follow-up MRI on 1/23. Re-do surgery on 2/2.
 Albumin and lasix since 2/3-2/5. BP 152/94 mmHg. Pupil (L/R) 5+/6+. Give 1/2 tab BID.`;
-const EMR_MUST_GO = ["劉展瑋", "DOC4674E", "A092- 36", "1/21", "1/23", "2/2", "2/3"];
+const EMR_MUST_GO = ["林建宏", "DOC1234X", "A092- 36", "1/21", "1/23", "2/2", "2/3"];
 const EMR_MUST_STAY = ["152/94", "5+/6+", "1/2 tab", "PNS"];
 
 interface RunResult {

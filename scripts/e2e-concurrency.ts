@@ -3,11 +3,17 @@
  * Studio on port 1234 that deliberately takes 2s so requests overlap.
  *
  *   npx tsx scripts/e2e-concurrency.ts
+ *
+ * Every route is behind sign-in, so the harness mints a real Auth.js session
+ * row and presents the cookie exactly as a browser would.
  */
+import "dotenv/config";
 import { createServer } from "node:http";
 import { ComputeBusyError, runPipeline } from "../src/lib/pipeline-client";
+import { createTestSession, destroyTestUser, type TestSession } from "./test-session";
 
 const base = "http://localhost:3000";
+let who: TestSession;
 
 const stub = createServer((req, res) => {
   let body = "";
@@ -46,7 +52,7 @@ const NOTE = `病歷號 87654321，患者王小明，身分證 B234567890，
 
 async function fire(n: number) {
   try {
-    await runPipeline({ baseUrl: base, text: NOTE, format: "SOAP" });
+    await runPipeline({ baseUrl: base, text: NOTE, format: "SOAP", headers: who.cookie });
     return { n, status: 200, code: "OK", error: undefined as string | undefined };
   } catch (e) {
     if (e instanceof ComputeBusyError) {
@@ -57,6 +63,7 @@ async function fire(n: number) {
 }
 
 async function main() {
+  who = await createTestSession("concurrency");
   await new Promise<void>((r) => stub.listen(1234, r));
   console.log("stub LM Studio listening on :1234 (2s latency)\n");
 
@@ -71,9 +78,12 @@ async function main() {
   console.log(admitted === 1 && busy === 2 ? "PASS: single-slot limit enforced" : "FAIL");
 
   // Lock must be free again once the in-flight request finished.
-  const after = (await (await fetch(`${base}/api/status`)).json()) as { busy: boolean };
+  const after = (await (
+    await fetch(`${base}/api/status`, { headers: who.cookie })
+  ).json()) as { busy: boolean };
   console.log(after.busy === false ? "PASS: lock released" : "FAIL: lock still held");
 
+  await destroyTestUser(who.userId);
   await new Promise<void>((r) => stub.close(() => r()));
   process.exit(0);
 }

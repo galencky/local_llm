@@ -5,9 +5,14 @@
  *
  * Requires the server to be started with:
  *   GEMINI_API_KEY=stub GEMINI_BASE_URL=http://localhost:8899 npm run dev
+ *
+ * Every route is behind sign-in, so the harness mints a real Auth.js session
+ * row rather than adding a bypass to the app.
  */
+import "dotenv/config";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { runPipeline } from "../src/lib/pipeline-client";
+import { createTestSession, destroyTestUser } from "./test-session";
 
 const base = "http://localhost:3000";
 
@@ -84,6 +89,7 @@ function check(name: string, ok: boolean, detail = "") {
 }
 
 async function main() {
+  const who = await createTestSession("full-stubbed");
   await new Promise<void>((r) => lmStudio.listen(1234, r));
   await new Promise<void>((r) => geminiStub.listen(8899, r));
   console.log("stubs up: LM Studio :1234, Gemini :8899\n");
@@ -93,7 +99,7 @@ async function main() {
     deidentifiedInput: string;
     redactions: { preview: string }[];
     meta: { unresolvedTokens: string[]; auditLogId: string | null; degradedScrub: boolean };
-  }>({ baseUrl: base, text: NOTE, format: "SOAP" });
+  }>({ baseUrl: base, text: NOTE, format: "SOAP", headers: who.cookie });
 
   console.log("--- what the cloud actually received ---");
   console.log(decoded.deidentifiedInput.split("\n").map((l: string) => "   " + l).join("\n"));
@@ -116,6 +122,7 @@ async function main() {
   check("inspector has redactions", decoded.redactions.length >= 8, `${decoded.redactions.length}`);
   check("inspector previews are masked", decoded.redactions.every((r: { preview: string }) => r.preview.includes("*")));
 
+  await destroyTestUser(who.userId);
   await new Promise<void>((r) => lmStudio.close(() => r()));
   await new Promise<void>((r) => geminiStub.close(() => r()));
   console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);

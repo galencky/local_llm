@@ -36,16 +36,6 @@
 
 export const MAX_CUSTOM_PROMPT_LENGTH = 8000;
 
-/** The entity categories the re-hydrator knows how to restore. */
-export const CUSTOM_LOCAL_CATEGORIES = [
-  "PATIENT",
-  "RELATIVE",
-  "DOCTOR",
-  "WARD",
-  "LOCATION",
-  "ORG",
-] as const;
-
 /**
  * Appended verbatim to any custom Gemini system instruction.
  *

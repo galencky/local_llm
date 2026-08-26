@@ -20,14 +20,13 @@ import {
  */
 
 /**
- * The full system instruction, exported so the UI can show it verbatim.
- *
- * This half is NOT editable and is not stored in the database. The placeholder
- * rules are what keep `[PATIENT_1]` intact through the round trip, and the
- * clinical rules are what stop the model inventing findings. Making them a
- * setting would make the safety properties a setting.
+ * The system instruction below is NOT editable in guided mode and is not stored
+ * in the database. The placeholder rules are what keep `[PATIENT_1]` intact
+ * through the round trip, and the clinical rules are what stop the model
+ * inventing findings. Making them a setting would make the safety properties a
+ * setting. `systemInstruction()` exports the text so the UI can show it
+ * verbatim.
  */
-export const LOCKED_SYSTEM_INSTRUCTION_LABEL = "Fixed rules — not editable";
 
 export const NOTE_FORMATS = {
   SOAP: "SOAP note",

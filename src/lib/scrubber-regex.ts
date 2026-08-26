@@ -50,7 +50,7 @@ export const REGEX_RULES: readonly RegexRule[] = [
   },
   {
     // The CJK name printed beside a staff code in tabular EMR output. The local
-    // NER missed these: in a header row like "DOC4674E   劉展瑋   [Progress
+    // NER missed these: in a header row like "DOC1234X   林建宏   [Progress
     // Note]" there is no sentence around the name to recognise it by.
     // Deliberately anchored to the code so it cannot fire on clinical text.
     //
@@ -61,7 +61,7 @@ export const REGEX_RULES: readonly RegexRule[] = [
     pattern: /(?<=\bDOC\d{3,6}[A-Z]?\s{1,8})[\u4e00-\u9fff]{2,4}/gi,
   },
   {
-    // Staff/physician code as printed in EMR exports, e.g. "DOC4674E". These
+    // Staff/physician code as printed in EMR exports, e.g. "DOC1234X". These
     // identify a named clinician as surely as the name does, and were reaching
     // the cloud intact because they are neither 7-8 digits nor a word.
     category: "DOCTOR",

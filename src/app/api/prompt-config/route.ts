@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import { NER_SYSTEM_PROMPT } from "@/lib/scrubber-llm";
+import { loadedLmStudioModel, NER_SYSTEM_PROMPT } from "@/lib/scrubber-llm";
+import { defaultModel } from "@/lib/model-registry";
 import { PLACEHOLDER_KERNEL } from "@/lib/custom-mode";
 import {
   builtInFormatInstruction,
@@ -42,14 +43,27 @@ export async function GET() {
     return NextResponse.json({ error: "Sign in required." }, { status: 401 });
   }
 
+  // Report the model that is actually there, not the one the environment names.
+  // A model swapped in LM Studio without updating LMSTUDIO_MODEL used to leave
+  // this page naming a model that was not the one reading the notes.
+  const configuredLocal = process.env.LMSTUDIO_MODEL?.trim() || null;
+  const loadedLocal = await loadedLmStudioModel();
+
   return NextResponse.json(
     {
       local: {
-        model: process.env.LMSTUDIO_MODEL ?? "local",
+        /** What is answering right now. */
+        model: loadedLocal ?? configuredLocal ?? "local",
+        /** What LM Studio has loaded, or null when it is unreachable. */
+        loadedModel: loadedLocal,
+        /** What LMSTUDIO_MODEL pins each request to, or null when unset. */
+        configuredModel: configuredLocal,
         prompt: NER_SYSTEM_PROMPT,
       },
       cloud: {
-        model: process.env.GEMINI_MODEL ?? "gemini",
+        // The ladder's own answer, so this can never name a rung the pipeline
+        // would not actually start on.
+        model: defaultModel(),
         systemInstruction: systemInstruction(),
         formats: (Object.keys(NOTE_FORMATS) as NoteFormat[]).map((f) => ({
           format: f,

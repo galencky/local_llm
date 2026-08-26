@@ -66,7 +66,7 @@ Extract these categories:
 - PHONE: any telephone number, mobile or landline, any format.
 - DATE: any calendar date in any format — Gregorian, ROC/民國, CJK 年月日, or bare month/day.
 - EMAIL: any email address.
-- STAFF_CODE: alphanumeric staff or physician codes as printed in EMR exports (e.g. DOC4674E).
+- STAFF_CODE: alphanumeric staff or physician codes as printed in EMR exports (e.g. DOC1234X).
 - OTHER_ID: any other number or code that could identify a person or record.
 
 If a span identifies someone or something but none of the categories above fit, invent your own short descriptive tag in UPPERCASE_WITH_UNDERSCORES (e.g. PASSPORT, INSURANCE_ID, VEHICLE_PLATE, BANK_ACCOUNT). Never discard an identifier just because it has no listed category.
@@ -232,6 +232,22 @@ export function lastKnownLmStudioHealth(): LmStudioHealth {
   return { online: true, models: cached.models, busy: true };
 }
 
+/**
+ * The model LM Studio actually has loaded right now, or null if we cannot tell.
+ *
+ * `LMSTUDIO_MODEL` is what each request *asks* for; this is what is *there*.
+ * The two drift — a model is swapped in LM Studio and the env var is not
+ * updated — and the read-only prompt view showed the stale env value, so the
+ * page named a model that was not the one reading the notes.
+ */
+export async function loadedLmStudioModel(): Promise<string | null> {
+  const cached = globalForHealth.__lmStudioLastHealthy;
+  // Fresh enough for a UI read, and free. Never probe a server that is
+  // mid-inference: LM Studio serialises, so the probe would block a note.
+  if (cached && Date.now() - cached.at < 60_000) return cached.models[0] ?? null;
+  return (await checkLmStudioHealth()).models[0] ?? null;
+}
+
 /** Is the local inference server up and holding a model? */
 export async function checkLmStudioHealth(): Promise<LmStudioHealth> {
   try {
@@ -269,9 +285,9 @@ export async function checkLmStudioHealth(): Promise<LmStudioHealth> {
  * Run the local NER pass over regex-scrubbed text and replace what it finds.
  *
  * Custom mode swaps the system prompt and the sampling parameters, and nothing
- * else: the output still has to be parsable entity JSON in the six known
- * categories, every span is still checked verbatim against the source, and an
- * unusable answer still fails the run closed. A custom prompt can therefore
+ * else: the output still has to be parsable entity JSON with a token-safe
+ * category on every span, every span is still checked verbatim against the
+ * source, and an unusable answer still fails the run closed. A custom prompt can therefore
  * change what gets caught — it cannot turn the check into a rubber stamp.
  *
  * @param input text that has already been through {@link scrubWithRegex}

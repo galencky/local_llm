@@ -1,0 +1,974 @@
+# Project Airlock — technical manual
+
+Everything below assumes you have read [README.md](README.md) and know what the
+product does. This document is the mechanism: what each module is responsible
+for, what invariants it holds, how to debug it when it misbehaves, and what every
+script in `scripts/` actually exercises.
+
+**Contents**
+
+1. [Where things run](#1-where-things-run)
+2. [Repository map](#2-repository-map)
+3. [The pipeline, stage by stage](#3-the-pipeline-stage-by-stage)
+4. [Cryptography](#4-cryptography)
+5. [The token vault](#5-the-token-vault)
+6. [Pass A — the deterministic scrubber](#6-pass-a--the-deterministic-scrubber)
+7. [Pass B — the local NER pass](#7-pass-b--the-local-ner-pass)
+8. [The cloud layer and the model ladder](#8-the-cloud-layer-and-the-model-ladder)
+9. [Concurrency: one compute slot](#9-concurrency-one-compute-slot)
+10. [Custom mode](#10-custom-mode)
+11. [Authentication](#11-authentication)
+12. [Persistence](#12-persistence)
+13. [The browser client](#13-the-browser-client)
+14. [Configuration reference](#14-configuration-reference)
+15. [Every script, and what it proves](#15-every-script-and-what-it-proves)
+16. [Debugging playbook](#16-debugging-playbook)
+17. [Known quirks](#17-known-quirks)
+18. [Changing this safely](#18-changing-this-safely)
+
+---
+
+## 1. Where things run
+
+Three trust zones, and the whole design is about the boundaries between them.
+
+| Zone | What runs there | What it may see |
+| --- | --- | --- |
+| **Browser** | Next.js client, WebCrypto sealing | The raw note; the re-hydrated note |
+| **Cloudflare** | Tunnel (`cloudflared`) | Ciphertext only, both directions |
+| **Mac Mini** | Next server, Postgres, LM Studio | Everything — this is the only place raw PHI exists on a server |
+| **Google** | Gemini | Placeholders only |
+
+The Mac Mini runs three processes: the app container, the Postgres container, and
+**LM Studio on the host**. LM Studio is not containerised because Docker Desktop
+on macOS runs a Linux VM with no GPU passthrough — a containerised model loses
+Metal/MLX acceleration entirely. The container reaches it at
+`host.docker.internal:1234`.
+
+The app is a single replica by design. The compute lock lives in that process's
+memory, so a second replica would silently break it.
+
+## 2. Repository map
+
+| Path | Role |
+| --- | --- |
+| `src/lib/crypto.ts` | Isomorphic WebCrypto. **No Node imports** — it ships to the browser. |
+| `src/lib/keystore.ts` | Server RSA keypair, persisted to `./.keys/` |
+| `src/lib/memory-cache.ts` | `TokenVault` + the 10-minute TTL store. **The only place raw PHI lives on the server.** |
+| `src/lib/scrubber-regex.ts` | Deterministic Taiwan PII rules. **Rule order is load-bearing.** |
+| `src/lib/scrubber-llm.ts` | LM Studio NER, open tag vocabulary, verbatim-span validation, clinical stop-list, fail-closed |
+| `src/lib/gemini.ts` | Note formats, prompt assembly, the placeholder-preserving system instruction, error translation |
+| `src/lib/model-registry.ts` | The Gemini ladder and observed availability |
+| `src/lib/concurrency.ts` | Single-slot lock with stale reclaim, plus the live stage read-out |
+| `src/lib/custom-mode.ts` | Custom mode's contract: defaults, ranges, the placeholder kernel, and the clamp both sides run |
+| `src/lib/limits.ts` | Input budget, shared by browser and server |
+| `src/lib/prompts.ts` | Routine CRUD plus the guard that keeps PHI out of saved prompts |
+| `src/lib/auth.ts` | Google sign-in and the mandatory allowlist |
+| `src/lib/dev-login.ts` | Rules for the developer password bypass |
+| `src/lib/db.ts` | Lazy Prisma singleton behind a proxy |
+| `src/lib/pipeline-client.ts` | Client half: seal, POST, parse SSE, open the reply |
+| `src/app/api/process-note/route.ts` | The pipeline itself |
+| `src/app/page.tsx` | The entire UI (single client component plus drawers) |
+| `src/middleware.ts` | Gate everything behind a session cookie |
+| `scripts/` | Verification and acceptance — see [section 15](#15-every-script-and-what-it-proves) |
+
+## 3. The pipeline, stage by stage
+
+`src/app/api/process-note/route.ts`. Everything below happens inside one POST
+handler; the response is a Server-Sent Events stream so the clinician watches
+real work rather than a spinner.
+
+```
+auth → lock → decrypt → parse+clamp → budget → regex → NER → vault
+     → cloud → re-hydrate → audit → seal → (finally) purge + unlock
+```
+
+**0. Identity.** `auth()` first, before anything else. An unauthenticated caller
+must not even be able to take the compute lock — otherwise an anonymous request
+is a denial-of-service against the ward.
+
+**1. Lock.** `acquireLock()`. On refusal the route answers **429** with
+`code: COMPUTE_BUSY` and the current activity, plus `Retry-After: 5`. The server
+refuses rather than queues; the queue is the client's job.
+
+**2. Decrypt.** Unwrap the ephemeral AES key with the server's RSA private key,
+then open the envelope. A failure here emits `code: DECRYPT_FAILED`, which the
+client treats as "my public key is stale" and retries once with a fresh key.
+
+**3. Parse and clamp.** If the plaintext starts with `{` it is parsed as a
+payload object (`text`, `format`, `instruction`, `promptId`, `model`, `custom`);
+otherwise the whole plaintext is the narrative. Any `custom` block is re-clamped
+here by `normaliseCustomConfig` — **the browser's own bounds do not count**,
+because the payload is assembled client-side.
+
+**4. Input budget.** `measure()` from `limits.ts`. Past `HARD_CHAR_LIMIT`
+(20,000 characters) the request is refused with `code: TOO_LONG`. This is a
+safety limit before a performance one: the local model has a bounded context, and
+a note longer than it can attend to starts *missing names*.
+
+**5. Deterministic scrub.** `scrubWithRegex(noteText, vault)` — see
+[section 6](#6-pass-a--the-deterministic-scrubber).
+
+**6. Local NER scrub.** `scrubWithLlm(regexResult.text, vault, custom?.local)` —
+see [section 7](#7-pass-b--the-local-ner-pass). Fails closed by default.
+
+**7. Vault parked.** `storeVault(sessionId, vault)` puts the map in the TTL store
+under a fresh UUID. In practice the request re-hydrates from its own local
+reference; the store is the safety net with a hard 10-minute expiry.
+
+**8. Cloud.** `formatClinicalNote()`. Only placeholders cross the wire. Model
+downgrades stream as progress events while they happen.
+
+**9. Re-hydrate.** `vault.rehydrate(gemini.text)`, then
+`vault.unresolvedTokens()` records any placeholder the model failed to reproduce
+— a drift signal, surfaced in the inspector.
+
+**10. Audit.** One row of **de-identified text only**. A failed audit write is
+logged and streamed as `audit: failed` but never destroys the note — a dead audit
+database must not cost a clinician their work.
+
+**11. Seal.** The result object is sealed with the *same* ephemeral AES key and
+emitted as the single `result` event. Progress events never carry note content.
+
+**12. `finally`.** `purgeVault()`, `vault.clear()`, `releaseLock()`, close the
+stream. This block runs on every path, including client disconnect.
+
+Measured on the live stack (M4 / 16 GB, `gemma-4-12b`, 80-character note):
+
+```
+decrypt        <1 ms
+regex          <1 ms      3 identifiers
+ner           4757 ms     3 names/places
+cloud        62235 ms     gemini-3.6-flash
+rehydrate      <1 ms      6 tokens restored
+audit            4 ms
+seal           <1 ms
+```
+
+The two model calls are the entire cost. Everything Airlock itself does is
+sub-millisecond.
+
+## 4. Cryptography
+
+`src/lib/crypto.ts` (isomorphic) and `src/lib/keystore.ts` (server only).
+
+**Envelope.** Per request:
+
+- a fresh **AES-256-GCM** key, generated in the browser, 96-bit nonce;
+- that key wrapped with the server's **RSA-OAEP-2048 / SHA-256** public key;
+- ciphertext, wrapped key and IV, all base64, as the POST body.
+
+The reply is sealed with the *same* AES key and a *fresh* IV. The reply contains
+re-hydrated PHI, so it must be opaque in transit too.
+
+**Key identity.** `keystore.ts` generates the keypair once and persists it to
+`<cwd>/.keys/<KEY_STORE_FILE>` with mode `0600`, memoised on `globalThis` so a
+dev hot-reload does not rotate it. `keyId` is the first 16 hex characters of the
+SHA-256 of the SPKI, which lets a client notice rotation.
+
+**This must persist.** A regenerated keypair breaks decryption for every browser
+tab still holding the old public key. In Docker it is bind-mounted from
+`$AIRLOCK_DATA_DIR/keys`.
+
+**What holds.** Cloudflare terminates TLS at its edge and is treated as hostile.
+It relays ciphertext both ways. Gemini receives placeholders. Postgres stores
+de-identified text.
+
+**What does not hold.** `/api/keys` serves the public key over the same tunnel it
+protects. Someone who controls that edge can substitute their own key and read
+everything. This design defeats **passive** inspection and incidental logging,
+not an active edge adversary. To close it, pin the key: copy the value from
+`/api/keys` into `NEXT_PUBLIC_PINNED_KEY_ID` and have the client refuse any
+`keyId` that does not match, or distribute the SPKI out of band.
+
+## 5. The token vault
+
+`src/lib/memory-cache.ts`. This is the PDPA-critical module.
+
+```
+assign(category, original, source) -> "[CATEGORY_N]"
+rehydrate(text)                    -> text with placeholders swapped back
+unresolvedTokens(text)             -> tokens the cloud model failed to reproduce
+summary()                          -> masked audit trail for the UI
+clear()                            -> best-effort wipe
+```
+
+Invariants that matter:
+
+- **The same identifier always maps to the same token.** A patient named five
+  times stays one referent for the cloud model instead of five strangers.
+- **Re-hydration replaces longest token first.** Replacing `[MRN_1]` before
+  `[MRN_11]` would corrupt the latter into `<value>1]`. `tokens()` sorts by
+  length descending for exactly this.
+- **Previews are masked.** `mask()` keeps only the first and last character:
+  `A123456789` becomes `A********9`. The inspector never shows a full identifier.
+- **The TTL store expires at 10 minutes**, swept every 30 seconds, and the sweep
+  timer is `unref()`d so it cannot hold the process open.
+- **Contents are never persisted.** Not to Postgres, not to a file, not to a log
+  line, not to telemetry.
+
+## 6. Pass A — the deterministic scrubber
+
+`src/lib/scrubber-regex.ts`. High precision, runs first, deliberately over-eager:
+a false positive costs a slightly odd note, a false negative leaks PHI.
+
+**Rule order is load-bearing** and the file says so. Rules fire in array order:
+
+| # | Rule | Catches | Why it sits here |
+| --- | --- | --- | --- |
+| 1 | National ID / ARC | `A123456789`, ARC formats | Most specific numeric shape |
+| 2 | Phone number | mobile, landline, `+886`, `(02)` forms | Must precede the MRN rule, which would eat `27123456` |
+| 3 | Date (Gregorian / ROC) | `2024/08/23`, `113-08-23` | — |
+| 4 | Date (CJK) | `113年8月23日` | — |
+| 5 | Name beside a staff code | the CJK name after `DOC…` | **Must run before rule 6**, which would replace the anchor it looks behind for |
+| 6 | Staff code | `DOC1234X` | Neither 7–8 digits nor a word |
+| 7 | Ward and bed | `A092- 36` | — |
+| 8 | Date (month/day, no year) | `1/21`, `2/3` | Bounded to real months/days; refuses doses |
+| 9 | Medical record number | bare `\d{7,8}` | **Last** — it is the bluntest instrument here |
+
+Every rule gets a **fresh `RegExp`** per pass, because the module-level literals
+carry `/g` `lastIndex` state and would otherwise skip matches on the second call.
+
+### Shapes that leaked in real use
+
+These rules exist because notes got past the earlier ones. Kept here because the
+list is the honest statement of what this layer does and does not catch:
+
+| Shape | Example | Why it was missed |
+| --- | --- | --- |
+| Staff code | `DOC1234X` | Neither 7–8 digits nor a word |
+| Name beside a staff code | `DOC1234X   林建宏` | In a tabular header there is no sentence for the NER to recognise a name by |
+| Ward-bed cell | `A092- 36` | Not the `8B病房` form the NER was shown |
+| Month/day, no year | `1/21`, `2/3-2/5` | The date rule needs three components |
+
+Month/day is deliberately bounded to real months and days and refuses anything
+that reads as a dose (`1/2 tab`, `1/2 vial`), because mangling a paediatric dose
+is a patient-safety problem rather than a formatting one. `152/94 mmHg` and
+`(L/R) 5+/6+` are unaffected.
+
+**This layer is not a guarantee.** It catches shapes it has been taught.
+
+`isValidTaiwanId()` implements the national-ID checksum but is **not** used for
+redaction decisions — over-redaction is the safe failure mode, so a shape match
+is enough.
+
+## 7. Pass B — the local NER pass
+
+`src/lib/scrubber-llm.ts`. Talks OpenAI-compatible chat completions to LM Studio
+on `LMSTUDIO_BASE_URL` (default `http://localhost:1234/v1`).
+
+### The prompt asks for more than it needs
+
+`NER_SYSTEM_PROMPT` asks for the semantic identifiers regex cannot see — names,
+wards, employers, addresses — **and also for the structured ones the regex pass
+already covers**. That overlap is deliberate: regex catches shapes it was taught,
+and a format it has never met (a passport, an insurance number) has no rule.
+
+The category list is a **suggestion, not a whitelist**. A model that meets an
+identifier fitting nothing listed is told to coin its own tag — `PASSPORT`,
+`VEHICLE_PLATE`, `BANK_ACCOUNT`. Nothing downstream needs the vocabulary: a token
+is a label plus a number, and re-hydration is a literal lookup.
+
+What is **not** negotiable is the shape. `normaliseCategory()` folds anything
+outside `[A-Z_]` away and caps the result at 24 characters before it reaches the
+vault, so a coined label can never collide with clinical text or break the
+placeholder guard `/^\[[A-Z_]+_\d+\]$/`.
+
+Measured on `gemma-4-12b` over a 17-identifier synthetic note, three trials,
+temperature 0:
+
+| Prompt | LLM alone | regex → NER |
+| --- | --- | --- |
+| Six semantic categories (previous) | 9/17 | 15/17 |
+| Open vocabulary (current) | **17/17** | **17/17** |
+
+No clinical term was wrongly redacted in either arm.
+
+### Guards on what comes back
+
+Applied in this order to each returned span:
+
+1. **Verbatim check** — `input.includes(span)`. A hallucinated span would create
+   a token that never matches and never re-hydrates. Counted as `hallucinated`.
+2. **Placeholder guard** — never re-redact a `[CATEGORY_N]` emitted by pass A.
+3. **Shape guard** — reject a span containing a newline, or longer than 200
+   characters. A newline is the real signal for "the model returned the whole
+   paragraph as one name"; a bare length cap is not. This was 60 once, and it
+   silently discarded correctly-identified long addresses.
+4. **Clinical stop-list** — `CLINICAL_STOPLIST` refuses lab analytes, eponymous
+   diseases, scales and devices (`Troponin I`, `Crohn`, `Glasgow`, `Foley`).
+   Counted as `rejectedClinical`. Defence in depth; the prompt is the primary
+   control.
+5. **Dedupe**, then **sort longest span first** before replacement — replacing a
+   one-character surname before the full name would shred the latter.
+
+### Transport quirks it handles
+
+- **`json_schema` unsupported** — a `400` retries once with no `response_format`,
+  for older LM Studio builds and GGUFs without grammar support.
+- **Reasoning models** — a reasoning model with a schema attached answers HTTP
+  200 with the whole object in `reasoning_content` and `content` empty. The 400
+  branch never fires, so an empty `content` also retries once without the schema.
+  Without this the pipeline fails closed on every note and the model looks broken.
+- **Truncation** — `max_tokens` defaults to 6144. Too low truncates the JSON
+  mid-array, which fails closed and reads to the user as an unexplained 503.
+- **Timeout** — `LMSTUDIO_TIMEOUT_MS`, default 90 s, via `AbortController`.
+
+### Fail-closed
+
+If LM Studio is unreachable, or returns nothing parsable,
+`LocalScrubUnavailableError` is thrown and the note is **not** sent to the cloud.
+`ALLOW_DEGRADED_SCRUB=true` opts into regex-only scrubbing instead; the result
+carries `degraded: true` and the UI shows a standing warning.
+
+### Health probing
+
+LM Studio **serialises requests**: `/v1/models` blocks while the model is
+generating. So:
+
+- `/api/status` calls `checkLmStudioHealth()` only when the compute lock is free;
+  while busy it returns `lastKnownLmStudioHealth()` from a cache, flagged
+  `busy: true`. Without this the status badge would read "LM Studio down" for the
+  duration of every note.
+- A probe that fails within 10 minutes of a known-healthy one means "busy", not
+  "down".
+- `loadedLmStudioModel()` reports what LM Studio *actually has loaded*, reusing a
+  60-second cache, for the read-only prompt view. `LMSTUDIO_MODEL` is what each
+  request *asks for*; the two can drift, and when they do the Prompts drawer says
+  so rather than quietly naming one of them.
+
+## 8. The cloud layer and the model ladder
+
+`src/lib/gemini.ts` and `src/lib/model-registry.ts`.
+
+### Prompt assembly
+
+`assemblePrompt()` is used by both the real request and any preview, so what the
+UI shows cannot drift from what is sent. Precedence, weakest to strongest:
+
+```
+format skeleton  (built-in, or custom mode's replacement)
+  └─ saved routine  ("Departmental charting routine …")
+       └─ one-off instruction for this note
+            └─ the de-identified narrative
+```
+
+All three sit **below** the system instruction, whose placeholder rules outrank
+them: a routine cannot talk the model into inventing a name.
+
+### The ladder
+
+Best first, ending on the lite models. On the free tier the lite models carry
+**500 requests/day** against the flagships' 20 — the difference between "the tool
+died at lunchtime" and "the tool kept working, in a lighter voice". Pro models
+are deliberately absent: the free tier grants them zero quota, so they would only
+ever be a button that fails. The 2.5-era models are absent because Google returns
+`NOT_FOUND` for them on keys issued after their retirement.
+
+`GEMINI_MODEL` picks the starting rung; `GEMINI_MODEL_LADDER` replaces the list
+entirely.
+
+### Availability is observed, never predicted
+
+No API reports remaining quota, so a rung is marked spent **only after Google has
+refused it**. That observation is written to the `ModelCooldown` table so a
+container restart does not forget and burn a request per rung rediscovering it.
+
+`translateGeminiError()` distinguishes the kinds of refusal, because they need
+different answers:
+
+| Google says | `kind` | Cooldown | Falls back? |
+| --- | --- | --- | --- |
+| `RESOURCE_EXHAUSTED` + `PerDay` | `quota` | until midnight US/Pacific | yes |
+| `RESOURCE_EXHAUSTED` (burst) | `quota` | the `retryDelay` hint | yes |
+| `UNAVAILABLE` / overloaded | `overloaded` | 30 s | yes |
+| `NOT_FOUND` | `model` | until midnight; dropped from the ladder and the selector | yes |
+| bad key / `PERMISSION_DENIED` | `auth` | none | **no** |
+| empty response (safety filter) | — | none | **no** |
+
+Auth failures and safety blocks are not solved by another model, so they fail
+immediately.
+
+**The downgrade is never silent.** It streams as a progress event
+(`gemini-3.6-flash quota → gemini-3.5-flash`), the chip greys out live, and
+`AuditLog.modelUsed` records the model that actually wrote the note. A lighter
+model is a different clinical draft, so the clinician is told which one they are
+reading.
+
+## 9. Concurrency: one compute slot
+
+`src/lib/concurrency.ts`.
+
+The lock is a synchronous test-and-set on a module-global. Node's event loop is
+single-threaded, so no `await` can interleave between the read and the write —
+that *is* atomicity here, and the "atomic region" is marked in the source.
+
+- **Stale reclaim** at 5 minutes: a wedged request must not brick the box forever.
+- **Stale handles are ignored** on release, so a timed-out request cannot free the
+  lock out from under whoever reclaimed it.
+- **`setStage()` publishes what the slot is doing** so queued clients can display
+  it. The `detail` field is non-identifying by contract — `"1,240 characters"`,
+  never note content.
+
+`/api/status` exposes `busy`, `lockHeldForMs` and `activity`. Verified live: the
+status route flips to `busy: true` within one second of a run starting and
+answers in 4–15 ms while a note is in flight.
+
+The client-side queue lives in `page.tsx`: on a 429 it retries every two seconds
+while showing the live activity, and polls `/api/status` at 1 s (rather than 5 s)
+whenever this tab has work outstanding — queued **or** running. The badge also
+treats "this tab is submitting" as busy directly, so it flips the instant the
+button is pressed instead of waiting for a poll to confirm what the tab already
+knows.
+
+## 10. Custom mode
+
+`src/lib/custom-mode.ts` is isomorphic: the editor imports it for defaults and
+clamps, the route imports it to re-clamp whatever actually arrives.
+`normaliseCustomConfig()` is the boundary and the client's numbers are never
+trusted.
+
+| | User owns | Range |
+| --- | --- | --- |
+| Local | De-identification prompt, LM Studio model | ≤ 8000 chars |
+| Local | `temperature`, `topP`, `maxTokens` | 0–2, 0–1, 256–16384 |
+| Cloud | System instruction, formatting instruction | ≤ 8000 chars each |
+| Cloud | `temperature`, `topP`, `topK`, `maxOutputTokens` | 0–2, 0–1, 0–200, 0–65536 |
+
+Empty or over-long prompts are **refused**, not silently defaulted: running a
+note under instructions the clinician never saw is worse than not running it.
+Numbers out of range are clamped.
+
+### Four properties custom mode cannot switch off
+
+They are structural rather than prompt-borne, and `npm run e2e:custom` asserts
+each one:
+
+1. **The pattern scrub runs first, always.** The floor is regex-only, never
+   nothing.
+2. **The local pass must still return parsable entity JSON** with a token-safe
+   category on every span. A prompt that talks the model out of that shape fails
+   the run closed.
+3. **Every span is still checked verbatim**, screened against the clinical
+   stop-list, and shape-capped.
+4. **`PLACEHOLDER_KERNEL` is appended** to whatever system instruction the user
+   writes. Without it Gemini renumbers `[DATE_2]` and the note can no longer be
+   re-hydrated — a broken note every time is not a setting worth offering.
+
+Custom prompts live in `localStorage` and nowhere else. They travel inside the
+sealed envelope, are used once, and die with the request — so the audit row reads
+`"Custom mode — prompts not stored"` rather than implying the built-in prompts
+produced that note.
+
+## 11. Authentication
+
+**Middleware** (`src/middleware.ts`) gates everything on the *presence* of a
+session cookie. Public: `/signin`, `/api/auth/*`, `/api/health`, `/_next/*`,
+`/favicon`. Everything else redirects (pages) or answers 401 (API). Validity is
+checked in route handlers via `auth()` — middleware deliberately avoids a
+database round-trip per request.
+
+**Auth.js** (`src/lib/auth.ts`) with the Prisma adapter, Google provider,
+database sessions, 12-hour max age. The `session` callback returns only
+`{ id, name, email, image }`: spreading the adapter's session row would publish
+`sessionToken` in a JSON response readable by JavaScript, defeating the httpOnly
+cookie it lives in.
+
+**`AUTH_ALLOWED_EMAILS` is mandatory and fails closed.** An unset or empty
+allowlist denies *everyone*. Accepts addresses and whole domains
+(`@yourhospital.org.tw`).
+
+**Developer bypass** (`/api/auth/dev-login`). Off unless `DEV_LOGIN_ENABLED=true`,
+and refuses any request whose `Host` is not localhost unless
+`DEV_LOGIN_ALLOW_REMOTE=true`. Password compared with `timingSafeEqual`. It mints
+a **real** Session row rather than threading a special case through the app, so
+ownership and tenant isolation behave exactly as for a Google account — a bypass
+that takes a different code path is a bypass that hides bugs.
+
+**Cookie naming.** Auth.js derives the `__Secure-` prefix from `AUTH_URL`, not
+from the transport of the current request. Behind a tunnel those disagree (the
+browser is on HTTPS, the container is spoken to over HTTP), so both `dev-login.ts`
+and the test harness follow `AUTH_URL`. Get this wrong and every request is 401
+with no other symptom.
+
+## 12. Persistence
+
+Schema and table-by-table notes: [docs/DATABASE.md](docs/DATABASE.md).
+
+**`AuditLog` holds de-identified text only.** There is no column for the raw note
+and none for the token map. `promptTemplateName` is stored as plain text so the
+row survives the routine being renamed or deleted.
+
+**Routines are configuration, not clinical data.** `assertNoPii()` runs every
+saved routine through the deterministic scrubber and rejects it with **422** if
+anything matches — a patient name pasted into a template would be persisted
+forever and quietly defeat the pipeline.
+
+**Ownership.** `PromptTemplate.userId = null` means a shared, instance-wide
+routine. Scoping writes to `{ id, userId }` alone once made those visible to
+everyone and editable by no one — an undeletable dead end. `writableBy()` now
+allows the owner *or* anyone signed in for ownerless rows.
+
+**Data lives on the Mac, not in a Docker volume.** Postgres and the keypair are
+bind-mounted under `AIRLOCK_DATA_DIR` (default
+`~/Library/Application Support/ProjectAirlock`). Named volumes live inside Docker
+Desktop's VM disk image, and a Docker Desktop major upgrade can reset that image
+— going 28.x → 29.x destroyed this database, the routines, the sessions and the
+RSA keypair in one step. A bind mount survives Docker upgrades, factory resets,
+and uninstalling Docker altogether. What still destroys data: deleting
+`AIRLOCK_DATA_DIR` yourself.
+
+**Backups.** `ops/backup-airlock.sh` dumps with the container's own `pg_dump`,
+gzips into `~/Documents/airlock-backups/` (mode 600, directory 700) for Time
+Machine, and prunes past 30 days. Installed as a launchd job firing **hourly at
+:59** — daily was tried first, and a 24-hour window is precisely what lost a day
+of history. Restore is a plain `psql` load:
+
+```bash
+gunzip -c ~/Documents/airlock-backups/airlock_YYYY-MM-DD_HHMM.sql.gz \
+  | docker compose exec -T db psql -U airlock -d clinical_notes
+```
+
+**Prisma client** (`src/lib/db.ts`) is constructed lazily behind a `Proxy`.
+Building the image has no database and no `DATABASE_URL`, and Next collects route
+data at build time — an eager client would throw during `next build` rather than
+at first query.
+
+## 13. The browser client
+
+**`pipeline-client.ts`** is isomorphic: the UI and every script drive it the same
+way. It fetches `/api/keys`, seals, POSTs, and parses the SSE stream with a
+minimal frame parser (`EventSource` cannot issue a POST). On
+`code: DECRYPT_FAILED` it re-fetches the public key past any cache and retries
+**once** — telling a clinician to reload mid-note is not a fix.
+
+**`page.tsx`** is one client component plus drawers. Notable mechanics:
+
+- **The raw note leaves the workspace the moment it is sealed** (`setInput("")`).
+  A chart entry sitting on screen is itself an exposure.
+- **Two copy buttons, named for what they contain**: *Copy note · with names* and
+  *Copy de-identified*. The old single "Copy clean note" was ambiguous in the
+  worst direction — in a de-identification tool "clean" reads as "de-identified",
+  but it copied the re-hydrated note.
+- **Stale tabs fix themselves.** Every build gets an id, exposed in `/api/status`
+  and baked into the bundle. A tab whose id disagrees reloads once. This is what
+  a removed banner surviving on screen until a manual reload actually was: old
+  JS, not old code.
+- **Theme** is a three-state control (light / dark / follow system) written to
+  `<html data-theme>` and mirrored to `localStorage`, applied by an inline script
+  before first paint so there is no white flash on a night shift. It is read
+  through `useSyncExternalStore`, which avoids both a hydration mismatch and a
+  render-time `localStorage` read. Tailwind v4's `dark:` variant is redefined to
+  honour the attribute *and* the OS preference.
+- **The Prompts drawer reads `/api/prompt-config` live** on every open, so the
+  prompts it shows are the ones the running server would send, and the local
+  model name is the one LM Studio actually has loaded.
+
+**Caching headers** (`next.config.ts`): HTML and every API response are
+`no-store`, with `CDN-Cache-Control` and `Cloudflare-CDN-Cache-Control` set too —
+Cloudflare was caching `/api/auth/csrf` and replaying it with `Set-Cookie`
+stripped, so every sign-in failed with `MissingCSRF`. Hashed assets under
+`/_next/static` are deliberately *not* covered: their names change per build.
+
+The SSE response sets `X-Accel-Buffering: no` so Cloudflare does not sit on the
+stream waiting for a full body. Verified live through the tunnel.
+
+## 14. Configuration reference
+
+| Variable | Purpose |
+| --- | --- |
+| `AIRLOCK_DATA_DIR` | Where Postgres and the keypair live on the Mac. Required by compose. |
+| `DATABASE_URL` | Local Postgres for the audit log |
+| `SHADOW_DATABASE_URL` | Scratch DB for `prisma migrate diff/dev`. No application data. |
+| `GEMINI_API_KEY` | Cloud formatting layer. Required. |
+| `GEMINI_MODEL` | Default starting rung of the ladder |
+| `GEMINI_MODEL_LADDER` | Optional override of the whole ladder, best first, comma separated |
+| `GEMINI_BASE_URL` | Optional endpoint override (egress proxy, regional endpoint, local stub). Unset normally. |
+| `LMSTUDIO_BASE_URL` | Local NER endpoint. In Docker this is pinned to `DOCKER_LMSTUDIO_URL`. |
+| `LMSTUDIO_MODEL` | Model id each request asks LM Studio for |
+| `LMSTUDIO_TIMEOUT_MS` | Local pass timeout, default 90000 |
+| `ALLOW_DEGRADED_SCRUB` | `false` (default) aborts when the local pass is unavailable. `true` permits regex-only. |
+| `KEY_STORE_FILE` | Filename inside `./.keys/` for the RSA keypair |
+| `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` | Google OAuth client |
+| `AUTH_SECRET` | `openssl rand -base64 32` |
+| `AUTH_URL` | Canonical URL. **Determines the session cookie name.** |
+| `AUTH_ALLOWED_EMAILS` | Mandatory allowlist. Empty denies everyone. |
+| `DEV_LOGIN_ENABLED` / `DEV_LOGIN_PASSWORD` / `DEV_LOGIN_ALLOW_REMOTE` | Developer bypass. Off, and localhost-only, by default. |
+| `TUNNEL_TOKEN` | Cloudflare Tunnel, used by the `tunnel` compose profile |
+| `POSTGRES_PASSWORD` | Must match the credentials in `DATABASE_URL` |
+| `BUILD_ID` | Optional explicit build id; otherwise a timestamp |
+
+### Docker notes
+
+- **Set Docker Desktop's VM to 2 GB** (Settings → Resources). The whole stack
+  peaks around 215 MB; on a 16 GB Mac every gigabyte the VM reserves is a
+  gigabyte the model cannot use. Measured: 2 GB VM leaves 6.2 GB free with a
+  model loaded, against 2.7 GB at the 8 GB default.
+- **Do not scale the `app` service.** The compute lock is process-local.
+- **`docker compose` auto-loads `.env` for interpolation**, so a host-specific
+  value there can override a compose default. `LMSTUDIO_BASE_URL` is the trap:
+  the host's `127.0.0.1` means "this container" inside the container. It is
+  pinned to `DOCKER_LMSTUDIO_URL` in the compose file for exactly this reason.
+- The `migrate` service builds the **builder** stage, because the runtime image
+  deliberately has no Prisma CLI.
+- `docker builder prune -af` reclaims build cache without touching data.
+
+## 15. Every script, and what it proves
+
+All of them run under `tsx`. **Every route is behind sign-in**, so the scripts
+that talk to a running server mint a real Auth.js Session row via
+`scripts/test-session.ts` and present the cookie exactly as a browser would —
+rather than adding a permanent bypass to a PHI-handling service. They need
+`DATABASE_URL` for that, which `import "dotenv/config"` supplies from `.env`.
+
+### `npm run verify` — `scripts/verify-pipeline.ts`
+
+**Offline.** No database, no API key, no model: it stubs LM Studio on port
+**11234**. Seven sections:
+
+1. Crypto round-trip — envelope shape, ciphertext is not plaintext, server
+   decrypts, response uses a fresh IV, client decrypts, GCM rejects a tampered IV.
+2. Deterministic scrub — each identifier removed, doses and vitals preserved,
+   indexed tokens issued, national-ID checksum accepts a valid ID and rejects a
+   bad check digit.
+3. Local NER against the stub — catches patient / relative / attending / English
+   doctor / ward, rejects a hallucinated span, refuses a mislabelled clinical
+   term, and `Troponin I` survives into the note.
+4. Fail-closed — throws `LocalScrubUnavailableError` when LM Studio is down, and
+   degrades only when `ALLOW_DEGRADED_SCRUB=true`.
+5. Re-hydration — prints the de-identified text and asserts every token comes
+   back.
+6. Token collision — `[MRN_11]` vs `[MRN_1]`, longest-first replacement.
+7. Compute lock — acquire, refuse, release, and a stale handle cannot free it.
+
+**Run this first for any change to crypto, either scrubber, the vault, or the
+lock.** It is the fastest signal in the repo.
+
+### `npm run e2e` — `scripts/e2e-encrypted-post.ts`
+
+Against a **running server with real dependencies**: fetch the key, seal a note,
+stream it through, print the de-identified prompt, the re-hydrated note and the
+metadata. Takes an optional base URL argument. Cleans up its own test user.
+
+### `npm run e2e:full` — `scripts/e2e-full-stubbed.ts`
+
+The whole pipeline with **both externals stubbed** — LM Studio on `:1234`, Gemini
+on `:8899`. Start the server against the stub first:
+
+```bash
+GEMINI_API_KEY=stub GEMINI_BASE_URL=http://localhost:8899 npm run dev
+npm run e2e:full
+```
+
+The Gemini stub records the prompt it was given, so the test can assert
+positively that **the cloud never saw** each of ten identifiers — rather than
+inferring it. Also checks clinical content survived, `CRP` was not mistaken for a
+person, everything was restored, no placeholder is left, an audit row was
+written, and inspector previews are masked.
+
+### `npm run e2e:concurrency` — `scripts/e2e-concurrency.ts`
+
+Stubs LM Studio on `:1234` with a deliberate 2-second latency so three requests
+overlap, then asserts exactly one is admitted and two get 429, and that the lock
+is released afterwards.
+
+### `npm run e2e:routine` — `scripts/e2e-routine.ts`
+
+Runs the same narrative twice, once bare and once through a saved routine, to
+show the routine reached Gemini and shaped the output. Takes the routine name as
+an argument. Note that routines are per-owner: a fresh harness user sees only
+shared (ownerless) routines, and the script names what it *can* see if it cannot
+find yours.
+
+### `npm run e2e:custom` — `scripts/e2e-custom-mode.ts`
+
+The custom-mode contract. Both stubs record what they were asked, so the run can
+assert the user's prompts and every sampling parameter actually reached both
+models, **and** that the four properties custom mode may not switch off held
+anyway. Stub ports are configurable because a dev box usually has the real LM
+Studio on `:1234`:
+
+```bash
+GEMINI_API_KEY=stub GEMINI_BASE_URL=http://localhost:8899 \
+  LMSTUDIO_BASE_URL=http://localhost:1299/v1 npm run dev -- -p 3100
+
+AIRLOCK_BASE=http://localhost:3100 LMSTUDIO_STUB_PORT=1299 npm run e2e:custom
+```
+
+It also asserts a broken config is refused rather than silently defaulted, and
+that guided mode is untouched afterwards.
+
+### `npm run e2e:system` — `scripts/e2e-full-system.ts`
+
+**The acceptance suite.** Live server, real LM Studio, real Gemini, real
+Postgres, no stubs. Waits for the compute slot rather than reporting a false
+failure if something else is mid-run. Sections:
+
+| | Covers |
+| --- | --- |
+| 0 | Auth gate — five routes refuse anonymous callers, `/` redirects, `/signin` is public |
+| 0b | Developer bypass guards, including a **raw-socket** `Host` spoof (fetch silently drops a custom `Host`) |
+| 1 | Preflight — LM Studio, database and Gemini key all real |
+| 2 | Routine CRUD against Postgres, including the duplicate-name 409 |
+| 3 | PHI guard — a routine carrying patient data is rejected 422 and names the categories |
+| 4 | Input cap |
+| 5 | A full ward note: every stage streams, stages arrive in order, no identifier reached the cloud, clinical content preserved, every emitted token restored, both scrub passes contributed |
+| 6 | The same note with a routine, and the routine's effect on the output |
+| 6b | The EMR-export shapes that leaked in real use |
+| 7 | Audit invariant — no row contains any identifier, scanned across the whole table |
+| 7b | History: per-user recall, format recorded, search |
+| 7b2 | Shared routines are manageable, not orphaned |
+| 7c | Tenant isolation, both directions |
+| 8 | Single-slot limit under concurrent load |
+| 9 | Cleanup — the library returns to its original size and the test users are removed |
+
+**It is deliberately non-destructive.** It creates its own users and removes only
+what it created. Never add a `TRUNCATE`: the leak scan covers every row in the
+table including yours, and emptying it first would make that check meaningless as
+well as destroying real history.
+
+### `npm run prove:e2ee` — `scripts/prove-e2ee.ts`
+
+Runs a **wiretap proxy** on `:3999` between the "browser" and the app — exactly
+where Cloudflare sits — records every byte in both directions, then tries to read
+the note out of the capture. It reports the wrapped-key and ciphertext sizes,
+shows the ciphertext decoded as text, and checks that no identifier appears
+anywhere in the traffic, that the AES key cannot be unwrapped without the Mac
+Mini's private key, and that GCM rejects tampered ciphertext rather than
+returning garbage. Uses the developer bypass, so `DEV_LOGIN_ENABLED=true` is
+required.
+
+### `npm run db:smoke` — `scripts/db-smoke.ts`
+
+Inserts one de-identified row, counts, deletes it. The fastest way to tell a
+database problem from an application problem.
+
+### `npm run db:inspect` — `scripts/inspect-audit-db.ts`
+
+Prints every table with row counts, the full `AuditLog` column list, one real row
+in both directions, and then scans the **whole table** for known identifiers.
+Exits non-zero if anything leaked. This is the fastest way to satisfy yourself
+that the audit table holds nothing identifying.
+
+### `npm run audit:contrast` — `scripts/audit-contrast.mjs`
+
+Drives real Chrome via `playwright-core` and walks **every text node on every
+surface** — sign-in, the main page empty / typed / processing / with a result,
+and all six drawers — in both themes. It composites through alpha layers and
+`opacity` exactly as rendered, so nothing is judged by class name alone. Needs
+`DEV_LOGIN_ENABLED=true` (it signs in with the dev password).
+
+Widening it from "controls" to "all text", and from resting to in-flight states,
+turned 0 known problems into 135 — which were three causes, not 135 bugs:
+`opacity` used to dim text, Tailwind `-600`/`-500` shades on white, and
+`animate-pulse` on a label. Current state: 1,763 text nodes, zero below AA, both
+themes.
+
+### `scripts/test-session.ts`
+
+Not runnable — the helper the others import. `createTestSession(label)` upserts a
+`<label>@airlock.test` user, writes a real Session row, and returns the cookie
+header. `destroyTestUser()` cascades to sessions, audit rows and routines.
+
+## 16. Debugging playbook
+
+### Start here
+
+```bash
+curl -s localhost:3000/api/health                       # is the process answering?
+curl -s localhost:1234/v1/models | head                 # is a model loaded?
+docker compose ps                                       # are app and db healthy?
+npm run db:smoke                                        # can Prisma reach Postgres?
+npm run verify                                          # is the PHI path itself sound?
+docker compose logs -f app                              # what did the server say?
+```
+
+`/api/status` (signed in) is the single richest read: compute slot, current
+stage, LM Studio, database, whether the Gemini key is configured, active vault
+count, degraded-scrub policy, build id, dev-login policy.
+
+### Symptom table
+
+| Symptom | Most likely cause | Check |
+| --- | --- | --- |
+| Every request 401, no other symptom | `AUTH_URL` scheme disagrees with the cookie name Auth.js reads | `sessionCookieName()` in `dev-login.ts`; compare `AUTH_URL` with how the browser reached you |
+| Sign-in fails with `MissingCSRF` | An edge cached `/api/auth/csrf` and stripped `Set-Cookie` | The `no-store` headers in `next.config.ts` |
+| Script dies on `Key endpoint returned 401` | The script is not presenting a session | It should use `createTestSession()` — see section 15 |
+| `LOCAL_SCRUB_UNAVAILABLE` on every note | LM Studio down, wrong URL, or no model loaded | `curl $LMSTUDIO_BASE_URL/models`; inside Docker the URL must be `host.docker.internal` |
+| Same, but only on long notes | The entity JSON was truncated | Raise `max_tokens` (custom mode) or split the note |
+| Local pass returns nothing, model looks broken | A reasoning model put the answer in `reasoning_content` | Already handled by the empty-`content` retry; confirm the model actually answers `/chat/completions` |
+| Status badge says "LM Studio down" during every note | Probing a server that serialises | Expected and handled — `/api/status` uses the cached health while locked |
+| Prompts drawer names a model you did not load | `LMSTUDIO_MODEL` pins a different id than LM Studio has loaded | The drawer now shows both and warns; fix the pin or clear it |
+| Badge stays "Mac Mini Online" during a run | Fixed — the badge now treats a submitting tab as busy and polls at 1 s | If it recurs, check `/api/status` returns `busy: true` directly |
+| Every note 429 | A wedged request holds the lock | It self-reclaims after 5 minutes; `/api/status` shows `lockHeldForMs` |
+| A model chip greys out unexpectedly | Google refused it and the cooldown persisted | `select * from "ModelCooldown"` |
+| The note arrives from a lighter model | The ladder walked down | The amber footer and `AuditLog.modelUsed` both say which |
+| `DECRYPT_FAILED` | The keypair rotated under an open tab | The client retries once with a fresh key; if it persists, `.keys/` was not persisted |
+| Placeholders left in the finished note | The cloud model renumbered or dropped them | `meta.unresolvedTokens`; in custom mode confirm the kernel is appended |
+| A clinical term was redacted | The local model mislabelled it and it escaped the stop-list | `meta.rejectedClinicalSpans`; add the pattern to `CLINICAL_STOPLIST` |
+| An identifier was missed | The regex has no rule and the NER did not see it | Add a rule — and mind the ordering constraints in section 6 |
+| Saved routine rejected 422 | It contains something the scrubber recognises | The response `detail` names the categories |
+| A UI change does not appear | The tab is running an older build | It self-reloads on the build-id mismatch; otherwise hard-reload |
+| History empty for a user who has notes | History is per-owner | Rows are scoped by `userId`; a fresh test user sees nothing |
+
+### Reading the SSE stream by hand
+
+```bash
+COOKIE='authjs.session-token=<token from the Session table>'
+curl -N -H "Content-Type: application/json" -H "Cookie: $COOKIE" \
+  -d '{"encryptedData":"…","encryptedKey":"…","iv":"…"}' \
+  localhost:3000/api/process-note
+```
+
+Every frame is `event: progress|result|error` plus a JSON `data:` line. Progress
+frames never contain note content, so they are safe to paste into a bug report.
+`result` frames are ciphertext.
+
+### Logging rule
+
+If you add logging to the pipeline route, log `deidentifiedInput`. **Never**
+`plaintext`, **never** `noteText`, **never** `vault`. Everything already logged
+in that route is either a stage name, a count, or the first line of an error
+message.
+
+## 17. Known quirks
+
+- **`12-3床` is redacted as a date.** The month/day rule matches `12-3` before
+  the bed reaches the NER, so a bed number can appear as `[DATE_n]床` in the
+  de-identified text. It round-trips correctly and the identifier is removed
+  either way — the label is simply wrong. Over-redaction is the safe failure.
+- **The MRN rule is deliberately blunt.** `\b\d{7,8}\b` will sometimes swallow an
+  accession number or a large plain integer.
+- **Cooldowns for daily exhaustion are held until midnight US/Pacific**, computed
+  by an offset trick that can be an hour out across a DST transition. The cost is
+  one wasted request.
+- **`isValidTaiwanId()` is not used for redaction.** It exists for callers that
+  want to distinguish a real ID from a lookalike.
+- **`AUTH_ALLOWED_EMAILS` is not consulted by the developer bypass.** The bypass
+  is gated by its own two switches instead.
+- **`vaultCount()` sweeps as a side effect**, so `/api/status` is what actually
+  keeps the TTL store tidy in an idle process.
+- **The health probe's 10-minute "busy" window** means a genuinely dead LM Studio
+  can read as "busy" for up to ten minutes after its last success.
+
+## 18. Changing this safely
+
+Before you push anything that touches the PHI path:
+
+1. `npm run verify` — offline, seconds, covers crypto, both scrubbers, the vault
+   and the lock.
+2. `npx tsc --noEmit && npm run lint`.
+3. `npm run e2e:full` against a stubbed server if you touched the route or the
+   client, `npm run e2e:custom` if you touched custom mode.
+4. `npm run e2e:system` against the live stack before shipping.
+5. `npm run db:inspect` if you touched anything that writes.
+
+The invariants that must survive any change:
+
+- The token map is never persisted anywhere.
+- The regex pass runs before the local model, always.
+- The local pass fails closed unless `ALLOW_DEGRADED_SCRUB` is explicitly set.
+- Every span the local model returns is verified verbatim against the source.
+- Placeholder shape stays `[A-Z_]+_\d+` — `assign`, `rehydrate` and the guards
+  all depend on it.
+- Only the `result` SSE event carries note content.
+- `AuditLog` receives de-identified text only.
+- The app runs as exactly one replica.
+
+---
+
+## Appendix A — setup details
+
+### Running on the host, without Docker
+
+```bash
+npm install
+
+brew install postgresql@17 && brew services start postgresql@17
+# postgresql@17 is keg-only; add it to PATH for psql/createdb:
+echo 'export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"' >> ~/.zshrc
+createdb clinical_notes
+
+# set DATABASE_URL in .env, then:
+npm run db:migrate
+npm run db:smoke
+
+npm run dev            # http://localhost:3000
+npm run build && npm start
+```
+
+LM Studio still runs separately: load an instruction-following model that handles
+Traditional Chinese and start its server on port 1234.
+
+### Creating the Google OAuth client
+
+1. Google Cloud Console → APIs & Services → Credentials → **OAuth client ID**,
+   type **Web application**.
+2. Authorised redirect URIs — add both:
+   - `http://localhost:3000/api/auth/callback/google`
+   - `https://<your-public-host>/api/auth/callback/google`
+3. Put the client id and secret in `.env`, plus `AUTH_SECRET`
+   (`openssl rand -base64 32`) and `AUTH_ALLOWED_EMAILS`.
+
+Airlock stores only what OAuth returns: name, email, avatar. The Google provider
+requests no offline access and no extra scopes.
+
+Publishing over a tunnel: [ops/PUBLISH.md](ops/PUBLISH.md) — note that
+`AUTH_URL` does double duty, since it also determines the session cookie name.
+
+### Installing the hourly backup
+
+```bash
+cp ops/uk.galenchen.airlock.backup.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/uk.galenchen.airlock.backup.plist
+bash ops/backup-airlock.sh          # run once by hand to check
+tail ~/Documents/airlock-backups/backup.log
+```
+
+If the Mac is asleep, launchd runs it at next wake. Each dump is a few KB, so 30
+days of hourly retention costs single-digit megabytes.
+
+## Appendix B — numbers worth knowing
+
+### Input budget (`src/lib/limits.ts`)
+
+| | |
+| --- | --- |
+| Comfortable | up to **6,000** characters — a full shift handover fits easily |
+| Soft warning | past 6,000 the UI warns and asks you to check the redaction list |
+| Hard refusal | past **20,000**, rejected client- and server-side |
+
+Both limits are exported from one module and shared by the browser counter and
+the route, so the two can never disagree. The live counter reports **words**
+counted as Latin words plus CJK characters individually — Chinese is unspaced, so
+a whitespace split alone would report a 400-character note as "1 word".
+
+### Throughput with several clinicians
+
+Sign-in, history and routines are fully per-user, but **the compute slot is
+global**. Measured with three simultaneous users:
+
+```
+carol   done at  9.5s  (waited out 0 busy replies)
+bob     done at 13.9s  (waited out 5 busy replies)
+alice   done at 17.9s  (waited out 7 busy replies)
+3/3 completed, each seeing only their own note
+```
+
+Genuinely multi-user; throughput is one note at a time. For a ward round where
+several people submit at once, expect the last person to wait roughly *n* × the
+time of one note.
+
+### Interface constraints
+
+Built for a **1024×768** ward monitor. No control ever loses its label — the
+header wraps to a second row instead, and only the decorative strapline is
+dropped. Verified at 1024, 1280, 1600 and 1920, with **Encrypt & structure** on
+screen without scrolling.
+
+Contrast is audited rather than assumed: `npm run audit:contrast` composites
+through alpha and `opacity` exactly as rendered. Two rules learned the hard way —
+never use `opacity` to dim text (it drags the colour toward its own background;
+spent model chips once measured **1:1**, i.e. exactly invisible), and never
+animate the opacity of a label (the busy pill dipped to 2.14:1 mid-cycle, right
+when it mattered — the icon pulses now, not the text).

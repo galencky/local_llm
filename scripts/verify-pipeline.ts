@@ -79,7 +79,11 @@ async function main() {
   check("preserved troponin 3.45", regex.text.includes("3.45"));
   check("preserved BP 152/94", regex.text.includes("152/94"));
   check("issued indexed tokens", /\[MRN_1\]/.test(regex.text) && /\[TAIWAN_ID_1\]/.test(regex.text));
-  check("checksum validates real ID", isValidTaiwanId("A123456789") === false || true);
+  // This was `isValidTaiwanId(x) === false || true`, which is a tautology and
+  // could never fail. Assert both directions instead: the checksum accepts a
+  // well-formed ID and rejects one that only looks like it.
+  check("checksum accepts a well-formed ID", isValidTaiwanId("A123456789"));
+  check("checksum rejects a bad check digit", !isValidTaiwanId("A123456780"));
 
   console.log("\n[3] Local NER pass against a stub LM Studio");
   const stub = createServer((req, res) => {

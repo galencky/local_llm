@@ -458,7 +458,10 @@ export default function AirlockPage() {
   }, []);
 
   /* --- health polling -------------------------------------------------- */
-  const pollMs = queued ? 1000 : 5000;
+  // Tighten the cadence whenever this tab has work outstanding — queued OR
+  // running. A five-second poll can miss a short run entirely, which is how
+  // "Mac Mini Busy" could fail to appear for a note that had plainly run.
+  const pollMs = queued || submitting ? 1000 : 5000;
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -636,7 +639,13 @@ export default function AirlockPage() {
     }
   };
 
-  const busy = status?.busy ?? false;
+  /**
+   * The box is busy if the server says so — or if this tab is the one keeping
+   * it busy. Waiting for a poll to confirm what this tab already knows left
+   * the badge reading "Online" for up to five seconds into a run, and for the
+   * whole of a run shorter than the poll interval.
+   */
+  const busy = (status?.busy ?? false) || submitting;
 
   return (
     <div className="flex min-h-full flex-col">
@@ -1318,7 +1327,7 @@ function CustomModeDrawer({
                 heading="What still holds, whatever you write here"
                 points={[
                   "The pattern scrub runs first, always. Taiwan IDs, MRNs, phone numbers and dates are gone before your prompt sees the note — the floor is regex-only, never nothing.",
-                  "The answer must still be entity JSON in the six known categories. A prompt that talks the model out of that shape fails the run closed rather than passing names to the cloud.",
+                  "The answer must still be entity JSON with a token-safe category on every span. A prompt that talks the model out of that shape fails the run closed rather than passing names to the cloud.",
                   "Every span is still matched verbatim against the source, screened against the clinical stoplist, and length-capped, so an invented or mislabelled span cannot be redacted out of the note.",
                 ]}
               />
@@ -2248,7 +2257,15 @@ function Field2({ label, value, sub }: { label: string; value: string; sub: stri
 /* ------------------------------------------------------------------ */
 
 interface PromptConfig {
-  local: { model: string; prompt: string };
+  local: {
+    /** The model actually answering right now. */
+    model: string;
+    /** What LM Studio has loaded, or null when it is unreachable. */
+    loadedModel: string | null;
+    /** What LMSTUDIO_MODEL pins each request to, or null when unset. */
+    configuredModel: string | null;
+    prompt: string;
+  };
   cloud: {
     model: string;
     systemInstruction: string;
@@ -2352,6 +2369,23 @@ function PromptsDrawer({ onClose }: { onClose: () => void }) {
                 heading={`Runs on this Mac · ${cfg.local.model}`}
                 body="This prompt is the de-identification step itself. It is what finds the names, wards and addresses that pattern rules cannot. Weakening it would silently widen what reaches the cloud, so it is compiled in rather than configurable."
               />
+              {/* The name above is read from LM Studio, not from the config.
+                  When the two disagree the pin is what each request asks for,
+                  which is worth saying out loud rather than quietly showing
+                  one of the two names. */}
+              {cfg.local.loadedModel &&
+                cfg.local.configuredModel &&
+                cfg.local.loadedModel !== cfg.local.configuredModel && (
+                  <div className="mb-3 flex gap-2 rounded border border-amber-500/40 bg-amber-500/10 p-2.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+                    <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                    <span>
+                      LM Studio has <strong>{cfg.local.loadedModel}</strong> loaded, but{" "}
+                      <code className="font-mono">LMSTUDIO_MODEL</code> pins requests to{" "}
+                      <strong>{cfg.local.configuredModel}</strong>. Point the pin at the loaded
+                      model, or clear it, so the note is read by the model named here.
+                    </span>
+                  </div>
+                )}
               <PromptBlock title="System prompt" body={cfg.local.prompt} />
             </>
           )}
