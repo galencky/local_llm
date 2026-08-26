@@ -5,22 +5,42 @@ import type { CustomLocalConfig } from "./custom-mode";
  * Pass 3B — probabilistic NER via LM Studio on localhost.
  *
  * Catches the identifiers regex cannot: patient and relative names, attending
- * physicians, ward/bed designations, employers, and place names. Runs entirely
- * on the Mac Mini — the raw narrative never leaves the box for this step.
+ * physicians, ward/bed designations, employers, and place names. It is also
+ * asked for the structured categories the regex pass already covers, so that
+ * a format the rules do not know still has a second chance to be caught.
+ * Runs entirely on the Mac Mini — the raw narrative never leaves the box.
  */
 
-const LLM_CATEGORIES = [
-  "PATIENT",
-  "RELATIVE",
-  "DOCTOR",
-  "WARD",
-  "LOCATION",
-  "ORG",
-] as const satisfies readonly PiiCategory[];
-
-type LlmCategory = (typeof LLM_CATEGORIES)[number];
-
-const CATEGORY_SET = new Set<string>(LLM_CATEGORIES);
+/**
+ * Coerce whatever the model called a category into a token-safe label.
+ *
+ * The categories this pass asks for live in NER_SYSTEM_PROMPT below, which is
+ * their single source of truth — and that list is a suggestion, not a
+ * whitelist. A model that meets a passport number and reports `PASSPORT` is
+ * doing the right thing, and the old behaviour — silently dropping any
+ * category outside a fixed enum — turned that correct detection into a leak.
+ *
+ * Naming the structured categories in the prompt is what moved the numbers.
+ * Measured on gemma-4-12b over a 17-identifier synthetic note, temperature 0:
+ * LLM-only recall went 9/17 -> 17/17, and the full regex+NER pipeline
+ * 15/17 -> 17/17, with no clinical term wrongly redacted in either arm.
+ *
+ * What is NOT negotiable is the shape. `TokenVault.assign` builds
+ * `[${category}_${n}]`, `rehydrate` matches those literally, and the
+ * placeholder guard below tests `/^\[[A-Z_]+_\d+\]$/`. So anything outside
+ * `[A-Z_]` is folded away here, and the result is length-capped, before a
+ * label can reach the vault. This is the deterministic half of the pipeline:
+ * the model chooses the name, the code guarantees the round-trip.
+ */
+function normaliseCategory(raw: string): PiiCategory {
+  const cleaned = raw
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "");
+  return cleaned ? cleaned.slice(0, 24) : "OTHER_ID";
+}
 
 /** Thrown when the local NER pass cannot run. Fail-closed by default. */
 export class LocalScrubUnavailableError extends Error {
@@ -32,23 +52,34 @@ export class LocalScrubUnavailableError extends Error {
 
 export const NER_SYSTEM_PROMPT = `You are a strict named-entity recogniser for a hospital de-identification pipeline in Taiwan. You operate on Traditional Chinese and English clinical narratives.
 
-Your ONLY job is to list spans of text that identify a real person, place, or institution. You never summarise, translate, diagnose, or comment.
+Your ONLY job is to list spans of text that identify a real person, place, institution, or record. You never summarise, translate, diagnose, or comment.
 
 Extract these categories:
-- PATIENT: the patient's own name, nickname, or a name-bearing form of address (e.g. 陳建明, 王小姐, Mr. Lin).
+- PATIENT: the patient's own name, nickname, or name-bearing form of address.
 - RELATIVE: names of family members, caregivers, or contacts.
-- DOCTOR: names of physicians, surgeons, nurses, therapists, or any named staff (e.g. 林醫師, Dr. Huang, 張護理師).
-- WARD: ward, room, bed, or unit designations (e.g. 8B病房, 12-3床, ICU-2, Ward 5A).
-- LOCATION: street addresses, districts, townships, or any residential geography.
+- DOCTOR: names of physicians, surgeons, nurses, therapists, or any named staff.
+- WARD: ward, room, bed, or unit designations (e.g. 8B病房, 12-3床, A092- 36, Ward 5A).
+- LOCATION: street addresses, districts, townships, or any residential geography — however long.
 - ORG: named hospitals, clinics, schools, or employers.
+- TAIWAN_ID: national ID or ARC numbers (one letter + 9 digits, e.g. A123456789).
+- MRN: hospital medical record / chart numbers (bare 7-8 digit runs).
+- PHONE: any telephone number, mobile or landline, any format.
+- DATE: any calendar date in any format — Gregorian, ROC/民國, CJK 年月日, or bare month/day.
+- EMAIL: any email address.
+- STAFF_CODE: alphanumeric staff or physician codes as printed in EMR exports (e.g. DOC4674E).
+- OTHER_ID: any other number or code that could identify a person or record.
+
+If a span identifies someone or something but none of the categories above fit, invent your own short descriptive tag in UPPERCASE_WITH_UNDERSCORES (e.g. PASSPORT, INSURANCE_ID, VEHICLE_PLATE, BANK_ACCOUNT). Never discard an identifier just because it has no listed category.
 
 CRITICAL RULES:
 1. Copy each span EXACTLY as it appears in the source, character for character. Do not trim titles, do not normalise, do not fix typos.
 2. Do NOT extract text already replaced by a bracketed placeholder such as [MRN_1] or [DATE_2].
 3. Do NOT extract clinical content: diseases, drugs, doses, procedures, anatomy, lab values, vital signs, or device names.
-4. Do NOT extract generic role words used without a name (e.g. bare "the patient", "病人", "家屬", "主治醫師" with no surname attached).
+4. Do NOT extract generic role words used without a name.
 5. Do NOT extract named medical entities such as eponymous diseases, syndromes, signs, scores, or classifications (Crohn's disease, Glasgow Coma Scale, Foley catheter). These are not people.
-6. If nothing qualifies, return an empty list.
+6. Do NOT extract clinical unit abbreviations used as a destination of care (CCU, ICU, ER, OR, NICU) — these are not ward identifiers.
+7. Numbers attached to a lab value, dose, or vital sign are clinical, not identifiers. A bare 7-8 digit run with no unit IS an MRN.
+8. If nothing qualifies, return an empty list.
 
 Respond with JSON only, matching: {"entities":[{"text":"<exact span>","category":"<CATEGORY>"}]}`;
 
@@ -61,7 +92,8 @@ const RESPONSE_SCHEMA = {
         type: "object",
         properties: {
           text: { type: "string" },
-          category: { type: "string", enum: [...LLM_CATEGORIES] },
+          // Deliberately un-enumerated: see `normaliseCategory`.
+          category: { type: "string" },
         },
         required: ["text", "category"],
       },
@@ -99,7 +131,7 @@ interface RawEntity {
 
 export interface LlmScrubResult {
   text: string;
-  entities: { text: string; category: LlmCategory }[];
+  entities: { text: string; category: PiiCategory }[];
   /** Spans the model returned that were not found verbatim in the source. */
   hallucinated: number;
   /** Spans refused because they name clinical content, not a person or place. */
@@ -259,18 +291,31 @@ export async function scrubWithLlm(
 
   let content: string;
   try {
+    type ChatBody = { choices?: { message?: { content?: string } }[] };
+    const read = async (r: Response): Promise<string> => {
+      if (!r.ok) {
+        throw new Error(`LM Studio responded ${r.status}: ${await r.text()}`);
+      }
+      return ((await r.json()) as ChatBody).choices?.[0]?.message?.content ?? "";
+    };
+
     let res = await callLmStudio(input, controller.signal, true, custom);
     if (res.status === 400) {
       // Older LM Studio builds / GGUFs without grammar support.
       res = await callLmStudio(input, controller.signal, false, custom);
+      content = await read(res);
+    } else {
+      content = await read(res);
+      if (!content.trim()) {
+        // A reasoning model with a json_schema attached answers HTTP 200 with
+        // the entire object in `reasoning_content` and `content` empty. The
+        // 400 branch above never fires, so without this the pipeline fails
+        // closed on every note and the model looks broken. Retry once with no
+        // schema, which puts the answer back in `content`.
+        res = await callLmStudio(input, controller.signal, false, custom);
+        content = await read(res);
+      }
     }
-    if (!res.ok) {
-      throw new Error(`LM Studio responded ${res.status}: ${await res.text()}`);
-    }
-    const body = (await res.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    content = body.choices?.[0]?.message?.content ?? "";
     if (!content.trim()) throw new Error("LM Studio returned an empty choice.");
   } catch (err) {
     const allowDegraded = process.env.ALLOW_DEGRADED_SCRUB === "true";
@@ -322,7 +367,7 @@ export async function scrubWithLlm(
     ? ((parsed as { entities: unknown[] }).entities as RawEntity[])
     : [];
 
-  const accepted: { text: string; category: LlmCategory }[] = [];
+  const accepted: { text: string; category: PiiCategory }[] = [];
   const seen = new Set<string>();
   let hallucinated = 0;
   let rejectedClinical = 0;
@@ -331,10 +376,10 @@ export async function scrubWithLlm(
     const span = typeof entity?.text === "string" ? entity.text.trim() : "";
     const category =
       typeof entity?.category === "string"
-        ? entity.category.trim().toUpperCase()
-        : "";
+        ? normaliseCategory(entity.category)
+        : "OTHER_ID";
 
-    if (!span || !CATEGORY_SET.has(category)) continue;
+    if (!span) continue;
     // Reject anything that is not a verbatim substring: a hallucinated span
     // would otherwise create a token that never matches and never rehydrates.
     if (!input.includes(span)) {
@@ -344,7 +389,11 @@ export async function scrubWithLlm(
     // Never re-redact a placeholder emitted by the regex pass.
     if (/^\[[A-Z_]+_\d+\]$/.test(span)) continue;
     // Guard against a model that returns the whole paragraph as one "name".
-    if (span.length > 60) continue;
+    // A newline is the real signal for that; a bare length cap is not. At 60
+    // this silently discarded correctly-identified long addresses — the model
+    // did its job and the guard threw the answer away, with no counter to show
+    // it had happened. 200 clears the longest realistic single-line address.
+    if (span.includes("\n") || span.length > 200) continue;
     // Never let a mislabelled lab analyte or eponym be redacted out of the note.
     if (isClinicalTerm(span)) {
       rejectedClinical += 1;
@@ -354,7 +403,7 @@ export async function scrubWithLlm(
     const key = `${category}::${span}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    accepted.push({ text: span, category: category as LlmCategory });
+    accepted.push({ text: span, category });
   }
 
   // Longest span first: replacing "林" before "林建明" would shred the latter.

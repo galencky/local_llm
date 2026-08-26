@@ -171,6 +171,9 @@ const CATEGORY_TINT: Record<string, string> = {
   WARD: "bg-teal-500/10 text-teal-700 dark:text-teal-400",
   LOCATION: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
   ORG: "bg-slate-500/10 text-slate-700 dark:text-slate-400",
+  EMAIL: "bg-cyan-500/10 text-cyan-700 dark:text-cyan-400",
+  STAFF_CODE: "bg-lime-600/10 text-lime-700 dark:text-lime-400",
+  OTHER_ID: "bg-stone-500/10 text-stone-700 dark:text-stone-400",
 };
 
 /**

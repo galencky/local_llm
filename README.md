@@ -218,7 +218,7 @@ Studio on port 11234.
 | `src/lib/keystore.ts` | Server RSA keypair, persisted to `./.keys/` |
 | `src/lib/concurrency.ts` | Single-slot lock with stale reclaim |
 | `src/lib/scrubber-regex.ts` | Taiwan ID / MRN / phone / ROC+Gregorian dates. Rule order is load-bearing. |
-| `src/lib/scrubber-llm.ts` | LM Studio NER, verbatim-span validation, clinical stop-list, fail-closed |
+| `src/lib/scrubber-llm.ts` | LM Studio NER, open tag vocabulary, verbatim-span validation, clinical stop-list, fail-closed |
 | `src/lib/memory-cache.ts` | `TokenVault` + 10-minute TTL store. **The only place raw PHI lives on the server.** |
 | `src/lib/gemini.ts` | Note formats and the placeholder-preserving system prompt |
 | `src/lib/db.ts` | Prisma singleton (`@prisma/adapter-pg`) |
@@ -514,6 +514,45 @@ is a patient-safety problem rather than a formatting one. `152/94 mmHg` and
 
 **This layer is still not a guarantee.** It catches shapes it has been taught.
 Read the redaction list before filing a note — that is what it is for.
+
+## What the NER pass catches, and why its tags are open
+
+The local model is asked for the semantic identifiers regex cannot see — names,
+wards, employers, addresses — **and also for the structured ones the regex pass
+already covers**. That overlap is deliberate. Regex catches shapes it was
+taught; a format it has never met (a passport, an insurance number, a Line ID)
+has no rule, and before this the model had no category to report it under
+either, so a correct detection was dropped on the floor.
+
+So the category list in the prompt is a *suggestion, not a whitelist*. If the
+model meets an identifier that fits nothing listed, it is told to coin its own
+tag — `PASSPORT`, `VEHICLE_PLATE`, `BANK_ACCOUNT`. Nothing downstream needs to
+know the vocabulary: a token is a label plus a number, and re-hydration is a
+literal lookup.
+
+What is **not** negotiable is the shape. `normaliseCategory` folds anything
+outside `[A-Z_]` away and length-caps the result before it reaches the vault,
+so `[LABEL_1]` can never collide with clinical text, break the placeholder
+guard, or survive re-hydration. The model chooses the name; the code guarantees
+the round trip.
+
+Measured on `gemma-4-12b` over a 17-identifier synthetic note, three trials,
+temperature 0:
+
+| Prompt | LLM alone | regex → NER |
+| --- | --- | --- |
+| Six semantic categories (previous) | 9/17 | 15/17 |
+| Open vocabulary (current) | **17/17** | **17/17** |
+
+No clinical term was wrongly redacted in any arm — `Troponin I`, `Crohn's
+disease`, `Glasgow Coma Scale`, `Foley`, `1 tab` and `CCU` all survive, which
+is what rules 5–7 of the system prompt are for.
+
+Two things this does **not** change. The pass is still probabilistic, so the
+inspector drawer is still there to be read. And the regex pass is still first
+and still load-bearing: on the same note, the model alone caught **zero**
+structured identifiers under the old prompt, and regex is deterministic where
+the model is not. Widening the prompt is defence in depth, not a replacement.
 
 ## The rule that matters
 

@@ -8,7 +8,14 @@
  * ========================================================================
  */
 
-export type PiiCategory =
+/**
+ * The categories the pipeline names for itself. The local model is free to
+ * invent others — a token is only a label plus a number, and re-hydration is a
+ * literal lookup, so an unfamiliar label costs nothing. What must hold is the
+ * SHAPE of the label, which `normaliseCategory` in `scrubber-llm.ts` enforces
+ * before it ever reaches {@link TokenVault.assign}.
+ */
+export type KnownPiiCategory =
   | "TAIWAN_ID"
   | "MRN"
   | "PHONE"
@@ -18,7 +25,13 @@ export type PiiCategory =
   | "DOCTOR"
   | "WARD"
   | "LOCATION"
-  | "ORG";
+  | "ORG"
+  | "EMAIL"
+  | "STAFF_CODE"
+  | "OTHER_ID";
+
+/** A known category, or any other `[A-Z_]` label the local model invented. */
+export type PiiCategory = KnownPiiCategory | (string & {});
 
 export interface RedactionSummaryEntry {
   token: string;
