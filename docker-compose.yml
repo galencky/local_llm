@@ -78,6 +78,9 @@ services:
       LMSTUDIO_BASE_URL: ${DOCKER_LMSTUDIO_URL:-http://host.docker.internal:1234/v1}
       LMSTUDIO_MODEL: ${LMSTUDIO_MODEL:-google/gemma-4-e4b}
       LMSTUDIO_TIMEOUT_MS: ${LMSTUDIO_TIMEOUT_MS:-90000}
+      # The local formatting destination writes a whole note, not a short
+      # entity list, so it gets its own, longer budget.
+      LMSTUDIO_FORMAT_TIMEOUT_MS: ${LMSTUDIO_FORMAT_TIMEOUT_MS:-240000}
       GEMINI_API_KEY: ${GEMINI_API_KEY:?set GEMINI_API_KEY in .env}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
       GEMINI_MODEL_LADDER: ${GEMINI_MODEL_LADDER:-}

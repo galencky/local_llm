@@ -15,6 +15,7 @@ script in `scripts/` actually exercises.
 6. [Pass A — the deterministic scrubber](#6-pass-a--the-deterministic-scrubber)
 7. [Pass B — the local NER pass](#7-pass-b--the-local-ner-pass)
 8. [The cloud layer and the model ladder](#8-the-cloud-layer-and-the-model-ladder)
+8b. [The local destination](#8b-the-local-destination)
 9. [Concurrency: one compute slot](#9-concurrency-one-compute-slot)
 10. [Custom mode](#10-custom-mode)
 11. [Authentication](#11-authentication)
@@ -59,6 +60,8 @@ memory, so a second replica would silently break it.
 | `src/lib/scrubber-llm.ts` | LM Studio NER, open tag vocabulary, verbatim-span validation, clinical stop-list, fail-closed |
 | `src/lib/gemini.ts` | Note formats, prompt assembly, the placeholder-preserving system instruction, error translation |
 | `src/lib/model-registry.ts` | The Gemini ladder and observed availability |
+| `src/lib/local-format.ts` | The local formatting destination — the same note, written on this Mac |
+| `src/lib/lmstudio.ts` | Where LM Studio lives and how long each kind of call may take |
 | `src/lib/concurrency.ts` | Single-slot lock with stale reclaim, plus the live stage read-out |
 | `src/lib/custom-mode.ts` | Custom mode's contract: defaults, ranges, the placeholder kernel, and the clamp both sides run |
 | `src/lib/limits.ts` | Input budget, shared by browser and server |
@@ -80,8 +83,12 @@ real work rather than a spinner.
 
 ```
 auth → lock → decrypt → parse+clamp → budget → regex → NER → vault
-     → cloud → re-hydrate → audit → seal → (finally) purge + unlock
+     → format → re-hydrate → audit → seal → (finally) purge + unlock
 ```
+
+The format stage goes to Gemini, or to the model already loaded in LM Studio
+when the clinician picks the local destination. Everything either side of it is
+identical — see [section 8b](#8b-the-local-destination).
 
 **0. Identity.** `auth()` first, before anything else. An unauthenticated caller
 must not even be able to take the compute lock — otherwise an anonymous request
@@ -116,8 +123,10 @@ see [section 7](#7-pass-b--the-local-ner-pass). Fails closed by default.
 under a fresh UUID. In practice the request re-hydrates from its own local
 reference; the store is the safety net with a hard 10-minute expiry.
 
-**8. Cloud.** `formatClinicalNote()`. Only placeholders cross the wire. Model
-downgrades stream as progress events while they happen.
+**8. Format.** `formatClinicalNote()`, or `formatWithLocalModel()` when the
+payload's `model` is the `local` sentinel. Only placeholders cross the wire on
+the cloud path, and nothing crosses it at all on the local one. Model downgrades
+stream as progress events while they happen; the local path has none to make.
 
 **9. Re-hydrate.** `vault.rehydrate(gemini.text)`, then
 `vault.unresolvedTokens()` records any placeholder the model failed to reproduce
@@ -395,6 +404,105 @@ immediately.
 model is a different clinical draft, so the clinician is told which one they are
 reading.
 
+## 8b. The local destination
+
+`src/lib/local-format.ts`. The model selector offers one option that is not a
+rung of the ladder: **Local**. Choosing it means the model already loaded in LM
+Studio writes the note as well as reading it, and the request makes no outbound
+call at all.
+
+### Why it is not a third "mode"
+
+Guided and custom decide *what* the models are told. This decides *who writes
+the note* — the same question the ladder already answers — so it lives in the
+same selector and composes with both modes unchanged. The wire contract is a
+sentinel in the existing `model` field:
+
+```ts
+LOCAL_MODEL_ID = "local"        // src/lib/pipeline-client.ts
+isLocalDestination(model)       // route and UI agree through one predicate
+```
+
+### What does not change, and why
+
+- **Both de-identification passes still run**, in the same order. It is tempting
+  to skip them when nothing leaves the box, but the audit log's
+  de-identification invariant is not a property of the cloud boundary — it is
+  what makes History safe to open in front of somebody. A local run that wrote
+  raw names into Postgres would quietly undo that.
+- **`assemblePrompt` is the same function**, so the format skeleton, the saved
+  routine and the one-off steer compose in the same precedence.
+- **The placeholder rules still travel** — `systemInstruction()` in guided mode,
+  `withPlaceholderKernel()` in custom — so re-hydration and the
+  `unresolvedTokens` check work identically. A local model is, if anything,
+  more likely to renumber `[DATE_2]` than a flagship is.
+
+### What it costs
+
+The formatting model is whatever is loaded locally, so the draft is generally
+weaker than a Flash model, and the run holds the single compute slot for **two**
+local inferences instead of one. That is a legitimate trade for a ward with no
+egress, an exhausted quota, or a note somebody would simply rather not send.
+
+### It never falls back to the cloud
+
+`LocalFormatError` is surfaced as `code: LOCAL_FORMAT_FAILED` and the run ends
+there. Quietly escalating to Google on a local failure would break exactly the
+promise the option exists to make. This is the one place in the pipeline where
+a failure is deliberately *not* routed around.
+
+### Custom mode maps onto it
+
+Custom mode's `cloud` block is really the *formatting* block, so it applies
+whichever model is formatting. `topK` and `maxOutputTokens` carry over to their
+OpenAI-compatible names:
+
+| Custom field | Gemini | LM Studio |
+| --- | --- | --- |
+| `temperature` | `temperature` | `temperature` |
+| `topP` | `topP` | `top_p` (sent only when < 1) |
+| `topK` | `topK` | `top_k` (sent only when > 0) |
+| `maxOutputTokens` | `maxOutputTokens` | `max_tokens` (default 8192) |
+
+### Timeouts
+
+`LMSTUDIO_FORMAT_TIMEOUT_MS`, default **240 s**, separate from the NER pass's
+`LMSTUDIO_TIMEOUT_MS` (90 s). The NER pass writes a short JSON array; formatting
+writes a whole chart entry, so on a 12B model it can take several times as long.
+Sharing one timeout would abort perfectly healthy runs. Both resolve in
+`src/lib/lmstudio.ts`, and the format budget is kept under the route's 300 s
+`maxDuration` so a slow run fails with a readable message rather than the
+platform cutting the stream.
+
+### Which local model answers
+
+`resolveLocalFormatModel()` is the single resolver: `LMSTUDIO_MODEL` if it is
+set, otherwise whatever LM Studio has loaded, otherwise the literal
+`local-model`. The pin wins because the pin is what the request asks for.
+
+`/api/status` reports it as `lmStudio.requestModel` alongside `lmStudio.models`
+(what is loaded), so the selector labels its Local chip with the model that will
+actually answer. When the two disagree the chip carries a warning triangle and
+the bar says which one writes the note — the same drift the Prompts drawer
+already reports, in the place where it changes the outcome.
+
+### How it shows up
+
+- `meta.destination` is `"local"` or `"cloud"`.
+- `AuditLog.modelUsed` is prefixed: `local:google/gemma-4-12b`. Every cloud rung
+  is `gemini-…`, so a bare local model id in that column would leave a reader
+  guessing where the note was written.
+- The format row in the progress list is titled "Local model formats the note"
+  and drawn inside the **Mac** trust boundary rather than the cloud one — the
+  stage id stays `cloud`, because the id is the wire contract, but
+  `stageTitle()` and `stageLocus()` in `pipeline-client.ts` re-label it.
+- `STAGE_LABELS.cloud` in `concurrency.ts` is destination-neutral
+  ("Formatting the note"), because queued clients read it without knowing the
+  settings of the run they are behind. The detail field names who is writing.
+- `meta.geminiMs` keeps its name on the local path. It is the time in the
+  formatting stage wherever that ran; renaming it would break the wire contract
+  and every History row already written.
+
 ## 9. Concurrency: one compute slot
 
 `src/lib/concurrency.ts`.
@@ -563,6 +671,10 @@ minimal frame parser (`EventSource` cannot issue a POST). On
 - **The Prompts drawer reads `/api/prompt-config` live** on every open, so the
   prompts it shows are the ones the running server would send, and the local
   model name is the one LM Studio actually has loaded.
+- **The mode toggle sits directly above the model selector**, inside the input
+  panel. The two together are the whole answer to "what will this run do" —
+  which prompts, and which model. It is a segmented toggle rather than a pair
+  of buttons because there are exactly two states and only one can hold.
 
 **Caching headers** (`next.config.ts`): HTML and every API response are
 `no-store`, with `CDN-Cache-Control` and `Cloudflare-CDN-Cache-Control` set too —
@@ -586,7 +698,8 @@ stream waiting for a full body. Verified live through the tunnel.
 | `GEMINI_BASE_URL` | Optional endpoint override (egress proxy, regional endpoint, local stub). Unset normally. |
 | `LMSTUDIO_BASE_URL` | Local NER endpoint. In Docker this is pinned to `DOCKER_LMSTUDIO_URL`. |
 | `LMSTUDIO_MODEL` | Model id each request asks LM Studio for |
-| `LMSTUDIO_TIMEOUT_MS` | Local pass timeout, default 90000 |
+| `LMSTUDIO_TIMEOUT_MS` | De-identification pass timeout, default 90000 |
+| `LMSTUDIO_FORMAT_TIMEOUT_MS` | Local *formatting* timeout, default 240000. See [section 8b](#8b-the-local-destination). |
 | `ALLOW_DEGRADED_SCRUB` | `false` (default) aborts when the local pass is unavailable. `true` permits regex-only. |
 | `KEY_STORE_FILE` | Filename inside `./.keys/` for the RSA keypair |
 | `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` | Google OAuth client |
@@ -718,6 +831,7 @@ failure if something else is mid-run. Sections:
 | 3 | PHI guard — a routine carrying patient data is rejected 422 and names the categories |
 | 4 | Input cap |
 | 5 | A full ward note: every stage streams, stages arrive in order, no identifier reached the cloud, clinical content preserved, every emitted token restored, both scrub passes contributed |
+| 5b | The local destination: the note is written on this Mac, recorded as `local:…`, still fully de-identified in the audit row, and every emitted token restored |
 | 6 | The same note with a routine, and the routine's effect on the output |
 | 6b | The EMR-export shapes that leaked in real use |
 | 7 | Audit invariant — no row contains any identifier, scanned across the whole table |
@@ -807,6 +921,9 @@ count, degraded-scrub policy, build id, dev-login policy.
 | Badge stays "Mac Mini Online" during a run | Fixed — the badge now treats a submitting tab as busy and polls at 1 s | If it recurs, check `/api/status` returns `busy: true` directly |
 | Every note 429 | A wedged request holds the lock | It self-reclaims after 5 minutes; `/api/status` shows `lockHeldForMs` |
 | A model chip greys out unexpectedly | Google refused it and the cooldown persisted | `select * from "ModelCooldown"` |
+| The **Local** chip is greyed out | LM Studio is unreachable, so there is no local model to write with | `curl $LMSTUDIO_BASE_URL/models`; the header badge says the same |
+| `LOCAL_FORMAT_FAILED` after a long wait | The local model exceeded `LMSTUDIO_FORMAT_TIMEOUT_MS` | Shorten the note or raise it. It is deliberately not retried against Gemini. |
+| A local run is much slower than a cloud one | It is two local inferences on one compute slot, not one | Expected; `meta.scrubMs` and `meta.geminiMs` split it |
 | The note arrives from a lighter model | The ladder walked down | The amber footer and `AuditLog.modelUsed` both say which |
 | `DECRYPT_FAILED` | The keypair rotated under an open tab | The client retries once with a fresh key; if it persists, `.keys/` was not persisted |
 | Placeholders left in the finished note | The cloud model renumbered or dropped them | `meta.unresolvedTokens`; in custom mode confirm the kernel is appended |
@@ -877,7 +994,9 @@ The invariants that must survive any change:
 - Placeholder shape stays `[A-Z_]+_\d+` — `assign`, `rehydrate` and the guards
   all depend on it.
 - Only the `result` SSE event carries note content.
-- `AuditLog` receives de-identified text only.
+- `AuditLog` receives de-identified text only — on the local path too. The
+  invariant is not a property of the cloud boundary.
+- A run that chose the local destination never falls back to the cloud.
 - The app runs as exactly one replica.
 
 ---

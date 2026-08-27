@@ -16,7 +16,13 @@
  * real history.
  */
 import "dotenv/config";
-import { ComputeBusyError, PipelineError, runPipeline, STAGE_ORDER } from "../src/lib/pipeline-client";
+import {
+  ComputeBusyError,
+  LOCAL_MODEL_ID,
+  PipelineError,
+  runPipeline,
+  STAGE_ORDER,
+} from "../src/lib/pipeline-client";
 import type { PipelineStage, ProgressEvent } from "../src/lib/pipeline-client";
 import { HARD_CHAR_LIMIT } from "../src/lib/limits";
 import { prisma } from "../src/lib/db";
@@ -79,6 +85,7 @@ interface RunResult {
     model: string;
     format: string;
     promptTemplateName: string | null;
+    destination: "cloud" | "local";
     llmEntityCount: number;
     unresolvedTokens: string[];
     degradedScrub: boolean;
@@ -331,6 +338,49 @@ async function main() {
   check("inspector previews are masked", plain.redactions.every((r) => r.preview.includes("*")));
   check("both scrub passes contributed",
     plain.redactions.some((r) => r.source === "regex") && plain.redactions.some((r) => r.source === "llm"));
+
+  /* ---------------------------------------------------------------- */
+  section("5b. Local destination — the note never leaves the Mac");
+  // The same narrative, formatted by the model already loaded in LM Studio.
+  // What is being asserted is not "it produced good prose" — that is the
+  // model's business — but that choosing local changes WHERE the note is
+  // written without weakening anything the pipeline promises either side of
+  // that stage.
+  const localRun = await runPipeline<RunResult>({
+    baseUrl: base,
+    text: WARD_NOTE,
+    format: "PROGRESS_NOTE",
+    model: LOCAL_MODEL_ID,
+    headers: sessionA.cookie,
+  });
+  check("run reports the local destination", localRun.meta.destination === "local", localRun.meta.destination);
+  check("model is recorded as local", localRun.meta.model.startsWith("local:"), localRun.meta.model);
+  check("no cloud model served it", !/^gemini-/.test(localRun.meta.model), localRun.meta.model);
+  check("a note came back", localRun.note.trim().length > 50, `${localRun.note.trim().length} chars`);
+  // Both scrub passes still run. The audit log's de-identification invariant
+  // is not a property of the cloud boundary, and a local run that wrote raw
+  // names into Postgres would quietly undo it.
+  for (const p of PII) check(`local run still redacted ${p}`, !localRun.deidentifiedInput.includes(p));
+  check("local run was not degraded", localRun.meta.degradedScrub === false);
+  check("both scrub passes contributed locally",
+    localRun.redactions.some((r) => r.source === "regex") &&
+      localRun.redactions.some((r) => r.source === "llm"));
+  check("audit row written for the local run", Boolean(localRun.meta.auditLogId));
+  {
+    const row = await prisma.auditLog.findUnique({ where: { id: localRun.meta.auditLogId! } });
+    check("audit names the local model", (row?.modelUsed ?? "").startsWith("local:"), String(row?.modelUsed));
+    check("audit stores de-identified text for the local run",
+      PII.every((p) => !(row?.deidentifiedInput ?? "").includes(p) && !(row?.deidentifiedOutput ?? "").includes(p)));
+  }
+  {
+    // Same re-hydration contract as the cloud path: every token the model
+    // actually emitted comes back, and none survive as literal text.
+    const emittedLocal = localRun.redactions.filter((r) => localRun.deidentifiedOutput.includes(r.token));
+    check("every token the local model emitted was restored",
+      emittedLocal.every((r) => !localRun.note.includes(r.token)),
+      emittedLocal.filter((r) => localRun.note.includes(r.token)).map((r) => r.token).join(","));
+    console.log(`       ${localRun.meta.model} · ${(localRun.meta.processingTimeMs / 1000).toFixed(1)}s · ${emittedLocal.length} placeholders emitted`);
+  }
 
   /* ---------------------------------------------------------------- */
   section("6. Same note WITH the specialty routine");

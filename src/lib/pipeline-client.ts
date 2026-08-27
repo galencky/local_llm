@@ -47,6 +47,39 @@ export const STAGE_LOCUS: Record<PipelineStage, "browser" | "mac" | "cloud"> = {
   seal: "mac",
 };
 
+/**
+ * The sentinel that means "write the note here, do not call Google".
+ *
+ * It travels in the same `model` field as a Gemini rung, because it answers the
+ * same question — which model writes the note — and the selector should not
+ * become two controls to say one thing.
+ */
+export const LOCAL_MODEL_ID = "local";
+
+export function isLocalDestination(model: string | null | undefined): boolean {
+  return model === LOCAL_MODEL_ID;
+}
+
+/**
+ * The formatting stage keeps its id, because the id is the wire contract and
+ * renaming it would break every client and every test. What changes when the
+ * destination is local is what it is *called* and, more importantly, which
+ * trust boundary it is drawn in — the whole point of the option is that this
+ * row is no longer a step across the cloud boundary.
+ */
+export function stageTitle(stage: PipelineStage, localDestination: boolean): string {
+  if (stage === "cloud" && localDestination) return "Local model formats the note";
+  return STAGE_TITLES[stage];
+}
+
+export function stageLocus(
+  stage: PipelineStage,
+  localDestination: boolean,
+): "browser" | "mac" | "cloud" {
+  if (stage === "cloud" && localDestination) return "mac";
+  return STAGE_LOCUS[stage];
+}
+
 export interface ProgressEvent {
   stage: PipelineStage;
   status: "running" | "done" | "failed";

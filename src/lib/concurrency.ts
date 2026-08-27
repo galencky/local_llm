@@ -20,7 +20,10 @@ export const STAGE_LABELS: Record<PipelineStage, string> = {
   decrypt: "Decrypting the sealed note",
   regex: "Scrubbing Taiwan identifiers",
   ner: "Local model scanning for names",
-  cloud: "Gemini formatting the note",
+  // Destination-neutral: the detail field names who is actually writing it,
+  // because this label is read by clients queued behind a run they did not
+  // start and cannot see the settings of.
+  cloud: "Formatting the note",
   rehydrate: "Restoring identifiers",
   audit: "Writing the audit row",
   seal: "Encrypting the reply",

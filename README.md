@@ -67,6 +67,8 @@ browser ◀──AES-GCM sealed──  Cloudflare ◀──ciphertext───�
      your Mac, so the narrative with the names still in it never travels.
 5. **Only placeholders go to the cloud.** Gemini formats the note it is given and
    is told, in the strongest terms, to copy every placeholder back exactly.
+   (Or, if you pick the **Local** model, this step happens on the Mac too and
+   nothing goes anywhere at all.)
 6. **The Mac puts the identifiers back**, using a map that exists only in memory
    and is destroyed the moment the request ends.
 7. **The finished note comes home sealed**, and you get two copies: one with the
@@ -151,13 +153,29 @@ To publish it to a hospital over a Cloudflare Tunnel, see
 **Formats.** Five built-in note shapes. The format you pick is recorded on the
 audit row, so two notes labelled "SOAP" are comparable.
 
+**Where the note gets written.** The model selector offers the Gemini ladder and
+one more option: **Local**. Picking it means the model already loaded in LM
+Studio writes the note as well as reading it, so the request makes no outbound
+call whatsoever — no Google, no quota, nothing to explain to a hospital about a
+third-party processor. Useful when quota is spent, when the network is down, or
+simply for a note you would rather not send.
+
+Both de-identification passes still run on a local note. That is deliberate: the
+audit log stays de-identified whether or not a cloud is involved, which is what
+makes History safe to open in front of someone. The trade is that a local model
+writes a weaker draft than a flagship Flash model, and the run holds the compute
+slot for two local inferences instead of one. If the local model fails, the note
+is **not** quietly sent to the cloud instead — choosing Local is a promise, not a
+preference.
+
 **Routines.** A saved instruction block per department — "always call out
 dialysis access and dry weight under Objective". Written once, appended to every
 note that uses it. Routines are screened for patient data when you save them and
 refused if any is found.
 
-**Custom mode.** Hands you both models' prompts and sampling parameters for a
-single run. Four things it still cannot switch off: the pattern scrub, the
+**Custom mode.** A toggle beside the model selector. Hands you both models'
+prompts and sampling parameters for a single run, and composes with either
+destination — your prompts apply to whichever model writes the note. Four things it still cannot switch off: the pattern scrub, the
 requirement that the local pass return usable output, the verbatim check on every
 span it returns, and the placeholder rules the cloud model is given. Custom
 prompts are never stored — the audit row says so rather than implying the

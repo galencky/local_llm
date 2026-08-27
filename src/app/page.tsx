@@ -41,10 +41,12 @@ import {
 } from "lucide-react";
 import {
   ComputeBusyError,
+  isLocalDestination,
+  LOCAL_MODEL_ID,
   runPipeline,
-  STAGE_LOCUS,
+  stageLocus,
+  stageTitle,
   STAGE_ORDER,
-  STAGE_TITLES,
   type BusyInfo,
   type PipelineStage,
   type ProgressEvent,
@@ -87,6 +89,7 @@ interface ProcessNoteResult {
     format: string;
     promptTemplateName: string | null;
     mode: "guided" | "custom";
+    destination: "cloud" | "local";
     modelFallbacks: { model: string; reason: string }[];
     processingTimeMs: number;
     scrubMs: number;
@@ -104,7 +107,15 @@ interface StatusPayload {
   state: "online" | "busy";
   busy: boolean;
   activity: BusyInfo | null;
-  lmStudio: { online: boolean; models: string[]; busy?: boolean; error?: string };
+  lmStudio: {
+    online: boolean;
+    /** What LM Studio has loaded. */
+    models: string[];
+    /** What a request will actually ask for — the pin, if one is set. */
+    requestModel?: string;
+    busy?: boolean;
+    error?: string;
+  };
   database: { online: boolean; error?: string };
   gemini: { configured: boolean; model: string };
   vaults: { active: number; ttlMs: number };
@@ -208,7 +219,7 @@ const MODES: {
     label: "Custom",
     icon: SlidersHorizontal,
     blurb:
-      "You write both prompts — the local de-identifier and Gemini — and set both models' parameters.",
+      "You write both prompts — the local de-identifier and the formatter — and set both models' parameters.",
   },
 ];
 
@@ -647,6 +658,13 @@ export default function AirlockPage() {
    */
   const busy = (status?.busy ?? false) || submitting;
 
+  /**
+   * Which model writes the note. The local destination is not a separate
+   * control: it is a rung on the same selector, because it answers the same
+   * question, and it composes with guided and custom mode unchanged.
+   */
+  const localDestination = isLocalDestination(chosenModel);
+
   return (
     <div className="flex min-h-full flex-col">
       {/* ---------------- header ---------------- */}
@@ -761,18 +779,6 @@ export default function AirlockPage() {
       )}
 
 
-      {/* ---------------- run mode ---------------- */}
-      {/* Full-width and directly under the header, because it changes what
-          every other control on the page means. */}
-      <ModeBar
-        mode={mode}
-        onChoose={chooseMode}
-        custom={custom}
-        error={customError}
-        disabled={submitting}
-        onEdit={() => setCustomOpen(true)}
-      />
-
       {/* ---------------- workspace ---------------- */}
       <main className="mx-auto grid w-full max-w-[1600px] flex-1 grid-cols-1 gap-3 p-3 sm:gap-4 sm:p-5 lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)]">
         {/* ---- input ---- */}
@@ -871,11 +877,26 @@ export default function AirlockPage() {
             </button>
           </div>
 
+          {/* Mode sits directly above the model bar: the two together are the
+              whole answer to "what will this run do" — which prompts, and
+              which model. Separating them across the page made the mode strip
+              read as chrome rather than as a setting for the run below it. */}
+          <ModeBar
+            mode={mode}
+            onChoose={chooseMode}
+            custom={custom}
+            error={customError}
+            disabled={submitting}
+            onEdit={() => setCustomOpen(true)}
+            localDestination={localDestination}
+          />
+
           <ModelBar
             models={models}
             chosen={chosenModel}
             onChoose={setChosenModel}
             disabled={submitting}
+            lmStudio={status?.lmStudio ?? null}
           />
 
           <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] px-3 py-2 sm:px-4 sm:py-3">
@@ -959,7 +980,11 @@ export default function AirlockPage() {
               <button
                 onClick={() => void copyNote("deidentified")}
                 disabled={!result}
-                title="The placeholder version — [PATIENT_1], [MRN_1] and so on. This is exactly what was sent to Gemini, and carries no identifiers."
+                title={
+                  result?.meta.destination === "local"
+                    ? "The placeholder version — [PATIENT_1], [MRN_1] and so on. This is exactly what the local model was given, and carries no identifiers."
+                    : "The placeholder version — [PATIENT_1], [MRN_1] and so on. This is exactly what was sent to Gemini, and carries no identifiers."
+                }
                 className="flex items-center gap-1.5 rounded border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] disabled:text-[var(--faint)] disabled:hover:text-[var(--faint)]"
               >
                 {copied === "deidentified" ? (
@@ -990,14 +1015,20 @@ export default function AirlockPage() {
                     {stage}
                   </div>
                 )}
-                <PipelineProgress progress={progress} paused={Boolean(queued)} />
+                <PipelineProgress
+                  progress={progress}
+                  paused={Boolean(queued)}
+                  localDestination={localDestination}
+                />
               </div>
             )}
 
             {!submitting && !error && !result && (
               <p className="text-sm text-[var(--muted)]">
-                The formatted note appears here with identifiers restored. Only placeholder text ever
-                leaves this machine.
+                The formatted note appears here with identifiers restored.{" "}
+                {localDestination
+                  ? "Nothing at all leaves this machine — the local model writes the note too."
+                  : "Only placeholder text ever leaves this machine."}
               </p>
             )}
 
@@ -1018,6 +1049,15 @@ export default function AirlockPage() {
                 {result.meta.modelFallbacks.length > 0 &&
                   ` — downgraded from ${result.meta.modelFallbacks[0].model} (${result.meta.modelFallbacks[0].reason})`}
               </span>
+              {result.meta.destination === "local" && (
+                <span
+                  title="Written by the model on this Mac. The note made no outbound call at all — not even placeholder text left the box."
+                  className="flex items-center gap-1 text-emerald-700 dark:text-emerald-400"
+                >
+                  <Cpu className="size-3" />
+                  stayed on this Mac
+                </span>
+              )}
               {result.meta.mode === "custom" && (
                 <span
                   title="Produced by your own prompts and parameters. They were not stored — the audit row records that, not the text."
@@ -1098,12 +1138,18 @@ export default function AirlockPage() {
 /* ------------------------------------------------------------------ */
 
 /**
- * Guided or custom, across the full width of the page.
+ * Guided or custom, as a two-state toggle directly above the model bar.
  *
- * It sits above the workspace rather than inside a menu because it changes
- * what every control below it means: in custom mode the format buttons stop
- * choosing the note's shape, and the prompts behind the whole pipeline are the
- * ones in the drawer rather than the ones compiled in.
+ * These two controls answer the same question between them — which prompts,
+ * and which model — so they belong together. It is a toggle rather than two
+ * buttons because there are exactly two states and only one can hold: a
+ * segmented control says "either/or" at a glance, where a pair of buttons
+ * reads as two things you might press.
+ *
+ * It still changes what every control below it means: in custom mode the
+ * format buttons stop choosing the note's shape, and the prompts behind the
+ * whole pipeline are the ones in the drawer rather than the ones compiled in.
+ * Hence the standing warning, which stays attached to the toggle.
  */
 function ModeBar({
   mode,
@@ -1112,6 +1158,7 @@ function ModeBar({
   error,
   disabled,
   onEdit,
+  localDestination,
 }: {
   mode: RunMode;
   onChoose: (mode: RunMode) => void;
@@ -1119,17 +1166,26 @@ function ModeBar({
   error: string | null;
   disabled: boolean;
   onEdit: () => void;
+  /** Changes where a missed name ends up, and so what the warning must say. */
+  localDestination: boolean;
 }) {
   const active = MODES.find((m) => m.id === mode) ?? MODES[0];
 
   return (
-    <div className="border-b border-[var(--border)] bg-[var(--surface)]">
-      <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2 sm:px-5">
+    <div className="border-t border-[var(--border)]">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2 sm:px-4 sm:py-2.5">
         <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
           Mode
         </span>
 
-        <div className="flex shrink-0 gap-1">
+        {/* Segmented toggle. The track is a solid token rather than an alpha
+            wash — a translucent fill over an off-white panel is exactly what
+            once made inactive controls hard to read in light mode. */}
+        <div
+          role="group"
+          aria-label="Run mode"
+          className="inline-flex shrink-0 rounded-full border border-[var(--border)] bg-[var(--background)] p-0.5"
+        >
           {MODES.map((m) => {
             const Icon = m.icon;
             const chosen = m.id === mode;
@@ -1138,12 +1194,13 @@ function ModeBar({
                 key={m.id}
                 onClick={() => onChoose(m.id)}
                 disabled={disabled}
+                aria-pressed={chosen}
                 title={m.blurb}
                 className={cn(
-                  "flex items-center gap-1.5 rounded border px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed",
+                  "flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-medium transition-colors disabled:cursor-not-allowed",
                   chosen
-                    ? "border-[var(--accent-solid)] bg-[var(--accent-solid)] text-[var(--on-accent)]"
-                    : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
+                    ? "bg-[var(--accent-solid)] text-[var(--on-accent)]"
+                    : "text-[var(--muted)] hover:text-[var(--foreground)]",
                 )}
               >
                 <Icon className="size-3.5 shrink-0" />
@@ -1164,11 +1221,11 @@ function ModeBar({
               className="hidden shrink-0 font-mono text-[10px] text-[var(--muted)] xl:inline"
             >
               local {custom.local.temperature.toFixed(2)} · {custom.local.maxTokens} tok
-              {" · "}cloud {custom.cloud.temperature.toFixed(2)} / {custom.cloud.topP.toFixed(2)}
+              {" · "}format {custom.cloud.temperature.toFixed(2)} / {custom.cloud.topP.toFixed(2)}
             </span>
             <button
               onClick={onEdit}
-              className="flex shrink-0 items-center gap-1.5 rounded border border-[var(--accent-solid)] bg-[var(--accent-solid)] px-3 py-1.5 text-xs font-medium text-[var(--on-accent)] transition-opacity hover:opacity-90"
+              className="flex shrink-0 items-center gap-1.5 rounded border border-[var(--accent-solid)] bg-[var(--accent-solid)] px-2.5 py-1 text-[11px] font-medium text-[var(--on-accent)] transition-opacity hover:opacity-90"
             >
               <Pencil className="size-3.5 shrink-0" />
               Edit prompts &amp; parameters
@@ -1180,13 +1237,13 @@ function ModeBar({
       {mode === "custom" && (
         <div
           className={cn(
-            "border-t px-3 py-2 text-[11px] sm:px-5",
+            "border-t px-3 py-2 text-[11px] sm:px-4",
             error
               ? "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
               : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
           )}
         >
-          <div className="mx-auto flex max-w-[1600px] items-start gap-2">
+          <div className="flex items-start gap-2">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
             {error ? (
               <span>
@@ -1200,8 +1257,11 @@ function ModeBar({
               <span>
                 Your prompt is now the de-identification step. The pattern scrub, the
                 verbatim-span check and the fail-closed rule still run underneath it — but a
-                weaker prompt catches fewer names, and what it misses goes to Google. Read the
-                redaction list before filing.
+                weaker prompt catches fewer names, and what it misses{" "}
+                {localDestination
+                  ? "stays on this Mac, and still lands in the finished note and in the audit log"
+                  : "goes to Google"}
+                . Read the redaction list before filing.
               </span>
             )}
           </div>
@@ -1466,8 +1526,9 @@ function CustomModeDrawer({
               <p className="text-[11px] leading-relaxed text-[var(--muted)]">
                 The saved routine and the one-off instruction box are still appended beneath your
                 formatting instruction, in that order — leave them empty if you want the prompt on
-                this tab to be the whole of it. Which Gemini model runs is still the ladder on the
-                main screen.
+                this tab to be the whole of it. Which model runs it is still the selector on the
+                main screen, including the local one — these settings apply to whichever writes
+                the note.
               </p>
             </div>
           )}
@@ -1628,25 +1689,45 @@ function ParamGrid({
 }
 
 /**
- * The model ladder, best on the left.
+ * Who writes the note: this Mac, or a rung of the Gemini ladder.
  *
- * A rung greys out only once Google has actually refused it — availability is
- * observed, never predicted. Picking a rung sets where the run *starts*; if it
- * is spent by the time the note is sent, the server walks down from there and
- * says so in the progress list.
+ * The local option lives here rather than in its own control because it
+ * answers the same question the ladder does. It is placed first and fenced off
+ * with a divider, because it is not a rung — it does not participate in the
+ * fallback walk, has no quota to spend, and crosses no boundary. Choosing it
+ * means the request makes no outbound call at all.
+ *
+ * A cloud rung greys out only once Google has actually refused it —
+ * availability is observed, never predicted. Picking a rung sets where the run
+ * *starts*; if it is spent by the time the note is sent, the server walks down
+ * from there and says so in the progress list.
  */
 function ModelBar({
   models,
   chosen,
   onChoose,
   disabled,
+  lmStudio,
 }: {
   models: ModelAvailability[];
   chosen: string;
   onChoose: (id: string) => void;
   disabled: boolean;
+  /** Health of the local server — the local option's own availability. */
+  lmStudio: StatusPayload["lmStudio"] | null;
 }) {
-  if (models.length === 0) return null;
+  const local = chosen === LOCAL_MODEL_ID;
+  const localReady = Boolean(lmStudio?.online);
+  // Label the model that will ANSWER, not the one that happens to be loaded.
+  // LMSTUDIO_MODEL is what the request asks for, so a stale pin would
+  // otherwise have the chip promise one model and the audit row name another.
+  const loaded = lmStudio?.models[0] ?? null;
+  const willAnswer = lmStudio?.requestModel ?? loaded;
+  const pinMismatch = Boolean(loaded && willAnswer && loaded !== willAnswer);
+  // "google/gemma-4-12b" does not fit on a chip. The full id is in the tooltip.
+  const localName = willAnswer?.split("/").pop() ?? null;
+
+  if (models.length === 0 && !lmStudio) return null;
 
   const chosenIndex = models.findIndex((m) => m.id === chosen);
   const nextUp = models.find((m, i) => i >= chosenIndex && m.available);
@@ -1662,19 +1743,71 @@ function ModelBar({
 
   return (
     <div className="border-t border-[var(--border)] px-3 py-2 sm:px-4 sm:py-2.5">
-      <div className="mb-1.5 flex items-center gap-2">
-        <Cloud className="size-3.5 text-[var(--muted)]" />
+      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+        {local ? (
+          <Cpu className="size-3.5 text-emerald-700 dark:text-emerald-400" />
+        ) : (
+          <Cloud className="size-3.5 text-[var(--muted)]" />
+        )}
         <span className="whitespace-nowrap text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
-          Cloud model — best first, falls back rightward
+          {local
+            ? "Writing the note on this Mac — nothing leaves"
+            : "Model — cloud ladder falls back rightward"}
         </span>
-        {nextUp && nextUp.id !== chosen && (
+        {!local && nextUp && nextUp.id !== chosen && (
           <span className="text-[10px] text-amber-700 dark:text-amber-400">
             starts on {nextUp.label}
           </span>
         )}
       </div>
 
-      <div className="flex flex-wrap gap-1">
+      <div className="flex flex-wrap items-center gap-1">
+        <button
+          onClick={() => onChoose(LOCAL_MODEL_ID)}
+          disabled={disabled || !localReady}
+          title={
+            !localReady
+              ? "LM Studio is not reachable, so there is no local model to write with."
+              : pinMismatch
+                ? `${willAnswer} — writes the note on this Mac. LM Studio currently has ${loaded} loaded, but LMSTUDIO_MODEL pins requests to ${willAnswer}.`
+                : `${willAnswer ?? "the loaded model"} — writes the note on this Mac. No cloud call, no quota, and both de-identification passes still run.`
+          }
+          className={cn(
+            "flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed",
+            !localReady
+              ? "border-[var(--border)] bg-[var(--background)] text-[var(--muted)]"
+              : local
+                ? "border-[var(--accent-solid)] bg-[var(--accent-solid)] text-[var(--on-accent)]"
+                : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
+          )}
+        >
+          <Cpu className="size-3 shrink-0" />
+          Local
+          {localName && (
+            <span
+              className={cn(
+                "font-mono text-[9px]",
+                local ? "text-[var(--on-accent)]/80" : "text-[var(--muted)]",
+              )}
+            >
+              {localName}
+            </span>
+          )}
+          {pinMismatch && localReady && (
+            <AlertTriangle
+              className={cn(
+                "size-3 shrink-0",
+                local ? "text-[var(--on-accent)]" : "text-amber-700 dark:text-amber-400",
+              )}
+            />
+          )}
+          {!localReady && <span className="text-[var(--muted)]">· offline</span>}
+        </button>
+
+        {models.length > 0 && (
+          <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-[var(--border)]" />
+        )}
+
         {models.map((m) => {
           const isChosen = m.id === chosen;
           const spent = !m.available;
@@ -1721,10 +1854,29 @@ function ModelBar({
         })}
       </div>
 
-      {!nextUp && (
+      {local && (
+        <p className="mt-1.5 text-[10px] leading-relaxed text-[var(--muted)]">
+          Both de-identification passes still run — the audit log stays de-identified whether or
+          not the cloud is involved. The draft will be weaker than a Flash model, and the run
+          holds the compute slot for two local inferences instead of one.
+        </p>
+      )}
+
+      {local && pinMismatch && (
+        <p className="mt-1.5 text-[10px] leading-relaxed text-amber-700 dark:text-amber-400">
+          LM Studio has <span className="font-mono">{loaded}</span> loaded, but{" "}
+          <span className="font-mono">LMSTUDIO_MODEL</span> pins requests to{" "}
+          <span className="font-mono">{willAnswer}</span> — that is the one that will write the
+          note. Point the pin at the loaded model, or clear it.
+        </p>
+      )}
+
+      {!local && !nextUp && (
         <p className="mt-1.5 text-[10px] text-rose-700 dark:text-rose-400">
-          Every model is spent. De-identification still runs locally, but there is nothing left to
-          format with until quota resets.
+          Every cloud model is spent.{" "}
+          {localReady
+            ? "Pick Local to keep working until quota resets."
+            : "De-identification still runs locally, but there is nothing left to format with until quota resets."}
         </p>
       )}
     </div>
@@ -1779,15 +1931,18 @@ const LOCUS_STYLE = {
 function PipelineProgress({
   progress,
   paused,
+  localDestination,
 }: {
   progress: Map<PipelineStage, ProgressEvent>;
   paused: boolean;
+  /** When true the format stage is drawn as a Mac step, because it is one. */
+  localDestination: boolean;
 }) {
   return (
     <ol className="space-y-0.5">
       {STAGE_ORDER.map((stage) => {
         const ev = progress.get(stage);
-        const locus = LOCUS_STYLE[STAGE_LOCUS[stage]];
+        const locus = LOCUS_STYLE[stageLocus(stage, localDestination)];
         const Icon = locus.icon;
         const state = ev?.status ?? (paused ? "waiting" : "pending");
 
@@ -1820,7 +1975,7 @@ function PipelineProgress({
                 state === "pending" || state === "waiting" ? "text-[var(--faint)]" : locus.tint,
               )}
             />
-            <span className="flex-1 truncate">{STAGE_TITLES[stage]}</span>
+            <span className="flex-1 truncate">{stageTitle(stage, localDestination)}</span>
 
             {ev?.detail && (
               <span className="shrink-0 font-mono text-[10px] text-[var(--muted)]">
@@ -3021,7 +3176,9 @@ function Inspector({ result, onClose }: { result: ProcessNoteResult; onClose: ()
           <div>
             <h3 className="text-sm font-semibold">PII Scrubbed Inspector</h3>
             <p className="text-[11px] text-[var(--muted)]">
-              Exactly what Gemini received. Values are masked here too.
+              Exactly what the formatting model received
+              {meta.destination === "local" ? ", here on this Mac" : ", at Google"}. Values are
+              masked here too.
             </p>
           </div>
           <button
@@ -3070,7 +3227,9 @@ function Inspector({ result, onClose }: { result: ProcessNoteResult; onClose: ()
 
           <div className="border-t border-[var(--border)] p-4">
             <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--muted)]">
-              De-identified prompt sent to Gemini
+              {meta.destination === "local"
+                ? "De-identified prompt given to the local model"
+                : "De-identified prompt sent to Gemini"}
             </h4>
             <pre className="scroll-visible max-h-80 overflow-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--background)] p-3 font-mono text-[11px] leading-relaxed">
               {deidentifiedInput}

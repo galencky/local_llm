@@ -23,6 +23,8 @@ import {
   isNoteFormat,
   type NoteFormat,
 } from "@/lib/gemini";
+import { formatWithLocalModel, LocalFormatError } from "@/lib/local-format";
+import { isLocalDestination } from "@/lib/pipeline-client";
 import { getTemplate } from "@/lib/prompts";
 import {
   CustomConfigError,
@@ -39,8 +41,13 @@ export const maxDuration = 300;
 
 /**
  * The pipeline, streamed:
- *   lock -> decrypt -> regex scrub -> local NER scrub -> Gemini
+ *   lock -> decrypt -> regex scrub -> local NER scrub -> format
  *        -> re-hydrate -> audit (de-identified only) -> encrypt -> unlock
+ *
+ * The format stage goes to Gemini, or to the model already loaded in LM Studio
+ * when the clinician picks the local destination. Everything either side of it
+ * is identical — in particular both scrub passes still run, because the audit
+ * log's de-identification invariant is not a property of the cloud boundary.
  *
  * Progress is emitted as Server-Sent Events so the clinician watches real
  * stages rather than a spinner. Only the final `result` event carries the
@@ -78,10 +85,14 @@ export interface ProcessNoteResult {
     promptTemplateName: string | null;
     /** Which prompt set produced this note. */
     mode: "guided" | "custom";
+    /** Where the note was written. "local" means nothing left the Mac at all. */
+    destination: "cloud" | "local";
     /** Models exhausted or unavailable before the one that served this note. */
     modelFallbacks: { model: string; reason: string }[];
     processingTimeMs: number;
     scrubMs: number;
+    /** Time in the formatting stage, wherever it ran. Named before local
+     *  formatting existed; kept, because it is on the wire and in History. */
     geminiMs: number;
     regexHits: Record<string, number>;
     llmEntityCount: number;
@@ -286,44 +297,54 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // 6. Cloud formatting — placeholders only cross the wire.
-        const cloudLabel = custom
+        // 6. Formatting. For the cloud destination, placeholders only cross
+        //    the wire; for the local one, nothing crosses it at all.
+        const localDestination = isLocalDestination(startModel);
+        const promptLabel = custom
           ? "custom instruction"
           : template
             ? `routine: ${template.name}`
             : resolvedFormat;
+        const cloudLabel = localDestination ? `local · ${promptLabel}` : promptLabel;
         setStage(lock, "cloud", cloudLabel);
         emit("progress", {
           stage: "cloud",
           status: "running",
-          detail: custom || template ? cloudLabel : undefined,
+          detail: localDestination || custom || template ? cloudLabel : undefined,
         });
-        const gemini = await formatClinicalNote(
-          deidentifiedInput,
-          resolvedFormat,
-          { template, adHoc: instruction },
-          // Surface the downgrade live rather than letting the note quietly
-          // arrive from a lighter model than the clinician expects.
-          (step, next) =>
-            emit("progress", {
-              stage: "cloud",
-              status: "running",
-              detail: `${step.model} ${step.reason} → ${next}`,
-            }),
-          startModel,
-          custom?.cloud ?? null,
-        );
+        const formatted = localDestination
+          ? await formatWithLocalModel(
+              deidentifiedInput,
+              resolvedFormat,
+              { template, adHoc: instruction },
+              custom?.cloud ?? null,
+            )
+          : await formatClinicalNote(
+              deidentifiedInput,
+              resolvedFormat,
+              { template, adHoc: instruction },
+              // Surface the downgrade live rather than letting the note quietly
+              // arrive from a lighter model than the clinician expects.
+              (step, next) =>
+                emit("progress", {
+                  stage: "cloud",
+                  status: "running",
+                  detail: `${step.model} ${step.reason} → ${next}`,
+                }),
+              startModel,
+              custom?.cloud ?? null,
+            );
         emit("progress", {
           stage: "cloud",
           status: "done",
-          ms: gemini.latencyMs,
-          detail: gemini.model,
+          ms: formatted.latencyMs,
+          detail: formatted.model,
         });
 
         // 7/8. Re-hydrate the structured note back into a usable chart entry.
         setStage(lock, "rehydrate");
         emit("progress", { stage: "rehydrate", status: "running" });
-        const rehydrated = vault.rehydrate(gemini.text);
+        const rehydrated = vault.rehydrate(formatted.text);
         const unresolvedTokens = vault.unresolvedTokens(rehydrated);
         emit("progress", {
           stage: "rehydrate",
@@ -340,8 +361,8 @@ export async function POST(req: NextRequest) {
           const record = await prisma.auditLog.create({
             data: {
               deidentifiedInput,
-              deidentifiedOutput: gemini.text,
-              modelUsed: gemini.model,
+              deidentifiedOutput: formatted.text,
+              modelUsed: formatted.model,
               processingTimeMs,
               // Custom prompts are never persisted — they arrive sealed and
               // die with the request — so the row records that this note came
@@ -369,18 +390,19 @@ export async function POST(req: NextRequest) {
         const result: ProcessNoteResult = {
           note: rehydrated,
           deidentifiedInput,
-          deidentifiedOutput: gemini.text,
+          deidentifiedOutput: formatted.text,
           redactions: vault.summary(),
           meta: {
             auditLogId,
-            model: gemini.model,
+            model: formatted.model,
             format: resolvedFormat,
             promptTemplateName: template?.name ?? null,
             mode: custom ? "custom" : "guided",
-            modelFallbacks: gemini.fallbacks,
+            destination: localDestination ? "local" : "cloud",
+            modelFallbacks: formatted.fallbacks,
             processingTimeMs,
             scrubMs,
-            geminiMs: gemini.latencyMs,
+            geminiMs: formatted.latencyMs,
             regexHits: regexResult.hits,
             llmEntityCount: llmResult.entities.length,
             hallucinatedSpans: llmResult.hallucinated,
@@ -399,6 +421,11 @@ export async function POST(req: NextRequest) {
       } catch (err) {
         if (err instanceof LocalScrubUnavailableError) {
           emit("error", { error: err.message, code: "LOCAL_SCRUB_UNAVAILABLE" });
+        } else if (err instanceof LocalFormatError) {
+          // Deliberately not retried against Gemini: the clinician chose the
+          // local destination, and silently escalating to the cloud would
+          // break the one promise that choice makes.
+          emit("error", { error: err.message, code: "LOCAL_FORMAT_FAILED" });
         } else if (err instanceof GeminiUnavailableError) {
           emit("error", { error: err.message, code: `GEMINI_${err.kind.toUpperCase()}` });
         } else {

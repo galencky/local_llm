@@ -1,5 +1,6 @@
 import type { PiiCategory, TokenVault } from "./memory-cache";
 import type { CustomLocalConfig } from "./custom-mode";
+import { lmStudioBaseUrl, lmStudioTimeoutMs } from "./lmstudio";
 
 /**
  * Pass 3B — probabilistic NER via LM Studio on localhost.
@@ -141,17 +142,8 @@ export interface LlmScrubResult {
   latencyMs: number;
 }
 
-function baseUrl(): string {
-  return (
-    process.env.LMSTUDIO_BASE_URL?.replace(/\/+$/, "") ||
-    "http://localhost:1234/v1"
-  );
-}
-
-function timeoutMs(): number {
-  const parsed = Number(process.env.LMSTUDIO_TIMEOUT_MS);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 90_000;
-}
+const baseUrl = lmStudioBaseUrl;
+const timeoutMs = lmStudioTimeoutMs;
 
 /** Strip ```json fences and any prose the model wrapped around the object. */
 function extractJson(content: string): unknown {

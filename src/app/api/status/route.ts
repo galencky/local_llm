@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { currentActivity, isLocked, lockHeldForMs } from "@/lib/concurrency";
 import { checkLmStudioHealth, lastKnownLmStudioHealth } from "@/lib/scrubber-llm";
+import { resolveLocalFormatModel } from "@/lib/local-format";
 import { vaultCount, VAULT_TTL_MS } from "@/lib/memory-cache";
 import { geminiModel } from "@/lib/gemini";
 import { devLoginAllowsRemote, devLoginEnabled } from "@/lib/dev-login";
@@ -28,6 +29,11 @@ export async function GET() {
 
   const busy = busyNow;
 
+  // What a request will actually ask LM Studio for. `lmStudio.models` is what
+  // is loaded; these differ whenever LMSTUDIO_MODEL pins something else, and
+  // the selector must label its Local option with the one that will answer.
+  const requestModel = await resolveLocalFormatModel();
+
   return NextResponse.json(
     {
       state: busy ? "busy" : "online",
@@ -35,7 +41,7 @@ export async function GET() {
       lockHeldForMs: lockHeldForMs(),
       /** What the compute slot is doing, so queued clients can show it live. */
       activity: currentActivity(),
-      lmStudio,
+      lmStudio: { ...lmStudio, requestModel },
       database,
       gemini: {
         configured: Boolean(process.env.GEMINI_API_KEY),
