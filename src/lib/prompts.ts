@@ -131,14 +131,6 @@ export async function listTemplates(userId: string) {
   });
 }
 
-/** Only one routine may be preselected PER WORKSPACE. */
-async function clearOtherDefaultsOfKind(userId: string, kind: string, keepId: string | null) {
-  await prisma.promptTemplate.updateMany({
-    where: { isDefault: true, userId, kind, ...(keepId ? { NOT: { id: keepId } } : {}) },
-    data: { isDefault: false },
-  });
-}
-
 export async function createTemplate(userId: string, input: PromptTemplateInput) {
   const data = normalise(input);
   return prisma.$transaction(async (tx) => {
@@ -166,13 +158,24 @@ function writableBy(userId: string, id: string) {
 
 export async function updateTemplate(userId: string, id: string, input: PromptTemplateInput) {
   const data = normalise(input);
-  if (data.isDefault) await clearOtherDefaultsOfKind(userId, data.kind, id);
-  const { count } = await prisma.promptTemplate.updateMany({
-    where: writableBy(userId, id),
-    data,
+  // The write and the de-default run in one transaction, and the ownership
+  // check comes FIRST. Clearing the other defaults up front meant an edit
+  // aimed at somebody else's routine still cleared the caller's own preselected
+  // one before failing — a refused request that changed their state anyway.
+  return prisma.$transaction(async (tx) => {
+    const { count } = await tx.promptTemplate.updateMany({
+      where: writableBy(userId, id),
+      data,
+    });
+    if (count === 0) throw new PromptValidationError("That routine is not yours to edit.");
+    if (data.isDefault) {
+      await tx.promptTemplate.updateMany({
+        where: { isDefault: true, userId, kind: data.kind, NOT: { id } },
+        data: { isDefault: false },
+      });
+    }
+    return tx.promptTemplate.findUnique({ where: { id } });
   });
-  if (count === 0) throw new PromptValidationError("That routine is not yours to edit.");
-  return prisma.promptTemplate.findUnique({ where: { id } });
 }
 
 export async function deleteTemplate(userId: string, id: string) {

@@ -203,14 +203,29 @@ export async function POST(req: NextRequest) {
       let pending = "";
       let pendingStage: PipelineStage | null = null;
       let lastFlush = 0;
-      const flushStream = async (force = false) => {
-        if (!streamKey || !pending || !pendingStage) return;
-        if (!force && Date.now() - lastFlush < 120) return;
+      /**
+       * Seals are chained, not raced.
+       *
+       * Sealing is async, and two flushes in flight can resolve in either
+       * order — which would emit the second chunk of a note before the first
+       * and show the clinician scrambled text. The client already awaits each
+       * decryption, but that only preserves the order frames ARRIVE in, so the
+       * ordering has to be established here. Awaiting the tail also means
+       * `flushStream(true)` waits for everything already queued.
+       */
+      let flushChain: Promise<void> = Promise.resolve();
+      const flushStream = (force = false): Promise<void> => {
+        if (!streamKey || !pending || !pendingStage) return flushChain;
+        if (!force && Date.now() - lastFlush < 120) return flushChain;
+        const key = streamKey;
         const chunk = pending;
         const stage = pendingStage;
         pending = "";
         lastFlush = Date.now();
-        emit("stream", { stage, sealed: await sealResponse(streamKey, chunk) });
+        flushChain = flushChain.then(async () => {
+          emit("stream", { stage, sealed: await sealResponse(key, chunk) });
+        });
+        return flushChain;
       };
       const onToken = (stage: PipelineStage) => (chunk: string) => {
         pendingStage = stage;

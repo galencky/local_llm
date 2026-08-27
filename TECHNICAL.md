@@ -1066,9 +1066,12 @@ requiring that no identifier appears in it.
 more than the inference. The route accumulates deltas and flushes at most every
 120ms, then forces a final flush when the stage ends.
 
-**Ordered.** The client `await`s each decryption before handing the chunk on;
-two chunks decrypted concurrently can resolve out of order, and the point of a
-live view is that it reads in the order it was written.
+**Ordered, on both ends.** Sealing is async too, so two flushes in flight on the
+server can resolve in either order — the route therefore chains them onto a
+single promise rather than racing them, and `flushStream(true)` awaits that
+chain. The client then `await`s each decryption before handing the chunk on.
+Either half alone leaves the live view able to print the second half of a
+sentence first.
 
 Streaming is local-only. The Gemini path returns whole responses, and the
 fallback walk down the ladder assumes it can retry a failed call — which a
@@ -1326,6 +1329,12 @@ forever and quietly defeat the pipeline.
 routine. Scoping writes to `{ id, userId }` alone once made those visible to
 everyone and editable by no one — an undeletable dead end. `writableBy()` now
 allows the owner *or* anyone signed in for ownerless rows.
+
+**A refused write leaves nothing behind.** `updateTemplate` does the ownership
+check and the de-defaulting in **one transaction, ownership first**. Clearing
+the caller's other defaults up front meant an edit aimed at somebody else's
+routine still cleared the caller's own preselected one before failing — a
+rejected request that changed their state anyway. `e2e:system` §7c pins it.
 
 **Data lives on the Mac, not in a Docker volume.** Postgres and the keypair are
 bind-mounted under `AIRLOCK_DATA_DIR` (default

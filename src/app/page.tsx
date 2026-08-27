@@ -783,7 +783,7 @@ export default function AirlockPage() {
     try {
       // The server refuses rather than queues, to protect the single slot — so
       // the queue lives here, retrying while showing what the box is busy with.
-      for (let attempt = 0; queuedRef.current; attempt++) {
+      while (queuedRef.current) {
         const outcome = await runOnce(text);
         if (outcome === "done") break;
         await new Promise((r) => setTimeout(r, 2000));
@@ -2994,6 +2994,13 @@ const BLANK = {
   systemInstruction: "",
   format: "",
   isDefault: false,
+  /**
+   * A prompt routine stores the sampling it was saved with. Held in the draft
+   * rather than read off the screen at save time, because editing a routine's
+   * NAME must not silently replace the numbers it restores with whatever
+   * happens to be in the sampling row at that moment.
+   */
+  sampling: null as Sampling | null,
 };
 
 function PromptLibrary({
@@ -3036,18 +3043,32 @@ function PromptLibrary({
       systemInstruction: t.systemInstruction ?? "",
       format: t.format ?? "",
       isDefault: t.isDefault,
+      // Its own saved numbers, not the ones on screen. A row with nulls
+      // (written before routines carried sampling) keeps them.
+      sampling: {
+        temperature: t.temperature ?? SAMPLING_DEFAULTS.temperature,
+        topP: t.topP ?? SAMPLING_DEFAULTS.topP,
+        topK: t.topK ?? SAMPLING_DEFAULTS.topK,
+        maxTokens: t.maxTokens ?? SAMPLING_DEFAULTS.maxTokens,
+      },
     });
     setError(null);
   };
 
-  /** Save what is currently in the workspace as a new routine. */
-  const startFromCurrent = () => {
-    setEditingId(null);
-    setDraft({
-      ...BLANK,
+  /**
+   * Pull the live workspace — both bodies and the sampling — into the draft.
+   *
+   * Deliberately does NOT leave edit mode. It is the only way to change what an
+   * existing prompt routine restores, now that saving an edit keeps the
+   * routine's own numbers rather than silently adopting whatever was on screen.
+   */
+  const pullFromScreen = () => {
+    setDraft((d) => ({
+      ...d,
       instruction: promptRun.prompt,
       systemInstruction: promptRun.systemInstruction,
-    });
+      sampling,
+    }));
     setError(null);
   };
 
@@ -3060,10 +3081,14 @@ function PromptLibrary({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...draft,
+          sampling: undefined,
           kind: workspace,
-          // A prompt routine saves the sampling that was on screen with it, so
-          // selecting it later restores the whole run and not just the words.
-          ...(isPrompt ? sampling : {}),
+          // A prompt routine carries its sampling, so selecting it later
+          // restores the whole run and not just the words. A new one starts
+          // from what is on screen; an edit keeps the routine's own numbers
+          // unless "Use what is on screen" is pressed — otherwise renaming a
+          // routine would silently replace what it restores.
+          ...(isPrompt ? (draft.sampling ?? sampling) : {}),
         }),
       });
       const body = (await res.json()) as { error?: string; detail?: string[] };
@@ -3178,19 +3203,22 @@ function PromptLibrary({
                     ? "New prompt routine"
                     : "New note routine"}
               </h4>
-              {editingId ? (
+              {workspace === "prompt" && (
+                <button
+                  onClick={pullFromScreen}
+                  title="Copy the system instruction, the prompt and the sampling from the workspace into this draft."
+                  className={cn(
+                    "rounded border border-[var(--border)] px-2 py-0.5 text-[10px] text-[var(--muted)] hover:text-[var(--foreground)]",
+                    !editingId && "ml-auto",
+                  )}
+                >
+                  Use what is on screen
+                </button>
+              )}
+              {editingId && (
                 <button onClick={startNew} className="ml-auto text-[11px] text-[var(--muted)] underline">
                   cancel edit
                 </button>
-              ) : (
-                workspace === "prompt" && (
-                  <button
-                    onClick={startFromCurrent}
-                    className="ml-auto rounded border border-[var(--border)] px-2 py-0.5 text-[10px] text-[var(--muted)] hover:text-[var(--foreground)]"
-                  >
-                    Use what is on screen
-                  </button>
-                )
               )}
             </div>
 

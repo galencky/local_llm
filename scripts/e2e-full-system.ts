@@ -511,6 +511,30 @@ async function main() {
   check("clinician B cannot delete A's note", stealNote.status === 404, `got ${stealNote.status}`);
   check("A's note survived", (await prisma.auditLog.findUnique({ where: { id: aNoteId } })) !== null);
 
+  // A refused write must leave nothing behind. Clearing the other defaults ran
+  // BEFORE the ownership check once, so B editing A's routine still cleared
+  // B's own preselected one and then failed — a rejected request that changed
+  // the caller's state anyway.
+  const bOwn = await api("/api/prompts", {
+    method: "POST",
+    body: JSON.stringify({
+      name: `B default ${Date.now()}`,
+      instruction: "Preselected for clinician B.",
+      isDefault: true,
+    }),
+  }, sessionB);
+  const bRoutine = (bOwn.body as { template: { id: string } }).template;
+  check("clinician B has a preselected routine", bOwn.status === 201 && Boolean(bRoutine?.id));
+
+  const stealEdit = await api(`/api/prompts/${routine.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name: "Hijacked", instruction: "Mine now.", isDefault: true }),
+  }, sessionB);
+  check("clinician B cannot edit A's routine", stealEdit.status === 422, `got ${stealEdit.status}`);
+  check("and the refusal did not clear B's own default",
+    (await prisma.promptTemplate.findUnique({ where: { id: bRoutine.id } }))?.isDefault === true);
+  await api(`/api/prompts/${bRoutine.id}`, { method: "DELETE" }, sessionB);
+
   /* ---------------------------------------------------------------- */
   section("8. Single-slot limit under concurrent load");
   const burst = await Promise.all(
