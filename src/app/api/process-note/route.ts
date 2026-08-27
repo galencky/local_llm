@@ -6,6 +6,7 @@ import {
   releaseLock,
   setStage,
   type LockHandle,
+  type PipelineStage,
 } from "@/lib/concurrency";
 import { openRequest, sealResponse, type CryptoEnvelope } from "@/lib/crypto";
 import { getServerKeys } from "@/lib/keystore";
@@ -28,8 +29,11 @@ import {
   deidentifies,
   isWorkspace,
   normalisePromptRun,
+  normaliseDeidSampling,
+  normaliseSampling,
   PromptRunError,
   type PromptRun,
+  type Sampling,
   type Workspace,
 } from "@/lib/workspace";
 import { prisma } from "@/lib/db";
@@ -59,20 +63,22 @@ export const maxDuration = 300;
 
 interface ProcessRequestBody extends CryptoEnvelope {
   format?: string;
-  instruction?: string;
 }
 
 interface DecryptedPayload {
   text: string;
   format?: string;
-  instruction?: string;
   promptId?: string;
   /** Rung of the model ladder to start from. Falls back downward from here. */
   model?: string;
   /** "note" (default) or "prompt" — which workspace produced this request. */
   workspace?: unknown;
-  /** The custom-prompt workspace's system instruction, prompt and parameters. */
+  /** The custom-prompt workspace's system instruction and prompt. */
   promptRun?: unknown;
+  /** Sampling for whichever model answers. Applies to both workspaces. */
+  sampling?: unknown;
+  /** Sampling for the de-identification pass. Only used on a cloud run. */
+  deidSampling?: unknown;
 }
 
 export interface ProcessNoteResult {
@@ -172,6 +178,37 @@ export async function POST(req: NextRequest) {
         }
       };
 
+      /**
+       * Live output from the local model, SEALED like everything else.
+       *
+       * Progress events are plaintext by design — they carry stage names and
+       * counts, never content. A token stream is content, and the entity list
+       * the de-identifier writes is content of the worst kind, so each flush is
+       * encrypted with the same ephemeral AES key as the final result. The
+       * browser already holds that key; Cloudflare still sees only ciphertext.
+       *
+       * Buffered rather than emitted per token: a GCM seal and a base64 encode
+       * per token would cost more than the inference.
+       */
+      let streamKey: CryptoKey | null = null;
+      let pending = "";
+      let pendingStage: PipelineStage | null = null;
+      let lastFlush = 0;
+      const flushStream = async (force = false) => {
+        if (!streamKey || !pending || !pendingStage) return;
+        if (!force && Date.now() - lastFlush < 120) return;
+        const chunk = pending;
+        const stage = pendingStage;
+        pending = "";
+        lastFlush = Date.now();
+        emit("stream", { stage, sealed: await sealResponse(streamKey, chunk) });
+      };
+      const onToken = (stage: PipelineStage) => (chunk: string) => {
+        pendingStage = stage;
+        pending += chunk;
+        void flushStream();
+      };
+
       try {
         // 2. Unwrap the ephemeral AES key, then decrypt.
         setStage(lock, "decrypt");
@@ -192,24 +229,27 @@ export async function POST(req: NextRequest) {
           return;
         }
 
+        streamKey = aesKey;
         let noteText = plaintext;
         let format: string | undefined = body.format;
-        let instruction: string | undefined = body.instruction;
         let promptId: string | undefined;
         let startModel: string | undefined;
         let workspace: Workspace = "note";
         let rawPromptRun: unknown;
+        let rawSampling: unknown;
+        let rawDeidSampling: unknown;
         if (plaintext.trimStart().startsWith("{")) {
           try {
             const payload = JSON.parse(plaintext) as DecryptedPayload;
             if (typeof payload.text === "string") {
               noteText = payload.text;
               format = payload.format ?? format;
-              instruction = payload.instruction ?? instruction;
               promptId = payload.promptId ?? undefined;
               startModel = payload.model ?? undefined;
               if (isWorkspace(payload.workspace)) workspace = payload.workspace;
               rawPromptRun = payload.promptRun ?? undefined;
+              rawSampling = payload.sampling ?? undefined;
+              rawDeidSampling = payload.deidSampling ?? undefined;
             }
           } catch {
             /* not a payload object; treat the whole thing as the narrative */
@@ -217,10 +257,18 @@ export async function POST(req: NextRequest) {
         }
 
         const localDestination = isLocalDestination(startModel);
-        // The destination decides privacy, and nothing else can. A raw local
-        // prompt is the single combination that is not scrubbed, because
-        // nothing leaves the box for it to be scrubbed for.
-        const scrubbing = deidentifies(workspace, localDestination);
+        // The destination decides privacy, and nothing else does — not the
+        // workspace, not the prompt. Bound for Google means de-identified;
+        // staying on this Mac means there is nothing to protect it from.
+        const scrubbing = deidentifies(localDestination);
+
+        // Clamped on this side of the wire, always: the editor's own bounds
+        // are a courtesy to the person typing.
+        const sampling: Sampling = normaliseSampling(rawSampling);
+        const deidSampling: Sampling = normaliseDeidSampling(rawDeidSampling);
+        // The routine a prompt run selected, recorded on the audit row by name
+        // the same way a note routine is.
+        let promptRoutineName: string | null = null;
 
         let promptRun: PromptRun | null = null;
         if (workspace === "prompt") {
@@ -232,6 +280,17 @@ export async function POST(req: NextRequest) {
               return;
             }
             throw err;
+          }
+          if (promptId) {
+            try {
+              const found = await getTemplate(userId, promptId);
+              if (found?.kind === "prompt") promptRoutineName = found.name;
+            } catch (err) {
+              console.error(
+                "[process-note] prompt routine lookup failed:",
+                err instanceof Error ? err.message.split("\n")[0] : "unknown error",
+              );
+            }
           }
           // The prompt IS the input, so it is what the budget applies to.
           noteText = promptRun.prompt;
@@ -304,7 +363,8 @@ export async function POST(req: NextRequest) {
           const nerInput = promptRun
             ? `${vault.deidentify(promptSystem)}\n\n${regexResult.text}`
             : regexResult.text;
-          const llmResult = await scrubWithLlm(nerInput, vault);
+          const llmResult = await scrubWithLlm(nerInput, vault, onToken("ner"), deidSampling);
+          await flushStream(true);
           scrubMs = Date.now() - scrubStarted;
 
           deidentifiedInput = promptRun ? vault.deidentify(regexResult.text) : llmResult.text;
@@ -331,7 +391,7 @@ export async function POST(req: NextRequest) {
         // whole instruction by itself.
         let resolvedFormat: NoteFormat = isNoteFormat(format) ? format : "SOAP";
         let template: { name: string; instruction: string } | null = null;
-        if (promptId && !promptRun) {
+        if (promptId && workspace === "note") {
           try {
             const found = await getTemplate(userId, promptId);
             if (found) {
@@ -346,6 +406,18 @@ export async function POST(req: NextRequest) {
               err instanceof Error ? err.message.split("\n")[0] : "unknown error",
             );
           }
+        }
+
+        // "Others" carries no compiled-in skeleton, so the saved routine is
+        // the only thing that says what the note should look like. Refuse
+        // rather than send a narrative with no shape attached at all.
+        if (!promptRun && resolvedFormat === "OTHER" && !template) {
+          emit("error", {
+            error:
+              'The "Others" format has no built-in note shape — it runs on a saved routine alone. Pick a routine, or choose one of the five built-in formats.',
+            code: "ROUTINE_REQUIRED",
+          });
+          return;
         }
 
         // 6. Formatting. For the cloud destination, placeholders only cross
@@ -376,14 +448,13 @@ export async function POST(req: NextRequest) {
             ? await runPromptLocally({
                 systemInstruction: promptSystem,
                 prompt: deidentifiedInput,
-                temperature: promptRun.temperature,
-                maxTokens: promptRun.maxTokens,
+                sampling,
+                onToken: onToken("cloud"),
               })
             : await runPromptOnCloud({
                 systemInstruction: promptSystem,
                 prompt: deidentifiedInput,
-                temperature: promptRun.temperature,
-                maxTokens: promptRun.maxTokens,
+                sampling,
                 startModel,
                 onFallback,
               })
@@ -391,15 +462,19 @@ export async function POST(req: NextRequest) {
             ? await formatWithLocalModel(
                 deidentifiedInput,
                 resolvedFormat,
-                { template, adHoc: instruction },
+                { template },
+                sampling,
+                onToken("cloud"),
               )
             : await formatClinicalNote(
                 deidentifiedInput,
                 resolvedFormat,
-                { template, adHoc: instruction },
+                { template },
+                sampling,
                 onFallback,
                 startModel,
               );
+        await flushStream(true);
         emit("progress", {
           stage: "cloud",
           status: "done",
@@ -428,7 +503,7 @@ export async function POST(req: NextRequest) {
         //    put the only unredacted copy of it on disk.
         const processingTimeMs = Date.now() - startedAt;
         let auditLogId: string | null = null;
-        if (audits(workspace, localDestination)) {
+        if (audits(localDestination)) {
           setStage(lock, "audit");
           emit("progress", { stage: "audit", status: "running" });
           try {
@@ -446,7 +521,7 @@ export async function POST(req: NextRequest) {
                 // dies with the request — so the row says the run came from a
                 // prompt nobody can look up, rather than naming a routine.
                 promptTemplateName: promptRun
-                  ? "Custom prompt — not stored"
+                  ? (promptRoutineName ?? "Custom prompt — not stored")
                   : (template?.name ?? null),
                 noteFormat: resolvedFormat,
                 userId,
@@ -482,7 +557,7 @@ export async function POST(req: NextRequest) {
             auditLogId,
             model: formatted.model,
             format: resolvedFormat,
-            promptTemplateName: template?.name ?? null,
+            promptTemplateName: template?.name ?? promptRoutineName,
             destination: localDestination ? "local" : "cloud",
             workspace,
             deidentified: scrubbing,

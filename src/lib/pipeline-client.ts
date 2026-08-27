@@ -1,5 +1,5 @@
 import { openResponse, sealRequest, type CryptoEnvelope } from "./crypto";
-import type { PromptRun, Workspace } from "./workspace";
+import type { PromptRun, Sampling, Workspace } from "./workspace";
 
 /**
  * Client half of the streaming pipeline: seals the note, POSTs it, and reports
@@ -112,15 +112,25 @@ export class PipelineError extends Error {
 export interface RunOptions {
   text: string;
   format: string;
-  instruction?: string;
   promptId?: string;
   /** Starting rung of the model ladder; the server falls back downward. */
   model?: string;
   /** Which workspace this came from. Defaults to "note" server-side. */
   workspace?: Workspace;
-  /** The custom-prompt workspace's instruction, prompt and parameters. */
+  /** The custom-prompt workspace's instruction and prompt. */
   promptRun?: PromptRun | null;
+  /** Sampling for whichever model answers, in either workspace. */
+  sampling?: Sampling;
+  /** Sampling for the de-identification pass. Ignored on a local run. */
+  deidSampling?: Sampling;
   onProgress?: (event: ProgressEvent) => void;
+  /**
+   * Live output from the local model, already decrypted.
+   *
+   * Each chunk arrives sealed with the same ephemeral key as the result, so
+   * watching the model work costs nothing in confidentiality.
+   */
+  onStream?: (stage: PipelineStage, chunk: string) => void;
   /**
    * Called with the exact bytes that are about to go on the wire, plus the
    * plaintext they replace. Lets the UI show what an intermediary sees.
@@ -159,11 +169,12 @@ async function attempt<T>(opts: RunOptions, bustKeyCache: boolean): Promise<T> {
   const plaintext = JSON.stringify({
     text: opts.text,
     format: opts.format,
-    instruction: opts.instruction || undefined,
     promptId: opts.promptId || undefined,
     model: opts.model || undefined,
     workspace: opts.workspace,
     promptRun: opts.promptRun ?? undefined,
+    sampling: opts.sampling,
+    deidSampling: opts.deidSampling,
   });
   const { envelope, aesKey } = await sealRequest(publicKey, plaintext);
   opts.onSealed?.({ envelope, plaintext });
@@ -212,6 +223,16 @@ async function attempt<T>(opts: RunOptions, bustKeyCache: boolean): Promise<T> {
 
       const parsed = JSON.parse(data);
       if (event === "progress") opts.onProgress?.(parsed as ProgressEvent);
+      else if (event === "stream") {
+        const { stage, sealed: chunk } = parsed as {
+          stage: PipelineStage;
+          sealed: CryptoEnvelope;
+        };
+        // Await here rather than firing and forgetting: two chunks decrypted
+        // concurrently can resolve out of order, and the point of a live view
+        // is that it reads in the order it was written.
+        opts.onStream?.(stage, await openResponse(aesKey, chunk));
+      }
       else if (event === "result") sealed = parsed as CryptoEnvelope;
       else if (event === "error") {
         failure = new PipelineError(

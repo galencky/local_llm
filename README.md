@@ -53,54 +53,80 @@ browser ◀──AES-GCM sealed──  Cloudflare ◀──ciphertext───�
 
 ## What happens to one note
 
-1. **You paste the narrative** and pick a note format.
-2. **Your browser locks it.** The note is encrypted in the browser itself, with a
-   fresh key made for this one note.
+1. **You choose** what you are doing and which model does it. Everything below
+   follows from those two choices.
+2. **Your browser locks the note.** It is encrypted in the browser itself, with
+   a fresh key made for this one note.
 3. **It crosses the internet as ciphertext.** Cloudflare, which carries it, can
    only relay bytes it cannot read.
-4. **The Mac Mini opens it** and runs two de-identification passes:
-   - **Pattern rules** catch the things that always look the same — national IDs,
-     medical record numbers, phone numbers, dates, staff codes, ward-bed cells.
-     These are deterministic: what they catch, they always catch.
+4. **The Mac Mini opens it.** If the note is bound for Google, two
+   de-identification passes run first:
+   - **Pattern rules** catch the things that always look the same — national
+     IDs, medical record numbers, phone numbers, dates, staff codes, ward-bed
+     cells. Deterministic: what they catch, they always catch.
    - **A local AI model** catches what patterns cannot — a patient's name, a
      relative, an attending, an address, an employer, a hospital. This runs on
      your Mac, so the narrative with the names still in it never travels.
-5. **Only placeholders go to the cloud.** Gemini formats the note it is given and
-   is told, in the strongest terms, to copy every placeholder back exactly.
-   (Or, if you pick the **Local** model, this step happens on the Mac too and
-   nothing goes anywhere at all.)
-6. **The Mac puts the identifiers back**, using a map that exists only in memory
-   and is destroyed the moment the request ends.
-7. **The finished note comes home sealed**, and you get two copies: one with the
-   real names for the chart, one still de-identified for anywhere else.
+5. **Only placeholders go to the cloud.** Gemini is told, in the strongest
+   terms, to copy every placeholder back exactly.
+6. **The Mac puts the identifiers back**, using a map that exists only in
+   memory and is destroyed the moment the request ends.
+7. **The finished note comes home sealed.**
 
-The whole round trip takes roughly 15–70 seconds, most of it the two model calls.
+If instead you send it to the **local model**, steps 4 to 6 do not happen at
+all — there is nothing to protect the note from, because it never leaves the
+machine. See [the one rule](#the-one-rule).
+
+## The one rule
+
+**De-identification happens if and only if the run is bound for Google.**
+
+It reads off one thing — the destination — and there is no combination that is
+an exception. No prompt is consulted when deciding it, because nothing you can
+type is part of the decision.
+
+|  | Note | Custom prompt |
+| --- | --- | --- |
+| You give it | a ward narrative | a system instruction and a prompt |
+| You get back | a structured note | an answer |
+| **Gemini** | de-identified, logged | de-identified, logged |
+| **Local model** | **raw — nothing redacted, nothing logged** | **raw — nothing redacted, nothing logged** |
+
+**Cloud runs are de-identified without exception**, and are refused outright if
+the local model is not available to do it. The cloud options grey out when LM
+Studio is not running, for exactly that reason: Gemini cannot be reached
+without it.
+
+**Local runs are not de-identified at all**, and write no row to the note log.
+That is not an oversight. There is no de-identified copy of a local run to
+store, and storing the raw text would put the only unredacted copy of it on
+disk — the exact thing the rest of the design exists to prevent. The trade is
+worth stating plainly: **notes written locally do not appear in History.** The
+interface says so, in those words, while a local model is selected.
 
 ## Why it matters
 
-**The cloud never sees a patient.** Not "we told it not to look" — it is not sent.
-You can check this yourself: after any run, **Wire view** shows the literal bytes
-that crossed the internet, and the **redaction list** shows every identifier that
-was taken out, masked.
+**The cloud never sees a patient.** Not "we told it not to look" — it is not
+sent. You can check this yourself: after any run, **Wire view** shows the
+literal bytes that crossed the internet, and the **redaction list** shows every
+identifier that was taken out, masked.
 
-**Nothing identifying is written down.** The audit database stores the
-de-identified note only. There is no column for the raw text and none for the
+**Nothing identifying is written down.** The audit database stores
+de-identified text only. There is no column for the raw note and none for the
 name-to-placeholder map — that map lives in RAM for one request and is then
-wiped. This is why History can never show you a real name: it is a record of what
-went to the cloud, not a second copy of the chart.
+wiped. This is why History can never show you a real name.
 
-**It fails closed.** If the local model is unreachable, the request is refused
-rather than sent to the cloud with weaker scrubbing. Refusing to write a note is
-an inconvenience; leaking a name is not.
+**It fails closed.** If the local model is unreachable, a cloud run is refused
+rather than sent with weaker scrubbing. Refusing to write a note is an
+inconvenience; leaking a name is not.
 
 **Only people you name can use it.** Sign-in is Google, gated by an email
-allowlist that denies everyone when it is empty. An instance published to the
-internet with no allowlist would otherwise accept any Google account on earth.
+allowlist that denies everyone when it is empty.
 
 ## What it does not promise
 
-This is stated plainly because a de-identification tool that oversells itself is
-worse than none.
+Stated plainly, because a de-identification tool that oversells itself is worse
+than none.
 
 - **The local AI pass is probabilistic.** It is very good and it is not perfect.
   That is exactly why the redaction list exists — read it before you file a note.
@@ -114,8 +140,12 @@ worse than none.
   server's public key is served over the same tunnel it protects, so someone who
   controlled that edge could substitute their own. Pinning the key closes this;
   see [TECHNICAL.md](TECHNICAL.md).
-- **One note at a time.** 16 GB of unified memory runs one model pass, so several
-  clinicians can use it at once but their notes queue rather than run in parallel.
+- **One note at a time.** 16 GB of unified memory runs one model pass, so
+  several clinicians can use it at once but their notes queue rather than run in
+  parallel.
+- **A local run keeps no record.** Nothing is redacted and nothing is logged, so
+  it never appears in History and leaves no audit trail. That is the deal the
+  local model offers, and it is stated on screen while it is selected.
 
 ## Running it
 
@@ -150,48 +180,64 @@ To publish it to a hospital over a Cloudflare Tunnel, see
 
 ## Using it
 
-There is one thing to decide before a run, and it is decided by two controls
-sitting together: **what you are doing**, and **which model does it**.
+The page reads in the order you use it: **choose, then write, then press one
+button.** Every selector is above the input; the only thing below it is the run
+button, and nothing moves when you change your mind.
 
-|  | Note | Custom prompt |
-| --- | --- | --- |
-| You give it | a ward narrative | a system instruction and a prompt |
-| You get back | a structured note | an answer |
-| **Gemini** | de-identified, logged | de-identified, logged |
-| **Local model** | de-identified, logged | **raw — nothing redacted, nothing logged** |
+**Mode.** *Note* takes a ward narrative and gives back a structured chart entry.
+*Custom prompt* takes a system instruction and a prompt and gives back an
+answer — the left panel becomes two boxes and the right panel becomes Output.
 
-**The rule is the destination, not the prompt.** Anything bound for Google is
-de-identified first, without exception, and the run is refused outright if the
-local model is unavailable to do it. No prompt you can write changes that,
-because nothing in a prompt is consulted when deciding it. The cloud options
-grey out when LM Studio is not running, for the same reason.
+**Model.** *Local* is whatever LM Studio has loaded, detected automatically and
+named on the chip. The rest are the Gemini ladder, best first; a rung greys out
+only once Google has actually refused it, and the run walks down from there
+rather than failing. The cloud rungs are unavailable when LM Studio is down,
+because Gemini cannot be reached without it.
 
-The corollary is what makes the local model worth having: when nothing leaves
-the box there is nothing to protect it from. **Custom prompt + Local** is the
-one combination that runs raw — your text reaches the model exactly as written,
-and no row is written to the note log, because that row would be the only
-unredacted copy of it anywhere on disk. It is your machine talking to your
-model. The interface says so, in those words, while it is selected.
+**Shape.** In Note: SOAP, admission, progress, course, discharge — plus
+**Others**, which has no built-in shape at all and runs on a saved routine
+alone, so a routine that describes its own headings is not fighting a structure
+it never asked for. In Custom prompt your prompt is the shape, so there is
+nothing to pick.
 
-**Formats.** In the Note workspace, five note shapes — SOAP, admission,
-progress, hospital course, discharge summary. The format is recorded on the
-audit row, so two notes labelled "SOAP" are comparable.
+**Sampling.** Two labelled rows, so it is never ambiguous which model you are
+tuning. The first is the **de-identification pass**, named for the LM Studio
+model doing it — it applies only to a cloud-bound run, and says so and greys out
+otherwise. The second is whichever model answers: **Google Gemini** or your
+**local model**, named. Temperature, top-p, top-k and max tokens on both, in
+both modes. Anything left at its off value is not sent at all, so the model's
+own default applies.
 
-**Routines.** A saved instruction block per department — "always call out
-dialysis access and dry weight under Objective". Written once, appended to every
-note that uses it. Routines are screened for patient data when you save them and
-refused if any is found.
+The de-identification *prompt* is not editable and never will be — it is the
+de-identification step itself. Its numbers are, because the worst a bad number
+can do is find fewer names, which the redaction list shows you.
+
+**Routines.** Saved, named, and owned — in both modes. A *note* routine is a
+charting instruction appended to every note that uses it ("always call out
+dialysis access and dry weight under Objective"). A *prompt* routine saves the
+system instruction, the prompt and the sampling together, so selecting it
+restores the whole run rather than just the words. Routines are screened for
+patient data when you save them and refused if any is found, because they live
+in Postgres forever.
+
+**Watching it work.** When the local model is writing — whether it is finding
+identifiers or answering a prompt — you see the text appear as it is produced,
+rather than a spinner. Those chunks are encrypted exactly like the finished
+answer, so watching costs nothing in confidentiality.
 
 **Checking the work.** Four drawers: the **redaction list** (what was taken
 out), **Wire view** (what crossed the internet), **Prompts** (exactly what each
-model is told, read live from the running server), and **History** (your past
-notes, de-identified, searchable). Every drawer closes on **Escape** or a click
+model is told, read live from the running server), and **History** (past notes,
+de-identified, searchable). Every drawer closes on **Escape** or a click
 outside, keeps the keyboard inside it while open, and hands focus back to the
 control you opened it from.
 
+**Copying.** A cloud run gives you two buttons: the note with the real names for
+the chart, and the de-identified version for anywhere else. A local run gives
+you one — nothing was replaced, so there is only one version of it.
+
 **Keyboard.** **Cmd/Ctrl + Enter** runs. When the run button is greyed out it
-says why on hover — nothing typed yet, over the length cap, or a prompt that
-needs fixing.
+says why on hover.
 
 ## Proving it rather than asserting it
 
@@ -200,7 +246,7 @@ npm run verify        # offline: encryption, both scrubbers, re-hydration, the l
 npm run prove:e2ee    # wiretap the traffic and try to read the note out of it
 npm run db:inspect    # dump the audit schema and scan every row for identifiers
 npm run e2e:system    # full acceptance run against the live stack
-npm run e2e:prompt    # the custom-prompt workspace on both destinations
+npm run e2e:prompt    # the one rule, asserted from both destinations
 ```
 
 `prove:e2ee` puts a recording proxy exactly where Cloudflare sits, captures every

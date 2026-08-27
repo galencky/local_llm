@@ -115,9 +115,24 @@ model PromptTemplate {
   user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
   name        String
   specialty   String?
+  /// Which workspace this routine belongs to: "note" or "prompt".
+  ///
+  /// Defaulted rather than required so every row written before custom-prompt
+  /// routines existed is a note routine, which is what they were.
+  kind        String   @default("note")
+  /// The main body. For a note routine, the charting instruction appended to
+  /// the built-in skeleton; for a prompt routine, the prompt itself.
   instruction String   @db.Text
+  /// Prompt routines only: the model's standing instructions.
+  systemInstruction String? @db.Text
   /// Optional note format this template defaults to (SOAP, DISCHARGE_SUMMARY…).
   format      String?
+  /// Sampling this routine restores when selected. Null means "leave whatever
+  /// the browser already has", which is what every pre-existing row means.
+  temperature Float?
+  topP        Float?
+  topK        Int?
+  maxTokens   Int?
   isDefault   Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -126,4 +141,5 @@ model PromptTemplate {
   @@unique([userId, name])
   @@index([specialty])
   @@index([userId])
+  @@index([kind])
 }

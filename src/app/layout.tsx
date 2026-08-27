@@ -34,7 +34,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           }}
         />
       </head>
-      <body className="min-h-full flex flex-col">{children}</body>
+      {/* `lg:h-full` makes the height DEFINITE on a desktop, which is what
+          lets `flex-1` distribute space instead of every panel sizing itself
+          to its own content. Small screens keep `min-h-full` and scroll. */}
+      <body className="flex min-h-full flex-col lg:h-full">{children}</body>
     </html>
   );
 }

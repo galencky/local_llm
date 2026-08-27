@@ -1,6 +1,7 @@
 import "server-only";
 import { GoogleGenAI } from "@google/genai";
 import { PLACEHOLDER_KERNEL, withPlaceholderKernel } from "./placeholders";
+import type { Sampling } from "./workspace";
 import {
   chainFrom,
   defaultModel,
@@ -35,21 +36,16 @@ export const NOTE_FORMATS = {
   ADMISSION_NOTE: "Admission note",
   PROGRESS_NOTE: "Daily progress note",
   /**
-   * The clinician writes the skeleton instead of picking one.
+   * No skeleton at all — the saved routine is the whole shape.
    *
-   * This is the light door into customisation, and deliberately the safest
-   * one: the format skeleton is the WEAKEST instruction in the assembled
-   * prompt, so replacing it cannot touch the placeholder rules, the clinical
-   * rules, or either de-identification pass. Custom *mode* is the heavy door —
-   * it replaces both system prompts and the sampling parameters.
+   * The five above each carry a compiled-in structure, which is what makes
+   * two notes labelled "SOAP" comparable. This one carries none, so a routine
+   * that describes its own headings is not fighting a set it did not ask for.
+   * A run in this format therefore REQUIRES a routine: there is nothing else
+   * left to say what the note should look like.
    */
-  CUSTOM: "Custom prompt",
+  OTHER: "Others",
 } as const;
-
-/** Formats with a compiled-in skeleton — everything except the written one. */
-export const BUILT_IN_FORMATS = (
-  Object.keys(NOTE_FORMATS) as NoteFormat[]
-).filter((f) => f !== "CUSTOM");
 
 export type NoteFormat = keyof typeof NOTE_FORMATS;
 
@@ -63,12 +59,22 @@ const FORMAT_INSTRUCTIONS: Record<NoteFormat, string> = {
   HOSPITAL_COURSE: `Produce a chronological hospital course timeline. Each entry begins with its time marker (a date placeholder or a relative day such as "HD#3"), then a concise account of events, interventions, and the response to them. Keep strict chronological order.`,
   ADMISSION_NOTE: `Produce an admission note with these headings exactly: **Chief Complaint**, **History of Present Illness**, **Past Medical History**, **Medications**, **Allergies**, **Physical Examination**, **Investigations**, **Impression**, **Plan**.`,
   PROGRESS_NOTE: `Produce a concise daily progress note: an interval-history line, then objective data, then a numbered active problem list with today's assessment and plan for each.`,
-  // Never sent: a CUSTOM run supplies its own skeleton, and the route refuses
-  // the run rather than falling back to this if one did not arrive. It exists
-  // so the type stays total and so a hand-rolled client cannot reach the cloud
-  // with no formatting instruction at all.
-  CUSTOM: `Produce a structured clinical note using the headings the source material implies. Keep every section grounded in the narrative.`,
+  // Deliberately empty: "Others" means the saved routine is the whole
+  // instruction. The route refuses the run when no routine is attached, so
+  // this never reaches a model as the only thing said about the note's shape.
+  OTHER: "",
 };
+
+/**
+ * Formats with a compiled-in skeleton — everything except "Others".
+ *
+ * MUST stay below FORMAT_INSTRUCTIONS: it reads it at module load, and
+ * declaring it above threw a ReferenceError out of the temporal dead zone the
+ * moment anything imported this file.
+ */
+export const BUILT_IN_FORMATS = (
+  Object.keys(NOTE_FORMATS) as NoteFormat[]
+).filter((f) => FORMAT_INSTRUCTIONS[f] !== "");
 
 const SYSTEM_INSTRUCTION = `You are a clinical documentation specialist producing formal hospital notes for physicians in Taiwan.
 
@@ -102,13 +108,12 @@ export function systemInstruction(): string {
  *
  * One function, used by both the real request and the read-only preview, so
  * what the UI shows cannot drift from what is actually sent. Everything a
- * clinician can change enters through `template` (a saved routine) or `adHoc`
- * — the skeleton and the system instruction are compiled in.
+ * clinician can change enters through `template` (a saved routine) — the
+ * skeleton and the system instruction are compiled in.
  */
 export function assemblePrompt(opts: {
   format: NoteFormat;
   template?: { name: string; instruction: string } | null;
-  adHoc?: string | null;
   narrative: string;
   /**
    * A replacement for the built-in format skeleton. When set, `format` is
@@ -116,13 +121,12 @@ export function assemblePrompt(opts: {
    */
   skeleton?: string | null;
 }): string {
-  const adHoc = opts.adHoc?.trim();
+  const skeleton = opts.skeleton?.trim() || FORMAT_INSTRUCTIONS[opts.format];
   return [
-    opts.skeleton?.trim() || FORMAT_INSTRUCTIONS[opts.format],
+    skeleton,
     opts.template?.instruction?.trim()
-      ? `\n\nDepartmental charting routine ("${opts.template.name}") — follow this unless it conflicts with the placeholder rules:\n${opts.template.instruction.trim()}`
+      ? `${skeleton ? "\n\n" : ""}Departmental charting routine ("${opts.template.name}") — follow this unless it conflicts with the placeholder rules:\n${opts.template.instruction.trim()}`
       : "",
-    adHoc ? `\n\nAdditional instruction for this note only: ${adHoc}` : "",
     "\n\n--- DE-IDENTIFIED CLINICAL NARRATIVE ---\n",
     opts.narrative,
     "\n--- END NARRATIVE ---",
@@ -226,10 +230,8 @@ function translateGeminiError(err: unknown, model: string): never {
 }
 
 export interface NoteInstructions {
-  /** Saved specialty routine, applied before any ad-hoc steer. */
+  /** Saved specialty routine. */
   template?: { name: string; instruction: string } | null;
-  /** One-off steer typed by the clinician for this note only. */
-  adHoc?: string | null;
   /**
    * The clinician's own note skeleton, from the CUSTOM format. Replaces the
    * compiled-in skeleton and nothing else — it sits at the same, weakest,
@@ -256,32 +258,27 @@ export interface FormatNoteResult {
  * Format a fully de-identified narrative into a structured note.
  *
  * Instruction precedence, weakest to strongest: the format skeleton (built-in,
- * or a replacement for it), then the saved specialty template,
- * then the clinician's ad-hoc steer. The placeholder rules in the system
- * instruction outrank all three — neither a template nor a custom instruction
- * can talk the model into inventing a name.
+ * or a replacement for it), then the saved specialty routine. The placeholder
+ * rules in the system instruction outrank both — a routine cannot talk the
+ * model into inventing a name.
  *
  * @param deidentifiedText text containing placeholders only — never raw PHI
  * @param format target note structure
- * @param instructions saved template and/or one-off steer
+ * @param instructions the saved routine, if one was selected
  */
 export async function runPromptOnCloud(opts: {
   /** Already de-identified: placeholders only. */
   systemInstruction: string;
   /** Already de-identified: placeholders only. */
   prompt: string;
-  temperature: number;
-  maxTokens: number;
+  sampling: Sampling;
   startModel?: string;
   onFallback?: (step: FallbackStep, next: string) => void;
 }): Promise<FormatNoteResult> {
   return walkTheLadder({
     system: promptSystemInstruction(opts.systemInstruction),
     prompt: opts.prompt,
-    generation: {
-      temperature: opts.temperature,
-      ...(opts.maxTokens > 0 ? { maxOutputTokens: opts.maxTokens } : {}),
-    },
+    generation: geminiGeneration(opts.sampling),
     startModel: opts.startModel,
     onFallback: opts.onFallback,
   });
@@ -291,13 +288,13 @@ export async function formatClinicalNote(
   deidentifiedText: string,
   format: NoteFormat,
   instructions: NoteInstructions = {},
+  sampling: Sampling,
   onFallback?: (step: FallbackStep, next: string) => void,
   startModel?: string,
 ): Promise<FormatNoteResult> {
   const prompt = assemblePrompt({
     format,
     template: instructions.template,
-    adHoc: instructions.adHoc,
     narrative: deidentifiedText,
     skeleton: instructions.skeleton,
   });
@@ -305,10 +302,24 @@ export async function formatClinicalNote(
   return walkTheLadder({
     system: SYSTEM_INSTRUCTION,
     prompt,
-    generation: { temperature: 0.2 },
+    generation: geminiGeneration(sampling),
     startModel,
     onFallback,
   });
+}
+
+/**
+ * Sampling in Gemini's names. Anything at its "off" value is omitted rather
+ * than sent, so the model's own default applies instead of a value that only
+ * looks deliberate.
+ */
+function geminiGeneration(s: Sampling): Record<string, number> {
+  return {
+    temperature: s.temperature,
+    ...(s.topP < 1 ? { topP: s.topP } : {}),
+    ...(s.topK > 0 ? { topK: s.topK } : {}),
+    ...(s.maxTokens > 0 ? { maxOutputTokens: s.maxTokens } : {}),
+  };
 }
 
 /**

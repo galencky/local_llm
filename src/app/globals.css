@@ -147,6 +147,31 @@ body {
 }
 
 /**
+ * A bordered text box rings INSIDE itself.
+ *
+ * These sit in scroll containers that clip at their own edges, so an outline
+ * placed 2px outside the element gets sliced by one. Inset by the same amount
+ * it is drawn within the element, cannot be clipped, and reads as the box
+ * being active rather than as a rule across the panel.
+ */
+textarea:focus-visible {
+  outline-offset: -2px;
+}
+
+/**
+ * The narrative box has no ring at all, and that is deliberate.
+ *
+ * It is flush with its panel — no border of its own, edge to edge, filling a
+ * clipping scroll container — so a 2px accent outline does not read as "this
+ * box is focused". It reads as a teal line that appeared across the workspace
+ * for no reason, which is exactly how it was reported. The caret is the focus
+ * indicator for a text box, and it is the one every other editor relies on.
+ */
+.field-flush:focus-visible {
+  outline: none;
+}
+
+/**
  * Drawers arrive from the edge rather than appearing whole.
  *
  * Six drawers open over this page, and a full-height panel that materialises

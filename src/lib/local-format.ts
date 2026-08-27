@@ -3,6 +3,7 @@ import { assemblePrompt, systemInstruction, type NoteFormat, type NoteInstructio
 
 import { lmStudioBaseUrl, lmStudioFormatTimeoutMs } from "./lmstudio";
 import { resolveLocalModel } from "./scrubber-llm";
+import type { Sampling } from "./workspace";
 
 /**
  * The local formatting destination — the same note, written on this Mac.
@@ -19,9 +20,9 @@ import { resolveLocalModel } from "./scrubber-llm";
  *    de-identification invariant is not a property of the cloud boundary — it
  *    is what makes History safe to open in front of somebody. A local run that
  *    wrote raw names into Postgres would quietly undo that.
- *  - The note is still assembled by `assemblePrompt`, so the format skeleton,
- *    the saved routine and the one-off steer compose exactly as they do for the
- *    cloud, in the same precedence.
+ *  - The note is still assembled by `assemblePrompt`, so the format skeleton
+ *    and the saved routine compose exactly as they do for the cloud, in the
+ *    same precedence.
  *  - The placeholder rules still travel with the request, so re-hydration works
  *    identically and the same `unresolvedTokens` check applies.
  *
@@ -67,15 +68,29 @@ export function localModelLabel(model: string): string {
 export async function runPromptLocally(opts: {
   systemInstruction: string;
   prompt: string;
-  temperature: number;
-  maxTokens: number;
+  sampling: Sampling;
+  onToken?: (chunk: string) => void;
 }): Promise<FormatNoteResult> {
   return callLocalChat({
     system: opts.systemInstruction.trim() || undefined,
     user: opts.prompt,
-    temperature: opts.temperature,
-    maxTokens: opts.maxTokens,
+    ...localSampling(opts.sampling),
+    onToken: opts.onToken,
   });
+}
+
+/**
+ * Sampling in LM Studio's names. Anything at its "off" value is omitted rather
+ * than sent, so the model's own default applies instead of a value that only
+ * looks deliberate.
+ */
+function localSampling(s: Sampling) {
+  return {
+    temperature: s.temperature,
+    topP: s.topP < 1 ? s.topP : undefined,
+    topK: s.topK > 0 ? s.topK : undefined,
+    maxTokens: s.maxTokens,
+  };
 }
 
 /**
@@ -86,17 +101,18 @@ export async function runPromptLocally(opts: {
  *
  * @param deidentifiedText text containing placeholders only — never raw PHI
  * @param format target note structure
- * @param instructions saved routine and/or one-off steer
+ * @param instructions the saved routine, if one was selected
  */
 export async function formatWithLocalModel(
   deidentifiedText: string,
   format: NoteFormat,
   instructions: NoteInstructions = {},
+  sampling: Sampling,
+  onToken?: (chunk: string) => void,
 ): Promise<FormatNoteResult> {
   const prompt = assemblePrompt({
     format,
     template: instructions.template,
-    adHoc: instructions.adHoc,
     narrative: deidentifiedText,
     skeleton: instructions.skeleton,
   });
@@ -104,11 +120,55 @@ export async function formatWithLocalModel(
   return callLocalChat({
     system: systemInstruction(),
     user: prompt,
-    temperature: 0.2,
-    // A discharge summary is long. Too low a cap truncates it mid-section,
-    // which reads as the model having given up rather than as a setting.
-    maxTokens: 8192,
+    ...localSampling(sampling),
+    onToken,
   });
+}
+
+/**
+ * Read an OpenAI-style `stream: true` response, handing each delta to the
+ * caller and returning the whole thing at the end.
+ *
+ * A chunk can be split across TCP reads, so the tail of the buffer is kept
+ * until a blank line completes the frame — the same reason the browser's own
+ * SSE parser in `pipeline-client.ts` buffers rather than parsing per read.
+ */
+async function readStream(
+  body: ReadableStream<Uint8Array>,
+  onToken: (chunk: string) => void,
+): Promise<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let text = "";
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let split: number;
+    while ((split = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, split).trim();
+      buffer = buffer.slice(split + 1);
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") continue;
+      try {
+        const delta = (JSON.parse(payload) as {
+          choices?: { delta?: { content?: string } }[];
+        }).choices?.[0]?.delta?.content;
+        if (delta) {
+          text += delta;
+          onToken(delta);
+        }
+      } catch {
+        // A malformed frame is not worth failing a whole note over; the
+        // non-streaming path would not have seen it either.
+      }
+    }
+  }
+  return text;
 }
 
 /** The one place either local path actually talks to LM Studio. */
@@ -119,11 +179,21 @@ async function callLocalChat(opts: {
   topP?: number;
   topK?: number;
   maxTokens: number;
+  /**
+   * Called with each chunk as the model produces it.
+   *
+   * When present the request is made with `stream: true`, so the clinician
+   * watches the answer being written instead of a spinner — which on a local
+   * model, where a long note can take a minute, is the difference between
+   * "working" and "hung".
+   */
+  onToken?: (chunk: string) => void;
 }): Promise<FormatNoteResult> {
   const started = Date.now();
   const model = await resolveLocalModel();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), lmStudioFormatTimeoutMs());
+  const streaming = Boolean(opts.onToken);
 
   try {
     const res = await fetch(`${lmStudioBaseUrl()}/chat/completions`, {
@@ -136,6 +206,7 @@ async function callLocalChat(opts: {
         ...(opts.topP !== undefined ? { top_p: opts.topP } : {}),
         ...(opts.topK !== undefined ? { top_k: opts.topK } : {}),
         max_tokens: opts.maxTokens,
+        ...(streaming ? { stream: true } : {}),
         messages: [
           ...(opts.system ? [{ role: "system", content: opts.system }] : []),
           { role: "user", content: opts.user },
@@ -147,10 +218,16 @@ async function callLocalChat(opts: {
       throw new Error(`LM Studio responded ${res.status}: ${await res.text()}`);
     }
 
-    const body = (await res.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const text = body.choices?.[0]?.message?.content?.trim();
+    let text: string;
+    if (streaming && res.body) {
+      text = await readStream(res.body, opts.onToken!);
+    } else {
+      const body = (await res.json()) as {
+        choices?: { message?: { content?: string } }[];
+      };
+      text = body.choices?.[0]?.message?.content ?? "";
+    }
+    text = text.trim();
     if (!text) {
       throw new Error("LM Studio returned an empty choice.");
     }

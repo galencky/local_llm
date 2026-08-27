@@ -1,5 +1,6 @@
 import type { PiiCategory, TokenVault } from "./memory-cache";
 import { lmStudioBaseUrl, lmStudioTimeoutMs } from "./lmstudio";
+import { DEID_SAMPLING_DEFAULTS, type Sampling } from "./workspace";
 
 /**
  * Pass 3B — probabilistic NER via LM Studio on localhost.
@@ -166,6 +167,8 @@ async function callLmStudio(
   useSchema: boolean,
   /** Resolved once per run — see `resolveLocalModel`. */
   model: string,
+  sampling: Sampling,
+  stream = false,
 ): Promise<Response> {
   return fetch(`${baseUrl()}/chat/completions`, {
     method: "POST",
@@ -173,12 +176,15 @@ async function callLmStudio(
     signal,
     body: JSON.stringify({
       model: model,
-      temperature: 0,
+      temperature: sampling.temperature,
+      ...(sampling.topP < 1 ? { top_p: sampling.topP } : {}),
+      ...(sampling.topK > 0 ? { top_k: sampling.topK } : {}),
       // A long shift note can carry 60+ entities. Too low a cap truncates the
       // JSON mid-array, which fails closed and looks to the user like an
       // unexplained 503 — so the cap is generous but still bounded, to stop a
       // looping model pinning the single compute slot for minutes.
-      max_tokens: 6144,
+      max_tokens: sampling.maxTokens,
+      ...(stream ? { stream: true } : {}),
       messages: [
         { role: "system", content: NER_SYSTEM_PROMPT },
         { role: "user", content: prompt },
@@ -306,6 +312,10 @@ export async function checkLmStudioHealth(): Promise<LmStudioHealth> {
 export async function scrubWithLlm(
   input: string,
   vault: TokenVault,
+  /** Called with each chunk the de-identifier produces, for the live view. */
+  onToken?: (chunk: string) => void,
+  /** Sampling for this pass. The PROMPT is never configurable; these are. */
+  sampling: Sampling = DEID_SAMPLING_DEFAULTS,
 ): Promise<LlmScrubResult> {
   const started = Date.now();
   const controller = new AbortController();
@@ -320,6 +330,7 @@ export async function scrubWithLlm(
   let usedSchema = true;
   try {
     type ChatBody = { choices?: { message?: { content?: string } }[] };
+    type ChatStream = { choices?: { delta?: { content?: string } }[] };
     const read = async (r: Response): Promise<string> => {
       if (!r.ok) {
         throw new Error(`LM Studio responded ${r.status}: ${await r.text()}`);
@@ -327,21 +338,56 @@ export async function scrubWithLlm(
       return ((await r.json()) as ChatBody).choices?.[0]?.message?.content ?? "";
     };
 
-    let res = await callLmStudio(input, controller.signal, true, model);
+    /** Streamed frames arrive as deltas; collect them and show them as they land. */
+    const readStreamed = async (r: Response): Promise<string> => {
+      if (!r.ok) {
+        throw new Error(`LM Studio responded ${r.status}: ${await r.text()}`);
+      }
+      if (!r.body) return "";
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let out = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let split: number;
+        while ((split = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, split).trim();
+          buffer = buffer.slice(split + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") continue;
+          try {
+            const delta = (JSON.parse(payload) as ChatStream).choices?.[0]?.delta?.content;
+            if (delta) {
+              out += delta;
+              onToken?.(delta);
+            }
+          } catch {
+            /* a malformed frame is not worth failing the note over */
+          }
+        }
+      }
+      return out;
+    };
+
+    let res = await callLmStudio(input, controller.signal, true, model, sampling, Boolean(onToken));
     if (res.status === 400) {
       // Older LM Studio builds / GGUFs without grammar support.
-      res = await callLmStudio(input, controller.signal, false, model);
+      res = await callLmStudio(input, controller.signal, false, model, sampling);
       usedSchema = false;
       content = await read(res);
     } else {
-      content = await read(res);
+      content = onToken ? await readStreamed(res) : await read(res);
       if (!content.trim()) {
         // A reasoning model with a json_schema attached answers HTTP 200 with
         // the entire object in `reasoning_content` and `content` empty. The
         // 400 branch above never fires, so without this the pipeline fails
         // closed on every note and the model looks broken. Retry once with no
         // schema, which puts the answer back in `content`.
-        res = await callLmStudio(input, controller.signal, false, model);
+        res = await callLmStudio(input, controller.signal, false, model, sampling);
         usedSchema = false;
         content = await read(res);
       }
@@ -418,7 +464,7 @@ export async function scrubWithLlm(
     const retryController = new AbortController();
     const retryTimer = setTimeout(() => retryController.abort(), timeoutMs());
     try {
-      const retry = await callLmStudio(input, retryController.signal, false, model);
+      const retry = await callLmStudio(input, retryController.signal, false, model, sampling);
       if (retry.ok) {
         const body = (await retry.json()) as {
           choices?: { message?: { content?: string } }[];

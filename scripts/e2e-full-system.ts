@@ -86,6 +86,7 @@ interface RunResult {
     format: string;
     promptTemplateName: string | null;
     destination: "cloud" | "local";
+    deidentified: boolean;
     llmEntityCount: number;
     unresolvedTokens: string[];
     degradedScrub: boolean;
@@ -340,12 +341,11 @@ async function main() {
     plain.redactions.some((r) => r.source === "regex") && plain.redactions.some((r) => r.source === "llm"));
 
   /* ---------------------------------------------------------------- */
-  section("5b. Local destination — the note never leaves the Mac");
-  // The same narrative, formatted by the model already loaded in LM Studio.
-  // What is being asserted is not "it produced good prose" — that is the
-  // model's business — but that choosing local changes WHERE the note is
-  // written without weakening anything the pipeline promises either side of
-  // that stage.
+  section("5b. Local destination — raw, and nothing written down");
+  // The destination decides, and it decides everything: a note run locally is
+  // not de-identified and leaves no audit row, because nothing left the box
+  // and there is no de-identified copy of it to store.
+  const rowsBeforeLocal = await prisma.auditLog.count({ where: { userId: sessionA.userId } });
   const localRun = await runPipeline<RunResult>({
     baseUrl: base,
     text: WARD_NOTE,
@@ -357,30 +357,15 @@ async function main() {
   check("model is recorded as local", localRun.meta.model.startsWith("local:"), localRun.meta.model);
   check("no cloud model served it", !/^gemini-/.test(localRun.meta.model), localRun.meta.model);
   check("a note came back", localRun.note.trim().length > 50, `${localRun.note.trim().length} chars`);
-  // Both scrub passes still run. The audit log's de-identification invariant
-  // is not a property of the cloud boundary, and a local run that wrote raw
-  // names into Postgres would quietly undo it.
-  for (const p of PII) check(`local run still redacted ${p}`, !localRun.deidentifiedInput.includes(p));
-  check("local run was not degraded", localRun.meta.degradedScrub === false);
-  check("both scrub passes contributed locally",
-    localRun.redactions.some((r) => r.source === "regex") &&
-      localRun.redactions.some((r) => r.source === "llm"));
-  check("audit row written for the local run", Boolean(localRun.meta.auditLogId));
-  {
-    const row = await prisma.auditLog.findUnique({ where: { id: localRun.meta.auditLogId! } });
-    check("audit names the local model", (row?.modelUsed ?? "").startsWith("local:"), String(row?.modelUsed));
-    check("audit stores de-identified text for the local run",
-      PII.every((p) => !(row?.deidentifiedInput ?? "").includes(p) && !(row?.deidentifiedOutput ?? "").includes(p)));
-  }
-  {
-    // Same re-hydration contract as the cloud path: every token the model
-    // actually emitted comes back, and none survive as literal text.
-    const emittedLocal = localRun.redactions.filter((r) => localRun.deidentifiedOutput.includes(r.token));
-    check("every token the local model emitted was restored",
-      emittedLocal.every((r) => !localRun.note.includes(r.token)),
-      emittedLocal.filter((r) => localRun.note.includes(r.token)).map((r) => r.token).join(","));
-    console.log(`       ${localRun.meta.model} · ${(localRun.meta.processingTimeMs / 1000).toFixed(1)}s · ${emittedLocal.length} placeholders emitted`);
-  }
+  check("it reports that it did not de-identify", localRun.meta.deidentified === false);
+  check("the local model saw the narrative as written",
+    PII.every((p) => localRun.deidentifiedInput.includes(p)),
+    PII.filter((p) => !localRun.deidentifiedInput.includes(p)).join(","));
+  check("nothing was redacted", localRun.redactions.length === 0, `${localRun.redactions.length}`);
+  check("no audit row was written", localRun.meta.auditLogId === null, String(localRun.meta.auditLogId));
+  check("the note log did not grow",
+    (await prisma.auditLog.count({ where: { userId: sessionA.userId } })) === rowsBeforeLocal);
+  console.log(`       ${localRun.meta.model} · ${(localRun.meta.processingTimeMs / 1000).toFixed(1)}s · raw`);
 
   /* ---------------------------------------------------------------- */
   section("6. Same note WITH the specialty routine");

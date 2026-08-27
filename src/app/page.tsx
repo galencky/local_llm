@@ -36,7 +36,6 @@ import {
   Radio,
   ScrollText,
   Trash2,
-  Wand2,
   X,
 } from "lucide-react";
 import {
@@ -54,10 +53,14 @@ import { base64ToBytes, type CryptoEnvelope } from "@/lib/crypto";
 import {
   normalisePromptRun,
   PROMPT_DEFAULTS,
-  PROMPT_PARAMS,
   PromptRunError,
+  DEID_SAMPLING_DEFAULTS,
+  SAMPLING_DEFAULTS,
+  SAMPLING_PARAMS,
+  deidentifies,
   stagesFor,
   type PromptRun,
+  type Sampling,
   type Workspace,
 } from "@/lib/workspace";
 import { HARD_CHAR_LIMIT, measure } from "@/lib/limits";
@@ -152,6 +155,12 @@ interface ModelAvailability {
 }
 
 interface PromptTemplate {
+  kind?: string | null;
+  systemInstruction?: string | null;
+  temperature?: number | null;
+  topP?: number | null;
+  topK?: number | null;
+  maxTokens?: number | null;
   id: string;
   name: string;
   specialty: string | null;
@@ -162,13 +171,35 @@ interface PromptTemplate {
   userId: string | null;
 }
 
+/** Labels are kept short enough that all six fit one line at 1024px — the
+ *  width this is built for. The full name is each button's tooltip. */
 const FORMATS = [
   { id: "SOAP", label: "SOAP" },
   { id: "ADMISSION_NOTE", label: "Admission" },
   { id: "PROGRESS_NOTE", label: "Progress" },
-  { id: "HOSPITAL_COURSE", label: "Course timeline" },
+  { id: "HOSPITAL_COURSE", label: "Course" },
   { id: "DISCHARGE_SUMMARY", label: "Discharge" },
+  /**
+   * No built-in shape — the saved routine is the whole instruction.
+   *
+   * The five above each carry a compiled-in structure, which is what makes two
+   * notes labelled "SOAP" comparable. A routine that describes its own
+   * headings was previously fighting a set it never asked for; this is the way
+   * out. It requires a routine, because there is nothing else left to say what
+   * the note should be.
+   */
+  { id: "OTHER", label: "Others" },
 ] as const;
+
+/** The full name behind each short button label. */
+const NOTE_FORMAT_TITLES: Record<string, string> = {
+  SOAP: "SOAP note",
+  ADMISSION_NOTE: "Admission note",
+  PROGRESS_NOTE: "Daily progress note",
+  HOSPITAL_COURSE: "Hospital course timeline",
+  DISCHARGE_SUMMARY: "Discharge summary",
+  OTHER: "No built-in shape — runs on a saved routine alone",
+};
 
 const CATEGORY_TINT: Record<string, string> = {
   TAIWAN_ID: "bg-rose-500/10 text-rose-700 dark:text-rose-400",
@@ -234,10 +265,16 @@ const WORKSPACES: {
  */
 const WORKSPACE_KEY = "airlock.workspace.v1";
 const PROMPT_RUN_KEY = "airlock.prompt-run.v1";
+const SAMPLING_KEY = "airlock.sampling.v1";
+const DEID_SAMPLING_KEY = "airlock.deid-sampling.v1";
 
 interface RunSettings {
   workspace: Workspace;
   prompt: PromptRun;
+  /** Applies to whichever model answers, in either workspace. */
+  sampling: Sampling;
+  /** Applies to the de-identification pass. Only reached on a cloud run. */
+  deidSampling: Sampling;
 }
 
 const runListeners = new Set<() => void>();
@@ -258,11 +295,24 @@ function readRunSettings(): RunSettings {
       // Merged field by field: a config written by an older build is missing
       // whatever was added since, and a half-applied one is worse than none.
       prompt: { ...PROMPT_DEFAULTS, ...saved },
+      sampling: {
+        ...SAMPLING_DEFAULTS,
+        ...(JSON.parse(window.localStorage.getItem(SAMPLING_KEY) ?? "{}") as Partial<Sampling>),
+      },
+      deidSampling: {
+        ...DEID_SAMPLING_DEFAULTS,
+        ...(JSON.parse(window.localStorage.getItem(DEID_SAMPLING_KEY) ?? "{}") as Partial<Sampling>),
+      },
     };
   } catch {
     // Private window, disabled storage, or a corrupt entry. The note
     // workspace is the right thing to fall back to — never a half-read prompt.
-    return { workspace: "note", prompt: { ...PROMPT_DEFAULTS } };
+    return {
+      workspace: "note",
+      prompt: { ...PROMPT_DEFAULTS },
+      sampling: { ...SAMPLING_DEFAULTS },
+      deidSampling: { ...DEID_SAMPLING_DEFAULTS },
+    };
   }
 }
 
@@ -271,7 +321,12 @@ function subscribeRunSettings(fn: () => void) {
   // Another tab writing the prompt fires `storage` here, never in the tab that
   // wrote it — hence the explicit notify in `writeRunSettings` too.
   const onStorage = (e: StorageEvent) => {
-    if (e.key === PROMPT_RUN_KEY || e.key === WORKSPACE_KEY) {
+    if (
+      e.key === PROMPT_RUN_KEY ||
+      e.key === WORKSPACE_KEY ||
+      e.key === SAMPLING_KEY ||
+      e.key === DEID_SAMPLING_KEY
+    ) {
       runCache = null;
       runListeners.forEach((l) => l());
     }
@@ -291,6 +346,8 @@ function getRunSettings(): RunSettings {
 const SERVER_RUN_SETTINGS: RunSettings = {
   workspace: "note",
   prompt: { ...PROMPT_DEFAULTS },
+  sampling: { ...SAMPLING_DEFAULTS },
+  deidSampling: { ...DEID_SAMPLING_DEFAULTS },
 };
 
 function getServerRunSettings(): RunSettings {
@@ -302,6 +359,8 @@ function writeRunSettings(next: RunSettings): void {
   try {
     window.localStorage.setItem(PROMPT_RUN_KEY, JSON.stringify(next.prompt));
     window.localStorage.setItem(WORKSPACE_KEY, next.workspace);
+    window.localStorage.setItem(SAMPLING_KEY, JSON.stringify(next.sampling));
+    window.localStorage.setItem(DEID_SAMPLING_KEY, JSON.stringify(next.deidSampling));
   } catch {
     // The setting still applies to this session; it just will not survive.
   }
@@ -325,7 +384,6 @@ async function fetchTemplates(): Promise<PromptTemplate[] | null> {
 export default function AirlockPage() {
   const [input, setInput] = useState("");
   const [format, setFormat] = useState<string>("SOAP");
-  const [instruction, setInstruction] = useState("");
   const [result, setResult] = useState<ProcessNoteResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -346,9 +404,10 @@ export default function AirlockPage() {
   const [templates, setTemplates] = useState<PromptTemplate[]>([]);
   const [activeTemplateId, setActiveTemplateId] = useState<string>("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const liveRef = useRef<HTMLPreElement>(null);
 
   /* --- run mode, remembered per browser -------------------------------- */
-  const { workspace, prompt: promptRun } = useSyncExternalStore(
+  const { workspace, prompt: promptRun, sampling, deidSampling } = useSyncExternalStore(
     subscribeRunSettings,
     getRunSettings,
     getServerRunSettings,
@@ -359,8 +418,21 @@ export default function AirlockPage() {
     writeRunSettings({ ...current, prompt: { ...current.prompt, ...patch } });
   }, []);
 
+  const setSampling = useCallback((patch: Partial<Sampling>) => {
+    const current = getRunSettings();
+    writeRunSettings({ ...current, sampling: { ...current.sampling, ...patch } });
+  }, []);
+
+  const setDeidSampling = useCallback((patch: Partial<Sampling>) => {
+    const current = getRunSettings();
+    writeRunSettings({ ...current, deidSampling: { ...current.deidSampling, ...patch } });
+  }, []);
+
   const chooseWorkspace = useCallback((next: Workspace) => {
     writeRunSettings({ ...getRunSettings(), workspace: next });
+    // A routine belongs to one workspace, so a selection made in the other is
+    // not merely inapplicable — it would be silently ignored at request time.
+    setActiveTemplateId("");
   }, []);
 
   /* --- server public key ---------------------------------------------- */
@@ -533,7 +605,11 @@ export default function AirlockPage() {
   /** In the prompt workspace the prompt IS the input. */
   const hasInput = workspace === "prompt" ? promptRun.prompt.trim().length > 0 : input.trim().length > 0;
 
-  const ready = Boolean(publicKey) && !submitting && hasInput && !size.overHard && !promptError;
+  /** "Others" has no built-in shape, so a routine is the whole instruction. */
+  const routineRequired = workspace === "note" && format === "OTHER" && !activeTemplateId;
+
+  const ready =
+    Boolean(publicKey) && !submitting && hasInput && !size.overHard && !promptError && !routineRequired;
 
   /**
    * A greyed-out primary action with no explanation is a dead end. Say which
@@ -549,32 +625,80 @@ export default function AirlockPage() {
           : "Paste the ward narrative first."
         : size.overHard
           ? `That input is ${size.chars.toLocaleString()} characters. The cap is ${HARD_CHAR_LIMIT.toLocaleString()} — past that the local model starts missing names.`
-          : (promptError ?? "Cmd/Ctrl + Enter");
+          : routineRequired
+            ? 'The "Others" format runs on a saved routine alone — pick one below, or choose a built-in format.'
+            : (promptError ?? "Cmd/Ctrl + Enter");
 
-  const activeTemplate = templates.find((t) => t.id === activeTemplateId) ?? null;
+  /** Routines belong to a workspace; the selector only offers this one's. */
+  const kindOf = (t: PromptTemplate) => (t.kind === "prompt" ? "prompt" : "note");
+  const visibleTemplates = templates.filter((t) => kindOf(t) === workspace);
+  const activeTemplate = visibleTemplates.find((t) => t.id === activeTemplateId) ?? null;
+
+  /**
+   * Selecting a prompt routine loads it into the editor.
+   *
+   * A note routine is *appended* to the prompt at request time and never
+   * touches what is on screen. A prompt routine IS the prompt, so it has to
+   * land in the boxes — otherwise the clinician would be looking at one thing
+   * and running another.
+   */
+  const chooseRoutine = useCallback(
+    (id: string) => {
+      setActiveTemplateId(id);
+      const t = templates.find((x) => x.id === id);
+      if (!t || t.kind !== "prompt") return;
+      setPromptRun({
+        systemInstruction: t.systemInstruction ?? "",
+        prompt: t.instruction,
+      });
+      const patch: Partial<Sampling> = {};
+      if (t.temperature !== null && t.temperature !== undefined) patch.temperature = t.temperature;
+      if (t.topP !== null && t.topP !== undefined) patch.topP = t.topP;
+      if (t.topK !== null && t.topK !== undefined) patch.topK = t.topK;
+      if (t.maxTokens !== null && t.maxTokens !== undefined) patch.maxTokens = t.maxTokens;
+      if (Object.keys(patch).length) setSampling(patch);
+    },
+    [templates, setPromptRun, setSampling],
+  );
 
   /** Live pipeline stages for the current run. */
   const [progress, setProgress] = useState<Map<PipelineStage, ProgressEvent>>(new Map());
   const [wire, setWire] = useState<{ envelope: CryptoEnvelope; plaintext: string } | null>(null);
+  /** Live output from the local model, decrypted, while a run is in flight. */
+  const [live, setLive] = useState<{ stage: PipelineStage; text: string } | null>(null);
+
+  // Follow the output as it arrives, the way a terminal does.
+  useLayoutEffect(() => {
+    const el = liveRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [live]);
   const [wireOpen, setWireOpen] = useState(false);
   const queuedRef = useRef(false);
 
   const runOnce = useCallback(
     async (text: string): Promise<"done" | "busy"> => {
       setProgress(new Map());
+      setLive(null);
       try {
         const out = await runPipeline<ProcessNoteResult>({
           text,
           format,
-          instruction: instruction.trim() || undefined,
           promptId: activeTemplateId || undefined,
           model: chosenModel || undefined,
           workspace,
           promptRun: workspace === "prompt" ? promptRun : undefined,
+          sampling,
+          deidSampling,
           onSealed: (sealed) => {
             setWire(sealed);
             setStage("Sealed in the browser — sending");
           },
+          onStream: (stage, chunk) =>
+            setLive((prev) =>
+              prev && prev.stage === stage
+                ? { stage, text: prev.text + chunk }
+                : { stage, text: chunk },
+            ),
           onProgress: (ev) => {
             setProgress((prev) => {
               const next = new Map(prev);
@@ -587,6 +711,7 @@ export default function AirlockPage() {
           },
         });
         setResult(out);
+        setLive(null);
         void loadModels();
         return "done";
       } catch (e: unknown) {
@@ -597,7 +722,7 @@ export default function AirlockPage() {
         throw e;
       }
     },
-    [format, instruction, activeTemplateId, chosenModel, workspace, promptRun, loadModels],
+    [format, activeTemplateId, chosenModel, workspace, promptRun, sampling, deidSampling, loadModels],
   );
 
   const submit = useCallback(async () => {
@@ -683,9 +808,20 @@ export default function AirlockPage() {
    * question, and it composes with either workspace unchanged.
    */
   const localDestination = isLocalDestination(chosenModel);
+  /** Short name of whatever LM Studio has loaded, for labelling its row. */
+  const localModelName = status?.lmStudio.requestModel?.split("/").pop() ?? null;
+
+  /**
+   * Will this run's output be raw? Before there is a result, that is a
+   * question about the destination you have picked; afterwards it is a fact
+   * about the run that produced it. Both answers matter, because the copy
+   * buttons should already read correctly while you are still typing.
+   */
+  const rawOutput = result ? !result.meta.deidentified : localDestination;
+
 
   return (
-    <div className="flex min-h-full flex-col">
+    <div className="flex min-h-full flex-col lg:h-full lg:min-h-0">
       {/* ---------------- header ---------------- */}
       <header className="sticky top-0 z-20 border-b border-[var(--border)] bg-[var(--surface)]/85 backdrop-blur">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-2 gap-y-1.5 px-3 py-2 sm:px-5">
@@ -810,21 +946,150 @@ export default function AirlockPage() {
 
 
       {/* ---------------- workspace ---------------- */}
-      <main className="mx-auto grid w-full max-w-[1600px] flex-1 grid-cols-1 gap-3 p-3 sm:gap-4 sm:p-5 lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)]">
+      <main className="mx-auto grid w-full max-w-[1600px] flex-1 grid-cols-1 gap-3 p-3 sm:gap-4 sm:p-5 lg:min-h-0 lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)]">
         {/* ---- input ---- */}
         <section className="flex min-h-[60vh] flex-col overflow-hidden panel rounded-lg border border-[var(--border)] bg-[var(--surface)] lg:min-h-0">
           <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2.5">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">
-              {workspace === "prompt" ? "System instruction & prompt" : "Raw narrative"}
+              {/* Short enough not to wrap beside the counter at 1024, which
+                would make this header taller than the other workspace's and
+                move every control below it. */}
+            {workspace === "prompt" ? "Prompt" : "Raw narrative"}
             </h2>
             <WordCounter size={size} />
+          </div>
+
+          {/* EVERY CHOICE ABOVE EVERYTHING YOU WRITE.
+               The page now reads in the order it is used: pick what this run
+               is and which model does it, set what that workspace needs, then
+               write, then press the one button underneath. It also means the
+               only thing below the input is the button — so nothing above it
+               can move when a selector changes. */}
+          <WorkspaceBar
+            workspace={workspace}
+            onChoose={chooseWorkspace}
+            error={promptBannerError}
+            disabled={submitting}
+            localDestination={localDestination}
+          />
+
+          <ModelBar
+            models={models}
+            chosen={chosenModel}
+            onChoose={setChosenModel}
+            disabled={submitting}
+            lmStudio={status?.lmStudio ?? null}
+          />
+
+          {/* ---- what this run produces ----
+               One row, present in both workspaces, so switching cannot change
+               the height of anything below it. */}
+          <div className="flex min-h-[3.25rem] flex-wrap items-center gap-1 border-b border-[var(--border)] px-3 py-2 sm:px-4">
+            {workspace === "note" ? (
+              FORMATS.map((f) => (
+                <button
+                  key={f.id}
+                  title={NOTE_FORMAT_TITLES[f.id]}
+                  onClick={() => setFormat(f.id)}
+                  disabled={submitting}
+                  className={cn(
+                    "rounded border px-2.5 py-1 text-xs transition-colors disabled:cursor-not-allowed",
+                    format === f.id
+                      ? "border-[var(--accent-solid)] bg-[var(--accent-solid)] text-[var(--on-accent)]"
+                      : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
+                  )}
+                >
+                  {f.label}
+                </button>
+              ))
+            ) : (
+              <span className="text-[11px] text-[var(--muted)]">
+                Your prompt decides the shape — there is no format to pick.
+              </span>
+            )}
+          </div>
+
+          {/* ---- sampling, named for the model it drives ----
+               Two rows, both always present so nothing below them moves. The
+               top one is the de-identification pass, which only runs on a
+               cloud-bound note; the bottom one is whichever model answers. A
+               row of unlabelled numbers is a row of numbers nobody can act on,
+               so each says whose it is. */}
+          <SamplingRow
+            icon={ShieldCheck}
+            label={
+              deidentifies(localDestination)
+                ? `De-identification · ${localModelName ?? "local model"}`
+                : "De-identification · not used"
+            }
+            hint={
+              deidentifies(localDestination)
+                ? "The pass that strips identifiers before anything is sent to Google. The prompt is fixed; these are not. Temperature above 0 costs recall — an invented span is discarded, so it buys nothing."
+                : "Nothing is de-identified on a local run, so these do not apply. Pick a Gemini model and they come back."
+            }
+            values={deidSampling}
+            onChange={setDeidSampling}
+            disabled={submitting || !deidentifies(localDestination)}
+          />
+
+          <SamplingRow
+            icon={localDestination ? Cpu : Cloud}
+            label={
+              localDestination
+                ? `Local model · ${localModelName ?? "LM Studio"}`
+                : `Google Gemini · ${chosenModel || "ladder"}`
+            }
+            hint={
+              localDestination
+                ? "Sampling for the model on this Mac — the one that writes the answer."
+                : "Sampling for the Gemini model that writes the answer. Anything left at its off value is not sent, so Google's own default applies."
+            }
+            values={sampling}
+            onChange={setSampling}
+            disabled={submitting}
+          />
+
+          {/* ---- saved routine ---- */}
+          <div className="flex items-center gap-2 border-t border-[var(--border)] px-3 py-1.5 sm:px-4 sm:py-2">
+            <BookMarked className="size-3.5 shrink-0 text-[var(--muted)]" />
+            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+              Saved routine
+            </span>
+            <select
+              aria-label="Saved specialty routine"
+              value={activeTemplateId}
+              onChange={(e) => chooseRoutine(e.target.value)}
+              disabled={submitting}
+              className="min-w-0 flex-1 cursor-pointer truncate bg-transparent text-xs outline-none disabled:cursor-not-allowed disabled:text-[var(--muted)]"
+            >
+              <option value="">
+                {routineRequired ? "Pick one — “Others” has no built-in shape" : "None — no saved routine"}
+              </option>
+              {visibleTemplates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.specialty ? `${t.specialty} — ${t.name}` : t.name}
+                  {t.isDefault ? " (default)" : ""}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => setLibraryOpen(true)}
+              className={cn(
+                "shrink-0 rounded border px-2 py-1 text-[11px]",
+                routineRequired
+                  ? "border-amber-500/40 text-amber-700 dark:text-amber-400"
+                  : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
+              )}
+            >
+              Manage
+            </button>
           </div>
 
           {/* The workspace IS the left panel. A narrative in one, a system
               instruction and a prompt in the other — rather than a narrative
               box that quietly stops meaning "narrative". */}
           {workspace === "prompt" ? (
-            <div className="scroll-visible flex flex-1 flex-col gap-2 overflow-y-auto px-4 py-3">
+            <div className="scroll-visible flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-4 py-3">
               <label className="block shrink-0">
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
                   System instruction
@@ -860,13 +1125,13 @@ export default function AirlockPage() {
                   spellCheck={false}
                   rows={12}
                   placeholder="Ask anything. On Gemini this is de-identified first; on the local model it goes as written."
-                  className="scroll-visible mt-1 block min-h-[22vh] w-full flex-1 resize-y overflow-auto rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 font-mono text-[13px] leading-relaxed outline-none placeholder:text-[var(--muted)]/60 disabled:cursor-not-allowed disabled:text-[var(--muted)]"
+                  className="scroll-visible mt-1 block min-h-[8rem] w-full flex-1 resize-y overflow-auto rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 font-mono text-[13px] leading-relaxed outline-none placeholder:text-[var(--muted)]/60 disabled:cursor-not-allowed disabled:text-[var(--muted)]"
                 />
               </label>
             </div>
           ) : (
             /* Scroll container: the textarea itself grows to fit the note. */
-            <div className="flex-1 overflow-y-auto">
+            <div className="min-h-0 flex-1 overflow-y-auto">
               <textarea
                 ref={textareaRef}
                 value={input}
@@ -878,7 +1143,7 @@ export default function AirlockPage() {
                 placeholder={
                   "Paste or dictate the ward narrative here — names, IDs, dates and MRNs are stripped on this machine before anything reaches the cloud.\n\nCmd/Ctrl + Enter to run."
                 }
-                className="block min-h-[26vh] w-full resize-none overflow-hidden bg-transparent px-4 py-3 font-mono text-[13px] leading-relaxed outline-none placeholder:text-[var(--muted)]/60 md:min-h-[36vh] xl:min-h-[46vh]"
+                className="field-flush block min-h-[26vh] w-full resize-none overflow-hidden bg-transparent px-4 py-3 font-mono text-[13px] leading-relaxed outline-none placeholder:text-[var(--muted)]/60 md:min-h-[36vh] xl:min-h-[46vh]"
               />
             </div>
           )}
@@ -908,98 +1173,7 @@ export default function AirlockPage() {
             </div>
           )}
 
-          {/* ---- extra instruction for this note only ---- */}
-          {workspace === "note" && (
-          <div className="border-t border-[var(--border)] px-3 py-1.5 sm:px-4 sm:py-2">
-            <label className="flex items-center gap-2">
-              <Wand2 className="size-3.5 shrink-0 text-[var(--muted)]" />
-              <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
-                Extra instruction · this note only
-              </span>
-              <input
-                value={instruction}
-                onChange={(e) => setInstruction(e.target.value)}
-                disabled={submitting}
-                placeholder="e.g. 以中文輸出 · emphasise the renal course · keep the plan to one line per problem"
-                className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-[var(--muted)]/60 disabled:cursor-not-allowed disabled:text-[var(--muted)]"
-              />
-            </label>
-          </div>
-          )}
-
-          {/* ---- saved specialty routine ---- */}
-          {workspace === "note" && (
-          <div className="flex items-center gap-2 border-t border-[var(--border)] px-3 py-1.5 sm:px-4 sm:py-2">
-            <BookMarked className="size-3.5 shrink-0 text-[var(--muted)]" />
-            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
-              Saved routine
-            </span>
-            <select
-              aria-label="Saved specialty routine"
-              value={activeTemplateId}
-              onChange={(e) => setActiveTemplateId(e.target.value)}
-              disabled={submitting}
-              className="min-w-0 flex-1 cursor-pointer truncate bg-transparent text-xs outline-none disabled:cursor-not-allowed disabled:text-[var(--muted)]"
-            >
-              <option value="">None — no saved routine</option>
-              {templates.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.specialty ? `${t.specialty} — ${t.name}` : t.name}
-                  {t.isDefault ? " (default)" : ""}
-                </option>
-              ))}
-            </select>
-            <button
-              onClick={() => setLibraryOpen(true)}
-              className="shrink-0 rounded border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] hover:text-[var(--foreground)]"
-            >
-              Manage
-            </button>
-          </div>
-          )}
-
-          {/* Mode sits directly above the model bar: the two together are the
-              whole answer to "what will this run do" — which prompts, and
-              which model. Separating them across the page made the mode strip
-              read as chrome rather than as a setting for the run below it. */}
-          <WorkspaceBar
-            workspace={workspace}
-            onChoose={chooseWorkspace}
-            promptRun={promptRun}
-            onChangePrompt={setPromptRun}
-            error={promptBannerError}
-            disabled={submitting}
-            localDestination={localDestination}
-          />
-
-          <ModelBar
-            models={models}
-            chosen={chosenModel}
-            onChoose={setChosenModel}
-            disabled={submitting}
-            lmStudio={status?.lmStudio ?? null}
-          />
-
-          <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] px-3 py-2 sm:px-4 sm:py-3">
-            <div className="flex flex-wrap gap-1">
-              {workspace === "note" &&
-                FORMATS.map((f) => (
-                <button
-                  key={f.id}
-                  onClick={() => setFormat(f.id)}
-                  disabled={submitting}
-                  className={cn(
-                    "rounded border px-2.5 py-1 text-xs transition-colors disabled:cursor-not-allowed",
-                    format === f.id
-                      ? "border-[var(--accent-solid)] bg-[var(--accent-solid)] text-[var(--on-accent)]"
-                      : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
-                  )}
-                >
-                  {f.label}
-                </button>
-              ))}
-            </div>
-
+          <div className="flex items-center gap-2 border-t border-[var(--border)] px-3 py-2 sm:px-4 sm:py-3">
             <button
               onClick={() => void submit()}
               disabled={!ready}
@@ -1042,7 +1216,11 @@ export default function AirlockPage() {
               <button
                 onClick={() => void copyNote("identified")}
                 disabled={!result}
-                title="The finished note with the real names, MRN and dates put back. This is what goes in the chart."
+                title={
+                  rawOutput
+                    ? "The model's answer, exactly as it came back. Nothing is redacted on a local run, so there is only one version of it."
+                    : "The finished note with the real names, MRN and dates put back. This is what goes in the chart."
+                }
                 className="flex items-center gap-1.5 rounded border border-[var(--accent-solid)] bg-[var(--accent-solid)] px-2 py-1 text-[11px] text-[var(--on-accent)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:border-[var(--border)] disabled:bg-transparent disabled:text-[var(--faint)]"
               >
                 {copied === "identified" ? (
@@ -1052,29 +1230,31 @@ export default function AirlockPage() {
                 )}
                 {copied === "identified"
                   ? "Copied"
-                  : result?.meta.deidentified === false
+                  : rawOutput
                     ? "Copy output"
                     : workspace === "prompt"
                       ? "Copy answer · with names"
                       : "Copy note · with names"}
               </button>
-              <button
-                onClick={() => void copyNote("deidentified")}
-                disabled={!result || !result.meta.deidentified}
-                title={
-                  result?.meta.destination === "local"
-                    ? "The placeholder version — [PATIENT_1], [MRN_1] and so on. This is exactly what the local model was given, and carries no identifiers."
-                    : "The placeholder version — [PATIENT_1], [MRN_1] and so on. This is exactly what was sent to Gemini, and carries no identifiers."
-                }
-                className="flex items-center gap-1.5 rounded border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] disabled:text-[var(--faint)] disabled:hover:text-[var(--faint)]"
-              >
-                {copied === "deidentified" ? (
-                  <CheckCheck className="size-3.5 text-[var(--accent)]" />
-                ) : (
-                  <Copy className="size-3.5" />
-                )}
-                {copied === "deidentified" ? "Copied" : "Copy de-identified"}
-              </button>
+
+              {/* There is no second version of a local run. Nothing was
+                  replaced, so a "de-identified" copy would be the same text
+                  under a name that promises something it did not do. */}
+              {!rawOutput && (
+                <button
+                  onClick={() => void copyNote("deidentified")}
+                  disabled={!result}
+                  title="The placeholder version — [PATIENT_1], [MRN_1] and so on. This is exactly what the formatting model was given, and carries no identifiers."
+                  className="flex items-center gap-1.5 rounded border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--foreground)] disabled:text-[var(--faint)] disabled:hover:text-[var(--faint)]"
+                >
+                  {copied === "deidentified" ? (
+                    <CheckCheck className="size-3.5 text-[var(--accent)]" />
+                  ) : (
+                    <Copy className="size-3.5" />
+                  )}
+                  {copied === "deidentified" ? "Copied" : "Copy de-identified"}
+                </button>
+              )}
             </div>
           </div>
 
@@ -1100,20 +1280,42 @@ export default function AirlockPage() {
                   progress={progress}
                   paused={Boolean(queued)}
                   localDestination={localDestination}
-                  stages={stagesFor(workspace, localDestination)}
+                  stages={stagesFor(localDestination)}
                 />
+
+                {/* The local model writing, as it writes. A minute of spinner
+                    on a large model is indistinguishable from a hang; this is
+                    the difference. Each chunk arrived sealed with the same key
+                    as the result, so nothing is given away by showing it. */}
+                {live && (
+                  <div className="rounded border border-[var(--border)] bg-[var(--background)]">
+                    <div className="flex items-center gap-1.5 border-b border-[var(--border)] px-2.5 py-1.5">
+                      <Cpu className="size-3 shrink-0 text-emerald-700 dark:text-emerald-400" />
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+                        {live.stage === "ner"
+                          ? "Local model — finding identifiers"
+                          : "Local model — writing"}
+                      </span>
+                      <span className="ml-auto font-mono text-[10px] text-[var(--muted)]">
+                        {live.text.length.toLocaleString()} chars
+                      </span>
+                    </div>
+                    <pre
+                      ref={liveRef}
+                      className="scroll-visible max-h-48 overflow-auto whitespace-pre-wrap px-2.5 py-2 font-mono text-[11px] leading-relaxed"
+                    >
+                      {live.text}
+                    </pre>
+                  </div>
+                )}
               </div>
             )}
 
             {!submitting && !error && !result && (
               <p className="text-sm text-[var(--muted)]">
-                {workspace === "prompt" && localDestination
-                  ? "The answer appears here. Nothing is de-identified and nothing is logged — this is your machine talking to your model."
-                  : workspace === "prompt"
-                    ? "The answer appears here with identifiers restored. Your prompt is de-identified before it reaches Google, exactly as a note is."
-                    : localDestination
-                      ? "The formatted note appears here with identifiers restored. Nothing at all leaves this machine — the local model writes it too."
-                      : "The formatted note appears here with identifiers restored. Only placeholder text ever leaves this machine."}
+                {localDestination
+                  ? `${workspace === "prompt" ? "The answer" : "The formatted note"} appears here. Nothing is de-identified and nothing is logged — this is your machine talking to your model.`
+                  : `${workspace === "prompt" ? "The answer" : "The formatted note"} appears here with identifiers restored. Only placeholder text ever leaves this machine.`}
               </p>
             )}
 
@@ -1136,7 +1338,7 @@ export default function AirlockPage() {
               </span>
               {result.meta.destination === "local" && (
                 <span
-                  title="Written by the model on this Mac. The note made no outbound call at all — not even placeholder text left the box."
+                  title="Written by the model on this Mac. No outbound call at all, and no audit row — this run is not in History."
                   className="flex items-center gap-1 text-emerald-700 dark:text-emerald-400"
                 >
                   <Cpu className="size-3" />
@@ -1215,6 +1417,9 @@ export default function AirlockPage() {
       )}
       {libraryOpen && (
         <PromptLibrary
+          workspace={workspace}
+          promptRun={promptRun}
+          sampling={sampling}
           templates={templates}
           onClose={() => setLibraryOpen(false)}
           onChanged={loadTemplates}
@@ -1307,6 +1512,73 @@ function useDrawer(onClose: () => void) {
 /* ------------------------------------------------------------------ */
 
 /**
+ * One labelled row of sampling numbers.
+ *
+ * Used twice — once for the de-identification pass and once for whichever
+ * model answers — because those are two different models doing two different
+ * jobs, and a single unlabelled row of numbers left it ambiguous which was
+ * being tuned.
+ */
+function SamplingRow({
+  icon: Icon,
+  label,
+  hint,
+  values,
+  onChange,
+  disabled,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  hint: string;
+  values: Sampling;
+  onChange: (patch: Partial<Sampling>) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div
+      // Not `opacity`: dimming drags text toward whatever it sits on, and the
+      // contrast audit caught these ten labels at 2.78:1 while a run was in
+      // flight. The disabled state is a quieter COLOUR, which stays legible.
+      className={cn(
+        "flex min-h-[2.75rem] flex-wrap items-center gap-x-1 gap-y-1 border-b border-[var(--border)] px-3 sm:px-4",
+        disabled && "bg-[var(--background)]",
+      )}
+      title={hint}
+    >
+      <Icon className="mr-1 size-3.5 shrink-0 text-[var(--muted)]" />
+      <span className="mr-2 min-w-0 max-w-[13rem] truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+        {label}
+      </span>
+      {SAMPLING_PARAMS.map((param) => (
+        <label
+          key={param.key}
+          className="mr-2 flex items-center gap-1"
+          title={`${param.label} — ${param.hint}`}
+        >
+          <span className="whitespace-nowrap text-[10px] uppercase tracking-wider text-[var(--muted)]">
+            {param.label}
+          </span>
+          <input
+            type="number"
+            aria-label={`${label} ${param.label}`}
+            value={values[param.key]}
+            min={param.min}
+            max={param.max}
+            step={param.step}
+            disabled={disabled}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              if (Number.isFinite(n)) onChange({ [param.key]: n } as Partial<Sampling>);
+            }}
+            className="w-[4rem] rounded border border-[var(--border)] bg-[var(--background)] px-1 py-0.5 text-right font-mono text-[11px] outline-none disabled:cursor-not-allowed disabled:text-[var(--muted)]"
+          />
+        </label>
+      ))}
+    </div>
+  );
+}
+
+/**
  * Which workspace, as a two-state toggle directly above the model bar.
  *
  * These two controls answer the same question between them — what am I doing,
@@ -1320,22 +1592,29 @@ function useDrawer(onClose: () => void) {
 function WorkspaceBar({
   workspace,
   onChoose,
-  promptRun,
-  onChangePrompt,
   error,
   disabled,
   localDestination,
 }: {
   workspace: Workspace;
   onChoose: (workspace: Workspace) => void;
-  promptRun: PromptRun;
-  onChangePrompt: (patch: Partial<PromptRun>) => void;
   error: string | null;
   disabled: boolean;
   localDestination: boolean;
 }) {
   const active = WORKSPACES.find((w) => w.id === workspace) ?? WORKSPACES[0];
-  const raw = workspace === "prompt" && localDestination;
+  // The notice tracks the DESTINATION, because that is what decides what
+  // happens to the text. A local run is raw whichever workspace asked for it.
+  const raw = localDestination;
+  const notice = raw
+    ? {
+        short: "Nothing de-identified, nothing logged — stays on this Mac.",
+        full: "The local model gets your text exactly as written. Nothing leaves this Mac, and no row is written to the note log, so this run will not appear in History. Switch to a Gemini model and the de-identification passes come back automatically.",
+      }
+    : {
+        short: "De-identified on this Mac before anything reaches Google.",
+        full: "Both de-identification passes run here before anything is sent, and the answer is re-hydrated on the way back. The run is refused outright if the local model is not available to do it.",
+      };
 
   return (
     <div className="border-t border-[var(--border)]">
@@ -1376,83 +1655,47 @@ function WorkspaceBar({
           })}
         </div>
 
-        {/* Short enough to be read whole at every supported width; the full
-            sentence is the tooltip. */}
+        {/* The summary and the parameters used to share this space, and at
+            1024px the summary lost it entirely — measured at 0px wide. They
+            do not need to share it: when the parameters are here, the notice
+            directly below already explains the workspace, so the one-line
+            summary has nothing left to say. */}
+        {/* The summary has this space to itself now — the sampling parameters
+            moved up to the settings row, where they sit in the slot the format
+            buttons occupy in the other workspace. Nothing competes, so nothing
+            truncates. */}
         <p
           title={active.blurb}
           className="min-w-0 flex-1 truncate text-[11px] text-[var(--muted)]"
         >
           {active.summary}
         </p>
-
-        {workspace === "prompt" && (
-          <div className="flex shrink-0 items-center gap-2">
-            {PROMPT_PARAMS.map((param) => (
-              <label key={param.key} className="flex items-center gap-1" title={param.hint}>
-                <span className="whitespace-nowrap text-[10px] uppercase tracking-wider text-[var(--muted)]">
-                  {param.key === "temperature" ? "temp" : "max"}
-                </span>
-                <input
-                  type="number"
-                  aria-label={param.label}
-                  value={promptRun[param.key]}
-                  min={param.min}
-                  max={param.max}
-                  step={param.step}
-                  disabled={disabled}
-                  onChange={(e) => {
-                    const n = Number(e.target.value);
-                    if (Number.isFinite(n)) onChangePrompt({ [param.key]: n } as Partial<PromptRun>);
-                  }}
-                  className="w-16 rounded border border-[var(--border)] bg-[var(--background)] px-1.5 py-0.5 text-right font-mono text-[11px] outline-none disabled:cursor-not-allowed disabled:text-[var(--muted)]"
-                />
-              </label>
-            ))}
-          </div>
-        )}
       </div>
 
-      {/* Always mounted so it can animate open and shut, and so switching
-          workspace slides the controls below it rather than teleporting them. */}
-      <div className="reveal" data-open={workspace === "prompt"}>
-        <div>
-          <div
-            className={cn(
-              "border-t px-3 py-2 text-[11px] leading-relaxed sm:px-4",
-              error
-                ? "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
-                : raw
-                  ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
-                  : "border-[var(--border)] bg-[var(--background)] text-[var(--muted)]",
-            )}
-          >
-            <div className="flex items-start gap-2">
-              {error || raw ? (
-                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-              ) : (
-                <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-[var(--accent)]" />
-              )}
-              <span>
-                {error ? (
-                  error
-                ) : raw ? (
-                  <>
-                    <strong className="font-semibold">Nothing is de-identified here.</strong> The
-                    local model gets your prompt exactly as written, nothing leaves this Mac, and
-                    no row is written to the note log. Switch the model to Gemini and the
-                    de-identification passes come back automatically.
-                  </>
-                ) : (
-                  <>
-                    Your prompt is de-identified on this Mac before it reaches Google, and the
-                    answer is re-hydrated on the way back — the same two passes a note gets.
-                    Choose the local model instead and it runs raw.
-                  </>
-                )}
-              </span>
-            </div>
-          </div>
-        </div>
+      {/* ALWAYS PRESENT, ALWAYS ONE LINE.
+          This used to appear and disappear, and inside a panel of fixed height
+          that stole space from the textarea above it — which moved the toggle
+          the moment you pressed it. A line that is always here cannot do that,
+          and it is the most useful line on the page anyway: it says what this
+          particular run will do to your text, in four words or so. */}
+      <div
+        className={cn(
+          "flex items-center gap-2 border-t px-3 py-1.5 text-[11px] sm:px-4",
+          error
+            ? "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
+            : raw
+              ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+              : "border-[var(--border)] bg-[var(--background)] text-[var(--muted)]",
+        )}
+      >
+        {error || raw ? (
+          <AlertTriangle className="size-3.5 shrink-0" />
+        ) : (
+          <ShieldCheck className="size-3.5 shrink-0 text-[var(--accent)]" />
+        )}
+        <span className="min-w-0 flex-1 truncate" title={error ?? notice.full}>
+          {error ?? notice.short}
+        </span>
       </div>
     </div>
   );
@@ -1524,7 +1767,7 @@ function ModelBar({
         )}
         <span className="whitespace-nowrap text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
           {local
-            ? `Writing the note on this Mac${detected ? ` · ${detected}` : ""} — nothing leaves`
+            ? `Running on this Mac${detected ? ` · ${detected}` : ""} — nothing leaves, nothing logged`
             : "Model — cloud ladder falls back rightward"}
         </span>
         {!local && nextUp && nextUp.id !== chosen && (
@@ -1544,7 +1787,7 @@ function ModelBar({
           disabled={disabled || !localReady}
           title={
             localReady
-              ? `${detected} — detected in LM Studio. Writes the note on this Mac: no cloud call, no quota, and both de-identification passes still run.`
+              ? `${detected} — detected in LM Studio. Runs on this Mac: no cloud call, no quota, and no de-identification, because nothing leaves the box.`
               : `${localHint}, so there is no local model to write with.`
           }
           className={cn(
@@ -1553,7 +1796,10 @@ function ModelBar({
               ? "border-[var(--border)] bg-[var(--background)] text-[var(--muted)]"
               : local
                 ? "border-[var(--accent-solid)] bg-[var(--accent-solid)] text-[var(--on-accent)]"
-                : "border-emerald-500/40 text-[var(--muted)] hover:text-[var(--foreground)]",
+                // Plain border when unselected. A green outline on a control
+                // nobody has chosen reads as an alert; the lit dot inside
+                // already says the model was detected.
+                : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
           )}
         >
           {/* Solid dot, not a translucent one: an alpha wash over an off-white
@@ -1643,29 +1889,31 @@ function ModelBar({
         })}
       </div>
 
-      {local && (
-        <p className="mt-1.5 text-[10px] leading-relaxed text-[var(--muted)]">
-          Both de-identification passes still run — the audit log stays de-identified whether or
-          not the cloud is involved. The draft will be weaker than a Flash model, and the run
-          holds the compute slot for two local inferences instead of one.
-        </p>
-      )}
-
-
-
-      {!localReady && (
-        <p className="mt-1.5 text-[10px] leading-relaxed text-rose-700 dark:text-rose-400">
-          {localHint}, so nothing can run: the cloud rungs need it for
-          de-identification, and the local option needs it to answer. Start LM Studio and load a
-          model.
-        </p>
-      )}
-
-      {localReady && !local && !nextUp && (
-        <p className="mt-1.5 text-[10px] text-rose-700 dark:text-rose-400">
-          Every cloud model is spent. Pick Local to keep working until quota resets.
-        </p>
-      )}
+      {/* One line, always — for the same reason the notice above is: a caption
+          that comes and goes changes the height of everything around it. */}
+      <p
+        className={cn(
+          "mt-1.5 truncate text-[10px]",
+          !localReady || (!local && !nextUp)
+            ? "text-rose-700 dark:text-rose-400"
+            : "text-[var(--muted)]",
+        )}
+        title={
+          !localReady
+            ? `${localHint}. The cloud rungs need it for de-identification and the local option needs it to answer.`
+            : local
+              ? "Your text reaches the model as written, and the run leaves no audit row, so it will not appear in History. The draft will be weaker than a Flash model."
+              : "A rung greys out only once Google has actually refused it. If the one you pick is spent by the time you run, the server walks down from there and says so."
+        }
+      >
+        {!localReady
+          ? `${localHint} — nothing can run until it is up.`
+          : local
+            ? "Raw and unlogged. Weaker draft than a Flash model, and no quota to spend."
+            : !nextUp
+              ? "Every cloud model is spent. Pick Local to keep working until quota resets."
+              : "Google never sees an identifier — the local model strips them first."}
+      </p>
     </div>
   );
 }
@@ -2623,16 +2871,31 @@ function HowItWorks({ onClose }: { onClose: () => void }) {
 /* Prompt library                                                      */
 /* ------------------------------------------------------------------ */
 
-const BLANK = { name: "", specialty: "", instruction: "", format: "", isDefault: false };
+const BLANK = {
+  name: "",
+  specialty: "",
+  instruction: "",
+  systemInstruction: "",
+  format: "",
+  isDefault: false,
+};
 
 function PromptLibrary({
   templates,
   onClose,
   onChanged,
+  workspace,
+  promptRun,
+  sampling,
 }: {
   templates: PromptTemplate[];
   onClose: () => void;
   onChanged: () => Promise<void>;
+  /** Which kind of routine this drawer creates. */
+  workspace: Workspace;
+  /** Offered as the starting point for a new prompt routine. */
+  promptRun: PromptRun;
+  sampling: Sampling;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<typeof BLANK>(BLANK);
@@ -2645,14 +2908,29 @@ function PromptLibrary({
     setError(null);
   };
 
+  const isPrompt = workspace === "prompt";
+  const visible = templates.filter((t) => (t.kind === "prompt") === isPrompt);
+
   const startEdit = (t: PromptTemplate) => {
     setEditingId(t.id);
     setDraft({
       name: t.name,
       specialty: t.specialty ?? "",
       instruction: t.instruction,
+      systemInstruction: t.systemInstruction ?? "",
       format: t.format ?? "",
       isDefault: t.isDefault,
+    });
+    setError(null);
+  };
+
+  /** Save what is currently in the workspace as a new routine. */
+  const startFromCurrent = () => {
+    setEditingId(null);
+    setDraft({
+      ...BLANK,
+      instruction: promptRun.prompt,
+      systemInstruction: promptRun.systemInstruction,
     });
     setError(null);
   };
@@ -2664,7 +2942,13 @@ function PromptLibrary({
       const res = await fetch(editingId ? `/api/prompts/${editingId}` : "/api/prompts", {
         method: editingId ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(draft),
+        body: JSON.stringify({
+          ...draft,
+          kind: workspace,
+          // A prompt routine saves the sampling that was on screen with it, so
+          // selecting it later restores the whole run and not just the words.
+          ...(isPrompt ? sampling : {}),
+        }),
       });
       const body = (await res.json()) as { error?: string; detail?: string[] };
       if (!res.ok) {
@@ -2702,7 +2986,9 @@ function PromptLibrary({
           <div>
             <h3 className="text-sm font-semibold">Specialty routines</h3>
             <p className="text-[11px] text-[var(--muted)]">
-              Saved instructions appended to every note. Configuration only — never patient data.
+              {workspace === "prompt"
+                ? "Saved prompts, with their sampling. Configuration only — never patient data."
+                : "Saved instructions appended to every note. Configuration only — never patient data."}
             </p>
           </div>
           <button
@@ -2716,13 +3002,13 @@ function PromptLibrary({
 
         <div className="scroll-visible flex-1 overflow-auto">
           <ul className="divide-y divide-[var(--border)] border-b border-[var(--border)]">
-            {templates.length === 0 && (
+            {visible.length === 0 && (
               <li className="px-4 py-3 text-sm text-[var(--muted)]">
                 No routines yet. Create one below — e.g. a nephrology round that always wants the
                 dialysis access and dry weight called out.
               </li>
             )}
-            {templates.map((t) => (
+            {visible.map((t) => (
               <li key={t.id} className="flex items-start gap-3 px-4 py-2.5">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
@@ -2770,12 +3056,25 @@ function PromptLibrary({
             <div className="flex items-center gap-2">
               <Plus className="size-4 text-[var(--accent)]" />
               <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">
-                {editingId ? "Edit routine" : "New routine"}
+                {editingId
+                  ? "Edit routine"
+                  : workspace === "prompt"
+                    ? "New prompt routine"
+                    : "New note routine"}
               </h4>
-              {editingId && (
+              {editingId ? (
                 <button onClick={startNew} className="ml-auto text-[11px] text-[var(--muted)] underline">
                   cancel edit
                 </button>
+              ) : (
+                workspace === "prompt" && (
+                  <button
+                    onClick={startFromCurrent}
+                    className="ml-auto rounded border border-[var(--border)] px-2 py-0.5 text-[10px] text-[var(--muted)] hover:text-[var(--foreground)]"
+                  >
+                    Use what is on screen
+                  </button>
+                )
               )}
             </div>
 
@@ -2794,6 +3093,22 @@ function PromptLibrary({
               />
             </div>
 
+            {workspace === "prompt" && (
+              <label className="block">
+                <span className="text-[11px] uppercase tracking-wider text-[var(--muted)]">
+                  System instruction
+                </span>
+                <textarea
+                  value={draft.systemInstruction}
+                  onChange={(e) => setDraft({ ...draft, systemInstruction: e.target.value })}
+                  rows={4}
+                  placeholder="You are a careful clinical assistant…"
+                  className="mt-1 w-full resize-y rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 font-mono text-[12px] leading-relaxed outline-none"
+                />
+              </label>
+            )}
+
+            {workspace === "note" && (
             <label className="block">
               <span className="text-[11px] uppercase tracking-wider text-[var(--muted)]">
                 Default note format
@@ -2811,10 +3126,11 @@ function PromptLibrary({
                 ))}
               </select>
             </label>
+            )}
 
             <label className="block">
               <span className="text-[11px] uppercase tracking-wider text-[var(--muted)]">
-                Instruction to Gemini
+                {workspace === "prompt" ? "Prompt" : "Instruction to the model"}
               </span>
               <textarea
                 value={draft.instruction}

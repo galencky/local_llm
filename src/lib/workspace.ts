@@ -14,15 +14,15 @@ import type { PipelineStage } from "./concurrency";
  *   local   the model already loaded in LM Studio
  *
  * ONE RULE
- *   Anything bound for Google is de-identified first, without exception and
- *   failing closed if the local model is unavailable. Nothing else about a run
- *   can switch that off, because it is decided by the destination rather than
- *   by any prompt.
+ *   De-identification happens if and only if the run is bound for Google.
+ *   It reads off the destination alone: the workspace does not enter into it,
+ *   no prompt is consulted, and there is no combination that is an exception.
  *
- * The corollary is what makes the local destination worth having: when nothing
- * leaves the box there is nothing to protect it from. `prompt` + `local` is
- * therefore the one combination that runs raw — no scrubbing, and no audit
- * row, because an audit row would be the only copy of unredacted text anywhere
+ * Cloud runs are de-identified without exception and fail closed if the local
+ * model is not there to do it. Local runs are not de-identified at all —
+ * because nothing leaves the box, and there is nothing to protect it from.
+ * They also write no audit row: there is no de-identified copy of a local run
+ * to store, and storing the raw text would put the only unredacted copy of it
  * on disk. It is your machine talking to your model.
  *
  * This replaced four overlapping controls — a guided/custom toggle, a CUSTOM
@@ -41,42 +41,118 @@ export function isWorkspace(value: unknown): value is Workspace {
 /** Longer than any sane system instruction, shorter than a note. */
 export const MAX_PROMPT_LENGTH = 20000;
 
-/** What a custom-prompt run carries. */
-export interface PromptRun {
-  /** The model's standing instructions. May be empty — not every model needs one. */
-  systemInstruction: string;
-  /** The actual question. Required: there is nothing to run without it. */
-  prompt: string;
+/**
+ * Sampling, for whichever model this run uses.
+ *
+ * One set of numbers, not one per model and not one per workspace. Both
+ * destinations accept all four under different names, and a clinician tuning
+ * "how loose should this be" is asking one question — so they set it once and
+ * the route translates. Where a destination cannot honour one, it is simply
+ * not sent.
+ */
+export interface Sampling {
   temperature: number;
+  /** Nucleus sampling. 1 disables it, and it is then not sent at all. */
+  topP: number;
+  /** Sample from the K likeliest tokens. 0 leaves it to the model. */
+  topK: number;
   maxTokens: number;
 }
 
-export const PROMPT_DEFAULTS: PromptRun = {
-  systemInstruction:
-    "You are a careful clinical assistant. Answer only from what you are given, say when something is not stated, and keep to the register of a hospital chart.",
-  prompt: "",
+export const SAMPLING_DEFAULTS: Sampling = {
+  // 0.2 is the guided default this project has always used for a chart entry:
+  // low enough to be repeatable, not so low that the prose goes stilted.
   temperature: 0.2,
-  maxTokens: 4096,
+  topP: 1,
+  topK: 0,
+  maxTokens: 8192,
 };
 
-export const PROMPT_PARAMS = [
+export const SAMPLING_PARAMS = [
   {
     key: "temperature" as const,
-    label: "Temperature",
+    label: "Temp",
     min: 0,
     max: 2,
     step: 0.05,
     hint: "0 is repeatable, 2 is loose. 0.2 for anything going in a chart.",
   },
   {
+    key: "topP" as const,
+    label: "Top-P",
+    min: 0,
+    max: 1,
+    step: 0.01,
+    hint: "Nucleus sampling: consider only the likeliest tokens summing to P. 1 disables it.",
+  },
+  {
+    key: "topK" as const,
+    label: "Top-K",
+    min: 0,
+    max: 200,
+    step: 1,
+    hint: "Consider only the K likeliest tokens. 0 leaves it to the model.",
+  },
+  {
     key: "maxTokens" as const,
-    label: "Max tokens",
+    label: "Max",
     min: 256,
     max: 32768,
     step: 256,
     hint: "Caps the answer. Too low truncates it mid-sentence.",
   },
 ];
+
+/**
+ * Sampling for the de-identification pass, which is a different job.
+ *
+ * Temperature 0 because any creativity here shows up as invented spans, which
+ * are discarded by the verbatim check — so it costs recall without buying
+ * anything. The token cap is generous because a long shift note can carry 60+
+ * entities and a truncated JSON array fails the run closed.
+ *
+ * The PROMPT is not editable and never will be: it is the de-identification
+ * step itself. The numbers are, because the worst a bad number can do is find
+ * fewer names — which the redaction list shows you — rather than change what
+ * the step is.
+ */
+export const DEID_SAMPLING_DEFAULTS: Sampling = {
+  temperature: 0,
+  topP: 1,
+  topK: 0,
+  maxTokens: 6144,
+};
+
+export function normaliseDeidSampling(raw: unknown): Sampling {
+  const s = normaliseSampling({ ...DEID_SAMPLING_DEFAULTS, ...(raw ?? {}) });
+  // The entity list is the only output, so it needs a smaller ceiling than a
+  // whole note does.
+  return { ...s, maxTokens: Math.min(16384, s.maxTokens) };
+}
+
+export function normaliseSampling(raw: unknown): Sampling {
+  const input = (raw ?? {}) as Record<string, unknown>;
+  return {
+    temperature: clamp(input.temperature, SAMPLING_DEFAULTS.temperature, 0, 2),
+    topP: clamp(input.topP, SAMPLING_DEFAULTS.topP, 0, 1),
+    topK: Math.round(clamp(input.topK, SAMPLING_DEFAULTS.topK, 0, 200)),
+    maxTokens: Math.round(clamp(input.maxTokens, SAMPLING_DEFAULTS.maxTokens, 256, 32768)),
+  };
+}
+
+/** What a custom-prompt run carries, beyond the sampling every run carries. */
+export interface PromptRun {
+  /** The model's standing instructions. May be empty — not every model needs one. */
+  systemInstruction: string;
+  /** The actual question. Required: there is nothing to run without it. */
+  prompt: string;
+}
+
+export const PROMPT_DEFAULTS: PromptRun = {
+  systemInstruction:
+    "You are a careful clinical assistant. Answer only from what you are given, say when something is not stated, and keep to the register of a hospital chart.",
+  prompt: "",
+};
 
 export class PromptRunError extends Error {
   constructor(message: string) {
@@ -126,12 +202,7 @@ export function normalisePromptRun(raw: unknown): PromptRun {
     }
   }
 
-  return {
-    systemInstruction,
-    prompt,
-    temperature: clamp(input.temperature, PROMPT_DEFAULTS.temperature, 0, 2),
-    maxTokens: Math.round(clamp(input.maxTokens, PROMPT_DEFAULTS.maxTokens, 256, 32768)),
-  };
+  return { systemInstruction, prompt };
 }
 
 /* ------------------------------------------------------------------ */
@@ -139,38 +210,48 @@ export function normalisePromptRun(raw: unknown): PromptRun {
 /* ------------------------------------------------------------------ */
 
 /**
- * Does this run de-identify?
+ * Does this run de-identify? Exactly when it is bound for Google.
  *
- * Everything except a custom prompt run locally. Note runs always do, on both
- * destinations, because they produce a chart entry and an audit trail and the
- * audit log's de-identification invariant is not a property of the cloud
- * boundary.
+ * The rule reads off one variable, and that is the whole of it. The workspace
+ * does not enter into it, no prompt is consulted, and there is no combination
+ * that is an exception — which is what makes it a rule rather than a policy
+ * with a table attached.
+ *
+ * Cloud: always, without exception, failing closed if the local model is not
+ * there to do it. Local: never, because nothing leaves the box and there is
+ * nothing to protect it from. The clinician's own machine running the
+ * clinician's own model on the clinician's own patient's notes needs no
+ * intermediary, and pretending otherwise would be theatre.
  */
-export function deidentifies(workspace: Workspace, localDestination: boolean): boolean {
-  return !(workspace === "prompt" && localDestination);
+export function deidentifies(localDestination: boolean): boolean {
+  return !localDestination;
 }
 
 /**
- * Does this run leave a row in the audit log?
+ * Does this run leave a row in the audit log? The same answer, necessarily.
  *
- * Only if it was de-identified. A raw local run has nothing safe to store, and
- * storing it anyway would put the only unredacted copy of the text on disk —
- * which is the exact thing the whole design exists to avoid.
+ * The audit log holds de-identified text only — that is the hard PDPA boundary
+ * the whole design is built around. A local run has no de-identified copy of
+ * itself to store, so it stores nothing: the invariant holds by never writing,
+ * rather than by writing something and hoping it is safe.
+ *
+ * The consequence is worth stating plainly, because it is a real trade: notes
+ * written locally do not appear in History, and leave no audit trail. History
+ * is a record of what crossed to the cloud, which is exactly what it has always
+ * claimed to be.
  */
-export function audits(workspace: Workspace, localDestination: boolean): boolean {
-  return deidentifies(workspace, localDestination);
+export function audits(localDestination: boolean): boolean {
+  return deidentifies(localDestination);
 }
 
 /**
  * The stages this run will actually emit, in order.
  *
  * The progress list is built from this rather than from a fixed array, so a
- * raw local run shows the three steps it performs instead of four greyed-out
- * ones it will never reach.
+ * local run shows the three steps it performs instead of four greyed-out ones
+ * it will never reach.
  */
-export function stagesFor(workspace: Workspace, localDestination: boolean): PipelineStage[] {
-  if (!deidentifies(workspace, localDestination)) {
-    return ["decrypt", "cloud", "seal"];
-  }
+export function stagesFor(localDestination: boolean): PipelineStage[] {
+  if (localDestination) return ["decrypt", "cloud", "seal"];
   return ["decrypt", "regex", "ner", "cloud", "rehydrate", "audit", "seal"];
 }

@@ -16,8 +16,11 @@ script in `scripts/` actually exercises.
 7. [Pass B — the local NER pass](#7-pass-b--the-local-ner-pass)
 8. [The cloud layer and the model ladder](#8-the-cloud-layer-and-the-model-ladder)
 8b. [The local destination](#8b-the-local-destination)
+8c. [Watching the local model work](#8c-watching-the-local-model-work)
 9. [Concurrency: one compute slot](#9-concurrency-one-compute-slot)
 10. [Workspaces, and the one rule](#10-workspaces-and-the-one-rule)
+10b2. [Sampling, and whose it is](#10b2-sampling-and-whose-it-is)
+10c. [Routines, in both workspaces](#10c-routines-in-both-workspaces)
 11. [Authentication](#11-authentication)
 12. [Persistence](#12-persistence)
 13. [The browser client](#13-the-browser-client)
@@ -66,7 +69,7 @@ memory, so a second replica would silently break it.
 | `src/lib/workspace.ts` | The two workspaces, the one privacy rule, and the clamp both sides run |
 | `src/lib/placeholders.ts` | The placeholder-integrity rules every cloud-bound prompt carries |
 | `src/lib/limits.ts` | Input budget, shared by browser and server |
-| `src/lib/prompts.ts` | Routine CRUD plus the guard that keeps PHI out of saved prompts |
+| `src/lib/prompts.ts` | Routine CRUD for both workspaces, plus the guard that keeps PHI out of saved prompts |
 | `src/lib/auth.ts` | Google sign-in and the mandatory allowlist |
 | `src/lib/dev-login.ts` | Rules for the developer password bypass |
 | `src/lib/db.ts` | Lazy Prisma singleton behind a proxy |
@@ -114,11 +117,9 @@ because the payload is assembled client-side.
 safety limit before a performance one: the local model has a bounded context, and
 a note longer than it can attend to starts *missing names*.
 
-**5. Deterministic scrub.** `scrubWithRegex(noteText, vault)` — see
-[section 6](#6-pass-a--the-deterministic-scrubber).
-
-**6. Local NER scrub.** `scrubWithLlm(regexResult.text, vault, custom?.local)` —
-see [section 7](#7-pass-b--the-local-ner-pass). Fails closed by default.
+**5-6. Both scrub passes**, if and only if this run is bound for Google — see
+[sections 6](#6-pass-a--the-deterministic-scrubber) and
+[7](#7-pass-b--the-local-ner-pass). Fails closed by default.
 
 **7. Vault parked.** `storeVault(sessionId, vault)` puts the map in the TTL store
 under a fresh UUID. In practice the request re-hydrates from its own local
@@ -463,18 +464,11 @@ there. Quietly escalating to Google on a local failure would break exactly the
 promise the option exists to make. This is the one place in the pipeline where
 a failure is deliberately *not* routed around.
 
-### The custom-prompt workspace maps onto it
-
-A custom prompt runs through the same local transport, with the two parameters
-the workspace exposes:
-
-| Prompt workspace | Gemini | LM Studio |
-| --- | --- | --- |
-| `temperature` | `temperature` | `temperature` |
-| `maxTokens` | `maxOutputTokens` | `max_tokens` |
+### Prompts and the placeholder kernel
 
 Only a cloud-bound prompt gets the placeholder kernel appended to its system
-instruction; a raw local run has nothing to preserve.
+instruction; a raw local run has nothing to preserve. Sampling for either is
+[section 10b2](#10b2-sampling-and-whose-it-is).
 
 ### Timeouts
 
@@ -533,6 +527,34 @@ loaded, everywhere.
   formatting stage wherever that ran; renaming it would break the wire contract
   and every History row already written.
 
+## 8c. Watching the local model work
+
+A local model writing a discharge summary can take a minute, and a minute of
+spinner is indistinguishable from a hang. Both local calls — the
+de-identification pass and the formatting pass — therefore run with
+`stream: true`, and every delta reaches the browser as it is produced.
+
+**The stream is sealed.** Progress events are plaintext by design: they carry
+stage names and counts and never content. A token stream *is* content, and the
+entity list the de-identifier writes is content of the worst kind — it is
+literally the identifiers. So each flush is encrypted with the same ephemeral
+AES key as the final result, emitted as `event: stream`, and opened in the
+browser with the key it already holds. Cloudflare sees ciphertext either way.
+The acceptance check asserts this directly by reading the raw response body and
+requiring that no identifier appears in it.
+
+**Buffered, not per token.** A GCM seal and a base64 encode per token would cost
+more than the inference. The route accumulates deltas and flushes at most every
+120ms, then forces a final flush when the stage ends.
+
+**Ordered.** The client `await`s each decryption before handing the chunk on;
+two chunks decrypted concurrently can resolve out of order, and the point of a
+live view is that it reads in the order it was written.
+
+Streaming is local-only. The Gemini path returns whole responses, and the
+fallback walk down the ladder assumes it can retry a failed call — which a
+half-streamed answer complicates for no benefit the clinician would notice.
+
 ## 9. Concurrency: one compute slot
 
 `src/lib/concurrency.ts`.
@@ -566,40 +588,46 @@ to hold in your head:
 
 ```
 TWO WORKSPACES     note    a ward narrative becomes a chart entry
-                   prompt  a system instruction and a prompt become an answer
+                   prompt  an instruction and a prompt become an answer
 
 TWO DESTINATIONS   cloud   a rung of the Gemini ladder
                    local   the model already loaded in LM Studio
 
-ONE RULE           anything bound for Google is de-identified first,
-                   without exception, failing closed if the local model
-                   is unavailable to do it
+ONE RULE           de-identification happens if and only if the run is
+                   bound for Google
 ```
 
-| | Note | Custom prompt |
+The rule reads off **one variable**. The workspace does not enter into it, no
+prompt is consulted, and there is no combination that is an exception — which is
+what makes it a rule rather than a policy with a table attached.
+
+|  | Note | Custom prompt |
 | --- | --- | --- |
 | Cloud | scrub → format → re-hydrate → audit | scrub → answer → re-hydrate → audit |
-| Local | scrub → format → re-hydrate → audit | **raw: no scrub, no audit** |
+| Local | **raw: no scrub, no audit** | **raw: no scrub, no audit** |
 
-`deidentifies(workspace, local)`, `audits(workspace, local)` and
-`stagesFor(workspace, local)` are the three functions that encode it, and the
-route, the progress list and the acceptance suite all read them rather than
-re-deriving the rule.
+Three one-line functions encode it, and the route, the progress list and the
+acceptance suites all read them rather than re-deriving it:
 
-### Why the raw combination exists, and why it writes nothing
+```ts
+deidentifies(localDestination)   // !local
+audits(localDestination)         // the same answer, necessarily
+stagesFor(localDestination)      // 3 stages local, 7 cloud
+```
 
-When nothing leaves the box there is nothing to protect it from — that is the
-point of the local destination, and refusing to let a clinician use their own
-model on their own machine would be theatre rather than safety.
+### Why local writes nothing
 
-But it writes **no audit row**, and that is not an oversight. A row would be the
-only unredacted copy of that text anywhere on disk, which is the exact thing the
-rest of the design exists to prevent. The audit log's de-identification
-invariant holds by never writing rather than by writing something safe.
+The audit log holds de-identified text only — the hard PDPA boundary the whole
+design is built around. A local run has no de-identified copy of itself to
+store, so it stores nothing: the invariant holds by **never writing**, rather
+than by writing something and hoping it is safe.
 
-Note runs always de-identify, on both destinations, for the same reason: they
-produce a chart entry and an audit trail, and History has to stay safe to open
-in front of somebody.
+The consequence is a real trade and is stated on screen while it applies: notes
+written locally do not appear in History and leave no audit trail. History is a
+record of what crossed to the cloud, which is what it has always claimed to be.
+
+The acceptance suite asserts this from both sides — it counts the rows before
+and after a local run and requires the count to be unchanged.
 
 ### Two strings, one set of tokens
 
@@ -615,19 +643,105 @@ Running the model twice would double the slowest stage in the pipeline. Joining
 and splitting the *text* would be fragile, because the replacements change its
 length. Applying the vault to each original is neither.
 
+### The "Others" format
+
+`NOTE_FORMATS.OTHER` carries no compiled-in skeleton. The other five each
+impose a structure, which is what makes two notes labelled "SOAP" comparable; a
+routine that describes its own headings was previously fighting a structure it
+never asked for.
+
+A run in this format therefore **requires a routine** — there is nothing else
+left to say what the note should look like — and the route refuses it with
+`ROUTINE_REQUIRED` rather than falling back to a shape nobody chose. Same rule
+as everywhere else in this codebase: refuse rather than silently default.
+
+`BUILT_IN_FORMATS` is derived by filtering on an empty skeleton, and **must be
+declared below `FORMAT_INSTRUCTIONS`** — declaring it above threw a
+`ReferenceError` out of the temporal dead zone the moment anything imported
+`gemini.ts`, which presented as `isNoteFormat("OTHER")` quietly returning false
+and the format falling back to SOAP.
+
 ### What replaced what
 
 This collapsed four controls that could all express "I want to write the prompt
-myself": a guided/custom toggle, a `CUSTOM` note format, a saved routine and a
-free-text steer. Custom mode's per-model sampling parameters went with it; the
-prompt workspace keeps two (temperature, max tokens) where they are visible
-beside the thing they affect.
+myself": a guided/custom toggle, a `CUSTOM` note format, and per-model sampling
+parameters across two tabs. The free-text "extra instruction" box went too — a
+saved routine does the same job, is screened for patient data on write, and is
+named on every audit row, which a free-text box was not.
 
 The de-identification prompt is no longer editable by anyone. It was editable in
-custom mode, guarded by four properties that could not be switched off — which
-is a lot of machinery to make a dangerous setting safe, for a setting nobody
-needed. It is the de-identification step itself; making it configurable makes
-the safety property configurable.
+custom mode, guarded by four properties that could not be switched off — a lot
+of machinery to make a dangerous setting safe, for a setting nobody needed. It
+is the de-identification step itself; making it configurable makes the safety
+property configurable.
+
+## 10b2. Sampling, and whose it is
+
+Two sets of numbers, because two different models do two different jobs, and a
+single unlabelled row left it ambiguous which was being tuned. Each row in the
+interface names the model it drives.
+
+| Row | Applies to | When |
+| --- | --- | --- |
+| **De-identification** | the LM Studio model, named | only on a cloud-bound run — a local run does not de-identify, and the row says so and is disabled |
+| **Google Gemini** / **Local model** | whichever model answers, named | always |
+
+One `Sampling` shape for both, translated at the edge:
+
+| | Gemini | LM Studio |
+| --- | --- | --- |
+| `temperature` | `temperature` | `temperature` |
+| `topP` | `topP` (sent when < 1) | `top_p` (sent when < 1) |
+| `topK` | `topK` (sent when > 0) | `top_k` (sent when > 0) |
+| `maxTokens` | `maxOutputTokens` | `max_tokens` |
+
+Anything left at its off value is **not sent at all**, so the model's own
+default applies rather than a number that only looks deliberate.
+
+**The de-identification PROMPT is still not editable, and never will be** — it
+is the de-identification step itself. Its *numbers* are, because the worst a
+bad number can do is find fewer names, which the redaction list shows you,
+rather than change what the step is. The defaults are temperature 0 (creativity
+here shows up as invented spans, which the verbatim check discards, so it costs
+recall and buys nothing) and 6144 tokens (a long shift note can carry 60+
+entities and a truncated array fails the run closed).
+
+Both sets are clamped server-side in `normaliseSampling` /
+`normaliseDeidSampling`, on every request, for the usual reason: the payload is
+assembled in the browser.
+
+## 10c. Routines, in both workspaces
+
+One table, `PromptTemplate`, with a `kind` discriminator:
+
+| | `kind = "note"` | `kind = "prompt"` |
+| --- | --- | --- |
+| `instruction` | the charting instruction, appended to the built-in skeleton | the prompt itself |
+| `systemInstruction` | unused | the model's standing instructions |
+| `format` | the note shape it defaults to | unused |
+| `temperature`/`topP`/`topK`/`maxTokens` | optional overrides | optional overrides |
+
+Every added column is nullable or defaulted, so every row written before this
+existed still means what it meant: a note routine with no saved sampling. The
+migration is additive only.
+
+**They behave differently on selection, and they have to.** A note routine is
+*appended to the prompt at request time* and never touches what is on screen. A
+prompt routine **is** the prompt, so selecting it loads the system instruction,
+the prompt and any saved sampling into the editor — otherwise the clinician
+would be looking at one thing and running another.
+
+**Both bodies are PII-screened.** `assertNoPii` covers `systemInstruction` as
+well as `instruction`: a saved prompt is no less permanent than a saved
+charting instruction, and both live in Postgres forever.
+
+**`isDefault` is per kind.** One preselected routine for notes and one for
+prompts, rather than one across both — they are never offered at the same time.
+
+**A prompt routine is named on the audit row** exactly as a note routine is,
+so a cloud run can still be traced to the instructions that produced it. A
+custom prompt with no routine attached records
+`"Custom prompt — not stored"`.
 
 ## 11. Authentication
 
@@ -732,6 +846,33 @@ minimal frame parser (`EventSource` cannot issue a POST). On
 - **The Prompts drawer reads `/api/prompt-config` live** on every open, so the
   prompts it shows are the ones the running server would send, and the local
   model name is the one LM Studio actually has loaded.
+- **Nothing you choose sits below what you write.** Every selector — mode,
+  model, settings, routine — is above the input, and the only control below it
+  is the run button. The page then reads in the order it is used, and, because
+  the input is the flexible element in a fixed-height panel, a selector
+  appearing or disappearing cannot move anything: it is absorbed by the box you
+  are typing into.
+
+  This was measured. Before it, switching workspace moved the mode toggle 78px
+  at 1024px and the model bar with it. After: **zero drift at 1024, 1280, 1440
+  and 1920**, in both workspaces.
+
+  Three things make it hold, and all three are easy to undo by accident:
+  `lg:h-full` on `<body>` and the page root, so the height is *definite* and
+  `flex-1` has something to distribute; `min-h-0` on the input container, so it
+  can actually shrink; and a settings row that is present in both workspaces
+  (note formats, or prompt parameters) rather than appearing in one.
+- **A focus ring on a full-bleed control reads as a stray rule.** The narrative
+  box has no border of its own and fills a clipping scroll container, so the
+  global `outline: 2px solid var(--accent); outline-offset: 2px` was sliced by
+  the container and appeared as a teal line across the workspace whenever
+  anyone clicked into it. Bordered boxes now ring *inside* themselves
+  (`outline-offset: -2px`, so nothing can clip it); the flush one has
+  `.field-flush` and no ring at all, with the caret as its focus indicator.
+- **A notice that comes and goes moves everything around it.** The privacy
+  notice under the toggle and the caption under the model bar are both always
+  present and always exactly one line. Their text changes; their height does
+  not.
 - **Text in a shared row is budgeted, not just truncated.** `truncate` stops a
   row wrapping, but a flex item that shrinks to nothing produces a worse
   result than wrapping did: the mode blurb was cut to "You write…" — 11% of it
@@ -925,7 +1066,7 @@ failure if something else is mid-run. Sections:
 | 3 | PHI guard — a routine carrying patient data is rejected 422 and names the categories |
 | 4 | Input cap |
 | 5 | A full ward note: every stage streams, stages arrive in order, no identifier reached the cloud, clinical content preserved, every emitted token restored, both scrub passes contributed |
-| 5b | The local destination: the note is written on this Mac, recorded as `local:…`, still fully de-identified in the audit row, and every emitted token restored |
+| 5b | The local destination: written on this Mac, recorded as `local:…`, **not** de-identified, and leaving the note log exactly as long as it found it |
 | 6 | The same note with a routine, and the routine's effect on the output |
 | 6b | The EMR-export shapes that leaked in real use |
 | 7 | Audit invariant — no row contains any identifier, scanned across the whole table |
@@ -974,7 +1115,7 @@ and all six drawers — in both themes. It composites through alpha layers and
 Widening it from "controls" to "all text", and from resting to in-flight states,
 turned 0 known problems into 135 — which were three causes, not 135 bugs:
 `opacity` used to dim text, Tailwind `-600`/`-500` shades on white, and
-`animate-pulse` on a label. Current state: **2,199 text nodes, zero below AA,
+`animate-pulse` on a label. Current state: **2,632 text nodes, zero below AA,
 both themes**, across sixteen surfaces including both mode states.
 
 It waited on the wrong signal for a long time. "Copy note · with names" is
@@ -1027,7 +1168,8 @@ count, degraded-scrub policy, build id, dev-login policy.
 | A model chip greys out unexpectedly | Google refused it and the cooldown persisted | `select * from "ModelCooldown"` |
 | The **Local** chip is greyed out | LM Studio is unreachable, so there is no local model to write with | `curl $LMSTUDIO_BASE_URL/models`; the header badge says the same |
 | `LOCAL_FORMAT_FAILED` after a long wait | The local model exceeded `LMSTUDIO_FORMAT_TIMEOUT_MS` | Shorten the note or raise it. It is deliberately not retried against Gemini. |
-| A local run is much slower than a cloud one | It is two local inferences on one compute slot, not one | Expected; `meta.scrubMs` and `meta.geminiMs` split it |
+| A local run produced no History entry | By design — a local run writes no audit row | [Section 10](#10-workspaces-and-the-one-rule); send it to Gemini if you need the record |
+| `ROUTINE_REQUIRED` | The "Others" format was chosen with no routine attached | Pick a routine, or one of the five built-in formats |
 | The note arrives from a lighter model | The ladder walked down | The amber footer and `AuditLog.modelUsed` both say which |
 | `DECRYPT_FAILED` | The keypair rotated under an open tab | The client retries once with a fresh key; if it persists, `.keys/` was not persisted |
 | Placeholders left in the finished note | The cloud model renumbered or dropped them | `meta.unresolvedTokens`; confirm the placeholder kernel reached the system instruction |
