@@ -91,6 +91,12 @@ export class TokenVault {
     return token;
   }
 
+  /** Has this exact string already been assigned a token, under any category? */
+  knows(original: string): boolean {
+    for (const pii of this.tokenToPii.values()) if (pii === original) return true;
+    return false;
+  }
+
   get size(): number {
     return this.tokenToPii.size;
   }

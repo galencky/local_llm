@@ -94,6 +94,14 @@ model AuditLog {
   deidentifiedOutput String   @db.Text
   modelUsed          String
   processingTimeMs   Int
+  /// Whether the deterministic pattern pass ran for this note.
+  ///
+  /// It can be switched off for a cloud run, which leaves the local model
+  /// alone responsible for every identifier. Recorded because a note whose
+  /// de-identification worked differently has to be traceable as such —
+  /// defaulted true so every row written before the switch existed says what
+  /// was true of it.
+  patternScrub       Boolean  @default(true)
   /// Name of the prompt template in effect, kept as plain text so the audit
   /// row survives the template being renamed or deleted.
   promptTemplateName String?

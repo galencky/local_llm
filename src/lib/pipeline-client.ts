@@ -123,6 +123,11 @@ export interface RunOptions {
   sampling?: Sampling;
   /** Sampling for the de-identification pass. Ignored on a local run. */
   deidSampling?: Sampling;
+  /**
+   * Run the deterministic pattern pass? Defaults to true server-side, so a
+   * client that says nothing gets the safer behaviour. Ignored on a local run.
+   */
+  patternScrub?: boolean;
   onProgress?: (event: ProgressEvent) => void;
   /**
    * Live output from the local model, already decrypted.
@@ -175,6 +180,7 @@ async function attempt<T>(opts: RunOptions, bustKeyCache: boolean): Promise<T> {
     promptRun: opts.promptRun ?? undefined,
     sampling: opts.sampling,
     deidSampling: opts.deidSampling,
+    patternScrub: opts.patternScrub,
   });
   const { envelope, aesKey } = await sealRequest(publicKey, plaintext);
   opts.onSealed?.({ envelope, plaintext });

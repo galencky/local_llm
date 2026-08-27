@@ -200,6 +200,14 @@ alone, so a routine that describes its own headings is not fighting a structure
 it never asked for. In Custom prompt your prompt is the shape, so there is
 nothing to pick.
 
+**Pattern rules.** A switch on the de-identification row, for cloud runs only.
+On by default: national IDs, MRNs, phone numbers and dates are removed
+deterministically before the model looks. They are deliberately over-eager
+though — a bed number can read as a date — so you can turn them off and let the
+local model alone find everything. Doing that is marked on screen while it is
+off and recorded on the audit row, because it is a real weakening: the rules are
+certain where the model is probabilistic.
+
 **Sampling.** Two labelled rows, so it is never ambiguous which model you are
 tuning. The first is the **de-identification pass**, named for the LM Studio
 model doing it — it applies only to a cloud-bound run, and says so and greys out
@@ -219,6 +227,10 @@ system instruction, the prompt and the sampling together, so selecting it
 restores the whole run rather than just the words. Routines are screened for
 patient data when you save them and refused if any is found, because they live
 in Postgres forever.
+
+**Reading the result.** The output pane renders what models actually emit —
+headings, nested lists, tables of labs, fenced blocks, quotes, inline code —
+rather than showing asterisks and pipes in the middle of a chart entry.
 
 **Watching it work.** When the local model is writing — whether it is finding
 identifiers or answering a prompt — you see the text appear as it is produced,

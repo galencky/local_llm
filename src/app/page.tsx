@@ -92,6 +92,7 @@ interface ProcessNoteResult {
     workspace: "note" | "prompt";
     /** False only for a raw local prompt — the one run that is not scrubbed. */
     deidentified: boolean;
+    patternScrub: boolean;
     modelFallbacks: { model: string; reason: string }[];
     processingTimeMs: number;
     scrubMs: number;
@@ -267,6 +268,7 @@ const WORKSPACE_KEY = "airlock.workspace.v1";
 const PROMPT_RUN_KEY = "airlock.prompt-run.v1";
 const SAMPLING_KEY = "airlock.sampling.v1";
 const DEID_SAMPLING_KEY = "airlock.deid-sampling.v1";
+const PATTERN_SCRUB_KEY = "airlock.pattern-scrub.v1";
 
 interface RunSettings {
   workspace: Workspace;
@@ -275,6 +277,8 @@ interface RunSettings {
   sampling: Sampling;
   /** Applies to the de-identification pass. Only reached on a cloud run. */
   deidSampling: Sampling;
+  /** Run the deterministic pattern pass? Cloud runs only. */
+  patternScrub: boolean;
 }
 
 const runListeners = new Set<() => void>();
@@ -303,6 +307,9 @@ function readRunSettings(): RunSettings {
         ...DEID_SAMPLING_DEFAULTS,
         ...(JSON.parse(window.localStorage.getItem(DEID_SAMPLING_KEY) ?? "{}") as Partial<Sampling>),
       },
+      // Only an explicit "off" turns it off. A missing or corrupt value means
+      // on, because on is the safer of the two.
+      patternScrub: window.localStorage.getItem(PATTERN_SCRUB_KEY) !== "off",
     };
   } catch {
     // Private window, disabled storage, or a corrupt entry. The note
@@ -312,6 +319,7 @@ function readRunSettings(): RunSettings {
       prompt: { ...PROMPT_DEFAULTS },
       sampling: { ...SAMPLING_DEFAULTS },
       deidSampling: { ...DEID_SAMPLING_DEFAULTS },
+      patternScrub: true,
     };
   }
 }
@@ -325,7 +333,8 @@ function subscribeRunSettings(fn: () => void) {
       e.key === PROMPT_RUN_KEY ||
       e.key === WORKSPACE_KEY ||
       e.key === SAMPLING_KEY ||
-      e.key === DEID_SAMPLING_KEY
+      e.key === DEID_SAMPLING_KEY ||
+      e.key === PATTERN_SCRUB_KEY
     ) {
       runCache = null;
       runListeners.forEach((l) => l());
@@ -348,6 +357,7 @@ const SERVER_RUN_SETTINGS: RunSettings = {
   prompt: { ...PROMPT_DEFAULTS },
   sampling: { ...SAMPLING_DEFAULTS },
   deidSampling: { ...DEID_SAMPLING_DEFAULTS },
+  patternScrub: true,
 };
 
 function getServerRunSettings(): RunSettings {
@@ -361,6 +371,7 @@ function writeRunSettings(next: RunSettings): void {
     window.localStorage.setItem(WORKSPACE_KEY, next.workspace);
     window.localStorage.setItem(SAMPLING_KEY, JSON.stringify(next.sampling));
     window.localStorage.setItem(DEID_SAMPLING_KEY, JSON.stringify(next.deidSampling));
+    window.localStorage.setItem(PATTERN_SCRUB_KEY, next.patternScrub ? "on" : "off");
   } catch {
     // The setting still applies to this session; it just will not survive.
   }
@@ -407,7 +418,13 @@ export default function AirlockPage() {
   const liveRef = useRef<HTMLPreElement>(null);
 
   /* --- run mode, remembered per browser -------------------------------- */
-  const { workspace, prompt: promptRun, sampling, deidSampling } = useSyncExternalStore(
+  const {
+    workspace,
+    prompt: promptRun,
+    sampling,
+    deidSampling,
+    patternScrub,
+  } = useSyncExternalStore(
     subscribeRunSettings,
     getRunSettings,
     getServerRunSettings,
@@ -426,6 +443,10 @@ export default function AirlockPage() {
   const setDeidSampling = useCallback((patch: Partial<Sampling>) => {
     const current = getRunSettings();
     writeRunSettings({ ...current, deidSampling: { ...current.deidSampling, ...patch } });
+  }, []);
+
+  const setPatternScrub = useCallback((on: boolean) => {
+    writeRunSettings({ ...getRunSettings(), patternScrub: on });
   }, []);
 
   const chooseWorkspace = useCallback((next: Workspace) => {
@@ -689,6 +710,7 @@ export default function AirlockPage() {
           promptRun: workspace === "prompt" ? promptRun : undefined,
           sampling,
           deidSampling,
+          patternScrub,
           onSealed: (sealed) => {
             setWire(sealed);
             setStage("Sealed in the browser — sending");
@@ -722,7 +744,7 @@ export default function AirlockPage() {
         throw e;
       }
     },
-    [format, activeTemplateId, chosenModel, workspace, promptRun, sampling, deidSampling, loadModels],
+    [format, activeTemplateId, chosenModel, workspace, promptRun, sampling, deidSampling, patternScrub, loadModels],
   );
 
   const submit = useCallback(async () => {
@@ -968,6 +990,7 @@ export default function AirlockPage() {
           <WorkspaceBar
             workspace={workspace}
             onChoose={chooseWorkspace}
+            patternScrub={patternScrub}
             error={promptBannerError}
             disabled={submitting}
             localDestination={localDestination}
@@ -1030,7 +1053,45 @@ export default function AirlockPage() {
             values={deidSampling}
             onChange={setDeidSampling}
             disabled={submitting || !deidentifies(localDestination)}
-          />
+          >
+            {/* The deterministic pass, as a switch rather than a law.
+                It is high-precision and over-eager by design — that is the
+                trade — and on some notes the over-eagerness costs more than it
+                saves: a bed number reads as a month/day, an accession number
+                reads as an MRN. Off, the local model alone is responsible for
+                every identifier, including the structured ones the rules would
+                have caught for certain. Marked, warned about, and recorded on
+                the audit row. */}
+            <label
+              className={cn(
+                "mr-3 flex shrink-0 items-center gap-1.5",
+                deidentifies(localDestination) ? "cursor-pointer" : "cursor-not-allowed",
+              )}
+              title={
+                patternScrub
+                  ? "Pattern rules ON: Taiwan IDs, MRNs, phone numbers and dates are removed deterministically before the model looks. Deliberately over-eager — a bed number can read as a date."
+                  : "Pattern rules OFF: the local model alone must catch every identifier, including the structured ones the rules would have caught for certain. Recorded on the audit row."
+              }
+            >
+              <input
+                type="checkbox"
+                checked={patternScrub}
+                disabled={submitting || !deidentifies(localDestination)}
+                onChange={(e) => setPatternScrub(e.target.checked)}
+                className="size-3.5 shrink-0 accent-[var(--accent-solid)] disabled:cursor-not-allowed"
+              />
+              <span
+                className={cn(
+                  "whitespace-nowrap text-[10px] uppercase tracking-wider",
+                  !patternScrub && deidentifies(localDestination)
+                    ? "font-semibold text-amber-700 dark:text-amber-400"
+                    : "text-[var(--muted)]",
+                )}
+              >
+                Patterns
+              </span>
+            </label>
+          </SamplingRow>
 
           <SamplingRow
             icon={localDestination ? Cpu : Cloud}
@@ -1280,7 +1341,7 @@ export default function AirlockPage() {
                   progress={progress}
                   paused={Boolean(queued)}
                   localDestination={localDestination}
-                  stages={stagesFor(localDestination)}
+                  stages={stagesFor(localDestination, patternScrub)}
                 />
 
                 {/* The local model writing, as it writes. A minute of spinner
@@ -1351,6 +1412,14 @@ export default function AirlockPage() {
                   className="text-amber-700 dark:text-amber-400"
                 >
                   custom prompt
+                </span>
+              )}
+              {result.meta.deidentified && !result.meta.patternScrub && (
+                <span
+                  title="This note ran with the deterministic pattern rules switched off — the local model alone was responsible for every identifier. The audit row records it."
+                  className="text-amber-700 dark:text-amber-400"
+                >
+                  no pattern rules
                 </span>
               )}
               {!result.meta.deidentified && (
@@ -1526,6 +1595,7 @@ function SamplingRow({
   values,
   onChange,
   disabled,
+  children,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
@@ -1533,6 +1603,8 @@ function SamplingRow({
   values: Sampling;
   onChange: (patch: Partial<Sampling>) => void;
   disabled: boolean;
+  /** An extra control belonging to this row, shown before the numbers. */
+  children?: React.ReactNode;
 }) {
   return (
     <div
@@ -1546,9 +1618,10 @@ function SamplingRow({
       title={hint}
     >
       <Icon className="mr-1 size-3.5 shrink-0 text-[var(--muted)]" />
-      <span className="mr-2 min-w-0 max-w-[13rem] truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+      <span className="mr-2 min-w-0 max-w-[11rem] truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
         {label}
       </span>
+      {children}
       {SAMPLING_PARAMS.map((param) => (
         <label
           key={param.key}
@@ -1595,26 +1668,35 @@ function WorkspaceBar({
   error,
   disabled,
   localDestination,
+  patternScrub,
 }: {
   workspace: Workspace;
   onChoose: (workspace: Workspace) => void;
   error: string | null;
   disabled: boolean;
   localDestination: boolean;
+  /** False turns the notice into a warning: the rules are not running. */
+  patternScrub: boolean;
 }) {
   const active = WORKSPACES.find((w) => w.id === workspace) ?? WORKSPACES[0];
   // The notice tracks the DESTINATION, because that is what decides what
   // happens to the text. A local run is raw whichever workspace asked for it.
   const raw = localDestination;
+  const warn = raw || !patternScrub;
   const notice = raw
     ? {
         short: "Nothing de-identified, nothing logged — stays on this Mac.",
         full: "The local model gets your text exactly as written. Nothing leaves this Mac, and no row is written to the note log, so this run will not appear in History. Switch to a Gemini model and the de-identification passes come back automatically.",
       }
-    : {
-        short: "De-identified on this Mac before anything reaches Google.",
-        full: "Both de-identification passes run here before anything is sent, and the answer is re-hydrated on the way back. The run is refused outright if the local model is not available to do it.",
-      };
+    : patternScrub
+      ? {
+          short: "De-identified on this Mac before anything reaches Google.",
+          full: "Both de-identification passes run here before anything is sent, and the answer is re-hydrated on the way back. The run is refused outright if the local model is not available to do it.",
+        }
+      : {
+          short: "Pattern rules off — the local model alone must catch every identifier.",
+          full: "The deterministic pass is switched off, so IDs, MRNs, phone numbers and dates are no longer removed for certain before the model looks — the local model has to find them, and it is probabilistic where the rules were not. Read the redaction list before filing. The audit row records that this note ran without them.",
+        };
 
   return (
     <div className="border-t border-[var(--border)]">
@@ -1683,12 +1765,12 @@ function WorkspaceBar({
           "flex items-center gap-2 border-t px-3 py-1.5 text-[11px] sm:px-4",
           error
             ? "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
-            : raw
+            : warn
               ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
               : "border-[var(--border)] bg-[var(--background)] text-[var(--muted)]",
         )}
       >
-        {error || raw ? (
+        {error || warn ? (
           <AlertTriangle className="size-3.5 shrink-0" />
         ) : (
           <ShieldCheck className="size-3.5 shrink-0 text-[var(--accent)]" />
@@ -3209,64 +3291,265 @@ function Field({
  * no path to injected markup. "Copy clean note" still yields raw Markdown,
  * which is what an EMR paste target wants.
  */
+/**
+ * Inline markdown: code, bold, italic, strikethrough, links.
+ *
+ * One pass, one alternation, so the pieces cannot fight each other — a naive
+ * chain of `split`s turns `**a `b` c**` into nonsense. Everything is rendered
+ * as React children, never as HTML, so a model cannot emit markup that runs.
+ */
 function inline(text: string, keyBase: string): React.ReactNode[] {
-  return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) =>
-    part.startsWith("**") && part.endsWith("**") && part.length > 4 ? (
-      <strong key={`${keyBase}-${i}`} className="font-semibold text-[var(--foreground)]">
-        {part.slice(2, -2)}
-      </strong>
-    ) : (
-      <span key={`${keyBase}-${i}`}>{part}</span>
-    ),
-  );
+  const pattern =
+    /(`[^`]+`)|(\*\*\*[^*]+\*\*\*)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)|(__[^_]+__)|(_[^_\n]+_)|(~~[^~]+~~)|(\[[^\]]+\]\([^)\s]+\))/g;
+  const out: React.ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let i = 0;
+
+  const push = (node: React.ReactNode) => out.push(node);
+
+  while ((m = pattern.exec(text)) !== null) {
+    if (m.index > last) push(<span key={`${keyBase}-t${i++}`}>{text.slice(last, m.index)}</span>);
+    const tok = m[0];
+    const key = `${keyBase}-m${i++}`;
+
+    if (tok.startsWith("`")) {
+      push(
+        <code
+          key={key}
+          className="rounded bg-[var(--border)]/50 px-1 py-0.5 font-mono text-[0.95em]"
+        >
+          {tok.slice(1, -1)}
+        </code>,
+      );
+    } else if (tok.startsWith("***")) {
+      push(
+        <strong key={key} className="font-semibold italic text-[var(--foreground)]">
+          {tok.slice(3, -3)}
+        </strong>,
+      );
+    } else if (tok.startsWith("**") || tok.startsWith("__")) {
+      push(
+        <strong key={key} className="font-semibold text-[var(--foreground)]">
+          {tok.slice(2, -2)}
+        </strong>,
+      );
+    } else if (tok.startsWith("~~")) {
+      push(
+        <span key={key} className="line-through decoration-[var(--muted)]">
+          {tok.slice(2, -2)}
+        </span>,
+      );
+    } else if (tok.startsWith("[")) {
+      const split = tok.indexOf("](");
+      const label = tok.slice(1, split);
+      const href = tok.slice(split + 2, -1);
+      // Only http(s). A model emitting `javascript:` is not a threat we have
+      // to render.
+      push(
+        /^https?:\/\//i.test(href) ? (
+          <a
+            key={key}
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline decoration-[var(--muted)] underline-offset-2 hover:text-[var(--accent)]"
+          >
+            {label}
+          </a>
+        ) : (
+          <span key={key}>{label}</span>
+        ),
+      );
+    } else {
+      push(
+        <em key={key} className="italic">
+          {tok.slice(1, -1)}
+        </em>,
+      );
+    }
+    last = m.index + tok.length;
+  }
+  if (last < text.length) push(<span key={`${keyBase}-t${i++}`}>{text.slice(last)}</span>);
+  return out;
 }
 
+/** A pipe-table row split into cells, with the outer pipes discarded. */
+function tableCells(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\||\|$/g, "")
+    .split("|")
+    .map((c) => c.trim());
+}
+
+const TABLE_DIVIDER = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+
+/**
+ * The finished note, rendered.
+ *
+ * Models emit whatever markdown they feel like — fenced blocks, pipe tables of
+ * labs, nested plans, the occasional blockquote — and a renderer that only
+ * knew `**bold**` showed the rest as literal asterisks and pipes in the middle
+ * of a chart entry. This handles what they actually produce.
+ *
+ * Block-level parsing is a small state machine over the lines rather than a
+ * dependency: this page holds PHI, and a markdown library is a supply chain.
+ */
 function NoteBody({ markdown }: { markdown: string }) {
-  return (
-    <div className="font-mono text-[13px] leading-relaxed">
-      {markdown.split("\n").map((line, i) => {
-        const key = `l${i}`;
-        if (!line.trim()) return <div key={key} className="h-3" />;
+  const lines = markdown.split("\n");
+  const blocks: React.ReactNode[] = [];
+  let i = 0;
 
-        const heading = line.match(/^(#{1,4})\s+(.*)$/);
-        if (heading) {
-          return (
-            <h3 key={key} className="mt-3 mb-1 text-[13px] font-semibold tracking-wide">
-              {inline(heading[2], key)}
-            </h3>
-          );
-        }
+  while (i < lines.length) {
+    const line = lines[i];
+    const key = `b${i}`;
 
-        // A line that is nothing but a bold run is a section header.
-        if (/^\*\*[^*]+\*\*$/.test(line.trim())) {
-          return (
-            <h3
-              key={key}
-              className="mt-3 mb-1 border-b border-[var(--border)] pb-1 text-[13px] font-semibold tracking-wide"
-            >
-              {line.trim().slice(2, -2)}
-            </h3>
-          );
-        }
+    // ``` fenced code ```
+    const fence = line.match(/^\s*```(\w*)\s*$/);
+    if (fence) {
+      const body: string[] = [];
+      i++;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) body.push(lines[i++]);
+      i++; // the closing fence
+      blocks.push(
+        <pre
+          key={key}
+          className="scroll-visible my-2 overflow-x-auto rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-[12px] leading-relaxed"
+        >
+          {body.join("\n")}
+        </pre>,
+      );
+      continue;
+    }
 
-        const listItem = line.match(/^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$/);
-        if (listItem) {
-          return (
-            <div key={key} className="flex gap-2 pl-1">
-              <span className="select-none text-[var(--muted)]">{line.trim().split(/\s+/)[0]}</span>
-              <span className="flex-1">{inline(listItem[2], key)}</span>
-            </div>
-          );
-        }
+    // | a | b |   with a |---|---| under it
+    if (line.includes("|") && i + 1 < lines.length && TABLE_DIVIDER.test(lines[i + 1])) {
+      const head = tableCells(line);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+        rows.push(tableCells(lines[i++]));
+      }
+      blocks.push(
+        <div key={key} className="scroll-visible my-2 overflow-x-auto">
+          <table className="w-full border-collapse text-[12px]">
+            <thead>
+              <tr className="border-b border-[var(--border)]">
+                {head.map((c, x) => (
+                  <th key={x} className="px-2 py-1 text-left font-semibold">
+                    {inline(c, `${key}h${x}`)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, y) => (
+                <tr key={y} className="border-b border-[var(--border)]/50">
+                  {r.map((c, x) => (
+                    <td key={x} className="px-2 py-1 align-top">
+                      {inline(c, `${key}r${y}c${x}`)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
 
-        return (
-          <div key={key} className="whitespace-pre-wrap">
-            {inline(line, key)}
-          </div>
-        );
-      })}
-    </div>
-  );
+    i++;
+
+    if (!line.trim()) {
+      blocks.push(<div key={key} className="h-2.5" />);
+      continue;
+    }
+
+    // --- horizontal rule
+    if (/^\s*([-*_])\s*(\1\s*){2,}$/.test(line)) {
+      blocks.push(<hr key={key} className="my-3 border-[var(--border)]" />);
+      continue;
+    }
+
+    // > blockquote
+    const quote = line.match(/^\s*>\s?(.*)$/);
+    if (quote) {
+      blocks.push(
+        <div
+          key={key}
+          className="my-1 border-l-2 border-[var(--border)] pl-3 text-[var(--muted)]"
+        >
+          {inline(quote[1], key)}
+        </div>,
+      );
+      continue;
+    }
+
+    // # heading
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      blocks.push(
+        <h3
+          key={key}
+          className={cn(
+            "mt-3 mb-1 font-semibold tracking-wide",
+            heading[1].length <= 2
+              ? "border-b border-[var(--border)] pb-1 text-[14px]"
+              : "text-[13px]",
+          )}
+        >
+          {inline(heading[2], key)}
+        </h3>,
+      );
+      continue;
+    }
+
+    // A line that is nothing but a bold run is how most models write a
+    // section header, whatever the prompt asked for.
+    const boldOnly = line.trim().match(/^\*\*(.+)\*\*:?$/);
+    if (boldOnly) {
+      blocks.push(
+        <h3
+          key={key}
+          className="mt-3 mb-1 border-b border-[var(--border)] pb-1 text-[13px] font-semibold tracking-wide"
+        >
+          {boldOnly[1]}
+        </h3>,
+      );
+      continue;
+    }
+
+    // - bullets and 1. numbers, nested by their indentation
+    const listItem = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if (listItem) {
+      const depth = Math.min(3, Math.floor(listItem[1].replace(/\t/g, "  ").length / 2));
+      const ordered = /\d/.test(listItem[2]);
+      blocks.push(
+        <div key={key} className="flex gap-2" style={{ paddingLeft: `${depth * 1.1 + 0.25}rem` }}>
+          <span
+            className={cn(
+              "select-none text-[var(--muted)]",
+              ordered ? "min-w-[1.4rem] text-right" : "min-w-[0.75rem]",
+            )}
+          >
+            {ordered ? listItem[2] : "•"}
+          </span>
+          <span className="min-w-0 flex-1">{inline(listItem[3], key)}</span>
+        </div>,
+      );
+      continue;
+    }
+
+    blocks.push(
+      <div key={key} className="whitespace-pre-wrap">
+        {inline(line, key)}
+      </div>,
+    );
+  }
+
+  return <div className="font-mono text-[13px] leading-relaxed">{blocks}</div>;
 }
 
 /* ------------------------------------------------------------------ */

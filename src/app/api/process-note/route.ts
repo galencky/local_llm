@@ -31,6 +31,7 @@ import {
   normalisePromptRun,
   normaliseDeidSampling,
   normaliseSampling,
+  patternScrubs,
   PromptRunError,
   type PromptRun,
   type Sampling,
@@ -79,6 +80,8 @@ interface DecryptedPayload {
   sampling?: unknown;
   /** Sampling for the de-identification pass. Only used on a cloud run. */
   deidSampling?: unknown;
+  /** Whether the deterministic pattern pass should run. Cloud runs only. */
+  patternScrub?: unknown;
 }
 
 export interface ProcessNoteResult {
@@ -95,8 +98,10 @@ export interface ProcessNoteResult {
     destination: "cloud" | "local";
     /** Which workspace produced it. */
     workspace: "note" | "prompt";
-    /** False only for a raw local prompt — the one run that is not scrubbed. */
+    /** False on a local run — the one destination that is not scrubbed. */
     deidentified: boolean;
+    /** Whether the deterministic pattern pass ran. */
+    patternScrub: boolean;
     /** Models exhausted or unavailable before the one that served this note. */
     modelFallbacks: { model: string; reason: string }[];
     processingTimeMs: number;
@@ -238,6 +243,8 @@ export async function POST(req: NextRequest) {
         let rawPromptRun: unknown;
         let rawSampling: unknown;
         let rawDeidSampling: unknown;
+        // Default ON. A client that says nothing gets the safer behaviour.
+        let wantsPatternScrub = true;
         if (plaintext.trimStart().startsWith("{")) {
           try {
             const payload = JSON.parse(plaintext) as DecryptedPayload;
@@ -250,6 +257,7 @@ export async function POST(req: NextRequest) {
               rawPromptRun = payload.promptRun ?? undefined;
               rawSampling = payload.sampling ?? undefined;
               rawDeidSampling = payload.deidSampling ?? undefined;
+              if (payload.patternScrub === false) wantsPatternScrub = false;
             }
           } catch {
             /* not a payload object; treat the whole thing as the narrative */
@@ -261,6 +269,7 @@ export async function POST(req: NextRequest) {
         // workspace, not the prompt. Bound for Google means de-identified;
         // staying on this Mac means there is nothing to protect it from.
         const scrubbing = deidentifies(localDestination);
+        const usePatterns = patternScrubs(localDestination, wantsPatternScrub);
 
         // Clamped on this side of the wire, always: the editor's own bounds
         // are a courtesy to the person typing.
@@ -339,38 +348,47 @@ export async function POST(req: NextRequest) {
         let promptSystem = promptRun?.systemInstruction ?? "";
 
         if (scrubbing) {
-          setStage(lock, "regex", `${size.chars.toLocaleString()} characters`);
-          emit("progress", { stage: "regex", status: "running" });
           const scrubStarted = Date.now();
 
-          // A custom-prompt run has two strings to clean and they must share
-          // one set of tokens, so both go through the deterministic pass with
-          // the same vault.
-          const regexResult = scrubWithRegex(noteText, vault);
-          if (promptRun) scrubWithRegex(promptSystem, vault);
-          emit("progress", {
-            stage: "regex",
-            status: "done",
-            ms: Date.now() - scrubStarted,
-            detail: `${regexResult.totalReplacements} identifier${regexResult.totalReplacements === 1 ? "" : "s"}`,
-          });
+          // The deterministic pass, unless it was switched off. When it is,
+          // the local model alone is responsible for every identifier —
+          // including the structured ones the rules would have caught for
+          // certain.
+          if (usePatterns) {
+            setStage(lock, "regex", `${size.chars.toLocaleString()} characters`);
+            emit("progress", { stage: "regex", status: "running" });
+            // A custom-prompt run has two strings to clean and they must share
+            // one set of tokens, so both go through the deterministic pass with
+            // the same vault.
+            // Populates the vault; the text itself is rewritten later, once,
+            // by `vault.deidentify`. The NER pass must see the original.
+            const regexResult = scrubWithRegex(noteText, vault);
+            if (promptRun) scrubWithRegex(promptSystem, vault);
+            regexHits = regexResult.hits;
+            emit("progress", {
+              stage: "regex",
+              status: "done",
+              ms: Date.now() - scrubStarted,
+              detail: `${regexResult.totalReplacements} identifier${regexResult.totalReplacements === 1 ? "" : "s"}`,
+            });
+          }
 
           setStage(lock, "ner", `${size.chars.toLocaleString()} characters`);
           emit("progress", { stage: "ner", status: "running" });
           // The local model reads the two joined once — running it twice would
           // double the slowest stage in the pipeline — and the vault then
           // applies what it found to each string separately.
-          const nerInput = promptRun
-            ? `${vault.deidentify(promptSystem)}\n\n${regexResult.text}`
-            : regexResult.text;
+          // The original, joined for a prompt run so one pass covers both
+          // strings. See `scrubWithLlm` on why this is not the scrubbed text.
+          const nerInput = promptRun ? `${promptSystem}\n\n${noteText}` : noteText;
           const llmResult = await scrubWithLlm(nerInput, vault, onToken("ner"), deidSampling);
           await flushStream(true);
           scrubMs = Date.now() - scrubStarted;
 
-          deidentifiedInput = promptRun ? vault.deidentify(regexResult.text) : llmResult.text;
+          // One application of everything both passes found, in one place.
+          deidentifiedInput = vault.deidentify(noteText);
           if (promptRun) promptSystem = vault.deidentify(promptSystem);
 
-          regexHits = regexResult.hits;
           llmEntityCount = llmResult.entities.length;
           hallucinatedSpans = llmResult.hallucinated;
           rejectedClinicalSpans = llmResult.rejectedClinical;
@@ -513,6 +531,7 @@ export async function POST(req: NextRequest) {
                 deidentifiedOutput: formatted.text,
                 modelUsed: formatted.model,
                 processingTimeMs,
+                patternScrub: usePatterns,
                 // Custom prompts are never persisted — they arrive sealed and
                 // die with the request — so the row records that this note came
                 // from prompts nobody can look up, rather than implying the
@@ -561,6 +580,7 @@ export async function POST(req: NextRequest) {
             destination: localDestination ? "local" : "cloud",
             workspace,
             deidentified: scrubbing,
+            patternScrub: usePatterns,
             modelFallbacks: formatted.fallbacks,
             processingTimeMs,
             scrubMs,

@@ -251,7 +251,37 @@ export function audits(localDestination: boolean): boolean {
  * local run shows the three steps it performs instead of four greyed-out ones
  * it will never reach.
  */
-export function stagesFor(localDestination: boolean): PipelineStage[] {
+export function stagesFor(
+  localDestination: boolean,
+  patternScrub = true,
+): PipelineStage[] {
   if (localDestination) return ["decrypt", "cloud", "seal"];
-  return ["decrypt", "regex", "ner", "cloud", "rehydrate", "audit", "seal"];
+  return [
+    "decrypt",
+    ...(patternScrub ? (["regex"] as const) : []),
+    "ner",
+    "cloud",
+    "rehydrate",
+    "audit",
+    "seal",
+  ];
+}
+
+/**
+ * Does the deterministic pass run?
+ *
+ * Only ever a question for a cloud run — a local run de-identifies nothing at
+ * all, so there is no pattern pass to switch off.
+ *
+ * Switching it off is a real weakening and is presented as one. The pattern
+ * rules are deterministic where the model is not: what they catch, they always
+ * catch. What they buy in exchange for that is over-eagerness — a bed number
+ * like `08-2` reads as a month/day, a seven-digit accession reads as an MRN —
+ * and for some notes that costs more than it saves. The measured argument for
+ * allowing it at all is that the current NER prompt scores 17/17 alone on the
+ * synthetic set; the argument against is that "alone" is a probabilistic
+ * 17/17, not a guaranteed one.
+ */
+export function patternScrubs(localDestination: boolean, requested: boolean): boolean {
+  return deidentifies(localDestination) && requested;
 }

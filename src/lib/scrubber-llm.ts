@@ -298,7 +298,19 @@ export async function checkLmStudioHealth(): Promise<LmStudioHealth> {
 }
 
 /**
- * Run the local NER pass over regex-scrubbed text and replace what it finds.
+ * Run the local NER pass and record what it finds in the vault.
+ *
+ * IT READS THE ORIGINAL TEXT, not the pattern-scrubbed version, and that is
+ * load-bearing. Feeding it text already dense with `[MRN_1]`-style
+ * placeholders measurably costs recall: on a short ward note the pass missed
+ * the attending's name entirely with the patterns applied first, and caught it
+ * when shown the same note clean. The model is reading prose, and prose full of
+ * bracketed tokens is not the thing it was trained on.
+ *
+ * The deterministic pass still runs first — it just populates the vault rather
+ * than rewriting the input. Both sets of findings are applied to the text
+ * afterwards by `TokenVault.deidentify`, longest original first, so the two
+ * passes compose without either shredding the other's work.
  *
  * There is one prompt and one set of parameters, compiled in. Nothing a user
  * can type reaches this: it is the de-identification step itself, and making
@@ -504,6 +516,10 @@ export async function scrubWithLlm(
     }
     // Never re-redact a placeholder emitted by the regex pass.
     if (/^\[[A-Z_]+_\d+\]$/.test(span)) continue;
+    // The deterministic pass may already own this exact string. Assigning it a
+    // second token under a different category would leave two placeholders for
+    // one identifier and make re-hydration order-dependent.
+    if (vault.knows(span)) continue;
     // Guard against a model that returns the whole paragraph as one "name".
     // A newline is the real signal for that; a bare length cap is not. At 60
     // this silently discarded correctly-identified long addresses — the model

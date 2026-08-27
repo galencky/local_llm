@@ -119,7 +119,14 @@ a note longer than it can attend to starts *missing names*.
 
 **5-6. Both scrub passes**, if and only if this run is bound for Google — see
 [sections 6](#6-pass-a--the-deterministic-scrubber) and
-[7](#7-pass-b--the-local-ner-pass). Fails closed by default.
+[7](#7-pass-b--the-local-ner-pass). Fails closed by default. The pattern pass
+can be switched off; the NER pass cannot.
+
+**Neither pass rewrites the text.** Both record what they find in the vault, and
+`vault.deidentify()` applies the lot afterwards, longest original first. That
+ordering is why the two compose instead of shredding each other's work, and why
+the NER pass gets to read the note as prose — see
+[section 7](#7-pass-b--the-local-ner-pass).
 
 **7. Vault parked.** `storeVault(sessionId, vault)` puts the map in the TTL store
 under a fresh UUID. In practice the request re-hydrates from its own local
@@ -240,6 +247,28 @@ a false positive costs a slightly odd note, a false negative leaks PHI.
 Every rule gets a **fresh `RegExp`** per pass, because the module-level literals
 carry `/g` `lastIndex` state and would otherwise skip matches on the second call.
 
+### The pattern pass is a switch, not a law
+
+`patternScrub`, cloud runs only — a local run de-identifies nothing, so there is
+nothing to switch off, and the control is disabled and says so.
+
+It defaults **on**, and a payload that omits it gets on, because on is the safer
+of the two. Off, the local model alone is responsible for every identifier
+including the structured ones these rules would have caught for certain: the
+rules are deterministic where the model is probabilistic.
+
+The argument for offering it at all is that this pass is over-eager by design,
+and on some notes the over-eagerness costs more than it saves — a bed number
+reading as a month/day, a seven-digit accession reading as an MRN. The argument
+against is that "the model catches them anyway" is a measured average, not a
+guarantee.
+
+So it is marked while it is off (an amber notice above the input, an amber chip
+on the finished note) and recorded on the audit row as
+`AuditLog.patternScrub`, defaulted true so every row written before the switch
+existed says what was true of it. A note whose de-identification worked
+differently has to be traceable as such.
+
 ### Shapes that leaked in real use
 
 These rules exist because notes got past the earlier ones. Kept here because the
@@ -294,6 +323,30 @@ temperature 0:
 | Open vocabulary (current) | **17/17** | **17/17** |
 
 No clinical term was wrongly redacted in either arm.
+
+### It reads the ORIGINAL text, and that is load-bearing
+
+The NER pass is shown the note as written, not the pattern-scrubbed version.
+Feeding it text already dense with `[MRN_1]`-style placeholders measurably costs
+recall — the model is reading prose, and prose full of bracketed tokens is not
+what it was trained on.
+
+Measured on a five-line ward note, same note both ways:
+
+| | patterns applied first | patterns recorded, NER reads the original |
+| --- | --- | --- |
+| Identifiers caught | 6 — **the attending's name leaked** | 8, nothing leaked |
+
+That was a real leak, on the default path, found by building the switch that
+lets you turn the pattern pass off. The deterministic pass still runs first; it
+just populates the vault instead of rewriting the input.
+
+A second benefit falls out of it. `deidentify` replaces the longest original
+first, so where both passes see the same text the model's semantically correct
+span wins: a bed like `08-2床` is tagged `WARD` by the model rather than left as
+the `DATE` the month/day rule made of `08-2`. `TokenVault.knows()` stops the
+same string being assigned twice under two categories, which would otherwise
+make re-hydration order-dependent.
 
 ### Guards on what comes back
 
@@ -1120,7 +1173,7 @@ and all six drawers — in both themes. It composites through alpha layers and
 Widening it from "controls" to "all text", and from resting to in-flight states,
 turned 0 known problems into 135 — which were three causes, not 135 bugs:
 `opacity` used to dim text, Tailwind `-600`/`-500` shades on white, and
-`animate-pulse` on a label. Current state: **2,632 text nodes, zero below AA,
+`animate-pulse` on a label. Current state: **2,658 text nodes, zero below AA,
 both themes**, across sixteen surfaces including both mode states.
 
 It waited on the wrong signal for a long time. "Copy note · with names" is
