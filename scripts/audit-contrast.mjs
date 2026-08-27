@@ -126,7 +126,12 @@ for (const scheme of ["light", "dark"]) {
   await p.waitForTimeout(1200);
   await report("main · processing");
 
-  await p.waitForSelector('button:has-text("Copy note")', { timeout: 240000 });
+  // "Copy note · with names" is rendered from the start and merely disabled
+  // until a result exists, so waiting for it returned instantly and the
+  // "result" surface was audited mid-run — then the inspector button, which
+  // only exists once there IS a result, timed out. The redaction count is the
+  // honest signal that the run finished.
+  await p.waitForSelector('button:has-text("redactions")', { timeout: 300000 });
   await p.waitForTimeout(500);
   await report("main · result");
 
@@ -134,6 +139,8 @@ for (const scheme of ["light", "dark"]) {
                                ["History","history"],["Prompts","prompts · local"],
                                ["How it works","how it works"],["Manage","routines"]]) {
     await p.click(`button:has-text("${btn}")`);
+    // Drawers slide in now; audit them settled, not mid-animation.
+    await p.waitForTimeout(250);
     await p.waitForTimeout(700);
     await report(label);
     if (label === "prompts · local") {
@@ -146,6 +153,16 @@ for (const scheme of ["light", "dark"]) {
     if (await close.count()) await close.click().catch(() => {});
     await p.waitForTimeout(400);
   }
+  // The mode toggle and its warning are new furniture directly above the
+  // primary action; audit both of its states rather than only the default.
+  await p.click('button[aria-pressed="false"]:has-text("Custom")');
+  await p.waitForTimeout(900);
+  await report("main · custom mode");
+  const closeCustom = p.locator('aside button[aria-label^="Close"]').first();
+  if (await closeCustom.count()) await closeCustom.click().catch(() => {});
+  await p.waitForTimeout(500);
+  await report("main · custom, editor closed");
+
   await ctx.close();
 }
 

@@ -901,14 +901,27 @@ export default function AirlockPage() {
 
           <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] px-3 py-2 sm:px-4 sm:py-3">
             <div className="flex flex-wrap gap-1">
-              {mode === "custom" && (
-                <span
-                  title="Your custom instruction decides the note's shape. The format is kept only as the label on the audit row and in History."
-                  className="mr-1 self-center whitespace-nowrap text-[10px] uppercase tracking-wider text-[var(--muted)]"
-                >
-                  label only
-                </span>
-              )}
+              {/* Rendered in both modes and merely hidden in guided, so the
+                  format row's width budget never changes. Appearing on the
+                  switch used to push this row to a second line, which moved
+                  the submit button further than the mode bar itself did.
+                  `invisible` keeps the space and hides it from screen readers
+                  too, which is the right answer for a caption that does not
+                  apply. */}
+              <span
+                aria-hidden={mode !== "custom"}
+                title={
+                  mode === "custom"
+                    ? "Your custom instruction decides the note's shape. The format is kept only as the label on the audit row and in History."
+                    : undefined
+                }
+                className={cn(
+                  "mr-1 self-center whitespace-nowrap text-[10px] uppercase tracking-wider text-[var(--muted)]",
+                  mode !== "custom" && "invisible",
+                )}
+              >
+                label only
+              </span>
               {FORMATS.map((f) => (
                 <button
                   key={f.id}
@@ -1173,7 +1186,15 @@ function ModeBar({
 
   return (
     <div className="border-t border-[var(--border)]">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2 sm:px-4 sm:py-2.5">
+      {/* ONE ROW, ALWAYS. This bar sits above the model selector and the submit
+          button, so anything that makes it taller pushes the primary action
+          down the page. It used to wrap: at 1024px switching to custom grew
+          this block from 75px to 374px and moved "Encrypt & structure" 329px
+          down, which is a layout breaking, not a setting changing.
+          `flex-nowrap` plus a truncating blurb means the row is the same
+          height in both modes — only the warning below it changes, and that
+          is animated. */}
+      <div className="flex flex-nowrap items-center gap-x-3 px-3 py-2 sm:px-4 sm:py-2.5">
         <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
           Mode
         </span>
@@ -1210,7 +1231,12 @@ function ModeBar({
           })}
         </div>
 
-        <p className="min-w-0 flex-1 text-[11px] leading-relaxed text-[var(--muted)]">
+        {/* Truncates rather than wraps — the full text is in the tooltip, and
+            the toggle's own labels already say which mode is on. */}
+        <p
+          title={active.blurb}
+          className="min-w-0 flex-1 truncate text-[11px] text-[var(--muted)]"
+        >
           {active.blurb}
         </p>
 
@@ -1218,55 +1244,76 @@ function ModeBar({
           <>
             <span
               title="What the two models are running with right now"
-              className="hidden shrink-0 font-mono text-[10px] text-[var(--muted)] xl:inline"
+              className="hidden shrink-0 font-mono text-[10px] text-[var(--muted)] 2xl:inline"
             >
               local {custom.local.temperature.toFixed(2)} · {custom.local.maxTokens} tok
               {" · "}format {custom.cloud.temperature.toFixed(2)} / {custom.cloud.topP.toFixed(2)}
             </span>
             <button
               onClick={onEdit}
+              title="Open the custom prompt and parameter editor"
               className="flex shrink-0 items-center gap-1.5 rounded border border-[var(--accent-solid)] bg-[var(--accent-solid)] px-2.5 py-1 text-[11px] font-medium text-[var(--on-accent)] transition-opacity hover:opacity-90"
             >
               <Pencil className="size-3.5 shrink-0" />
-              Edit prompts &amp; parameters
+              {/* One flex item, not two: a bare text node beside a span makes
+                  each an anonymous flex item, and the row's gap then opens up
+                  between "Edit" and the rest of its own label. The word alone
+                  carries it below xl, where the full label would wrap the row. */}
+              <span className="whitespace-nowrap">
+                Edit<span className="hidden xl:inline"> prompts &amp; parameters</span>
+              </span>
             </button>
           </>
         )}
       </div>
 
-      {mode === "custom" && (
-        <div
-          className={cn(
-            "border-t px-3 py-2 text-[11px] sm:px-4",
-            error
-              ? "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
-              : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
-          )}
-        >
-          <div className="flex items-start gap-2">
-            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-            {error ? (
-              <span>
-                {error}{" "}
-                <button onClick={onEdit} className="underline underline-offset-2">
-                  Fix it in the editor
-                </button>
-                .
-              </span>
-            ) : (
-              <span>
-                Your prompt is now the de-identification step. The pattern scrub, the
-                verbatim-span check and the fail-closed rule still run underneath it — but a
-                weaker prompt catches fewer names, and what it misses{" "}
-                {localDestination
-                  ? "stays on this Mac, and still lands in the finished note and in the audit log"
-                  : "goes to Google"}
-                . Read the redaction list before filing.
-              </span>
+      {/* Always mounted so it can animate open and shut. Guided renders it at
+          zero height, so switching modes slides the model bar and the submit
+          button down rather than teleporting them.
+
+          The text is short on purpose: this warning stands for as long as
+          custom mode is on, directly above the primary action, and the three
+          sentences it used to carry cost two extra lines on a 1024px ward
+          screen every one of those minutes. The detail it dropped is in the
+          editor, under "what custom mode cannot switch off". */}
+      <div className="reveal" data-open={mode === "custom"}>
+        <div>
+          <div
+            className={cn(
+              "border-t px-3 py-2 text-[11px] leading-relaxed sm:px-4",
+              error
+                ? "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
+                : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
             )}
+          >
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+              {error ? (
+                <span>
+                  {error}{" "}
+                  <button onClick={onEdit} className="underline underline-offset-2">
+                    Fix it in the editor
+                  </button>
+                  .
+                </span>
+              ) : (
+                <span
+                  title={
+                    "The pattern scrub, the verbatim-span check and the fail-closed rule all still run underneath your prompt — but a weaker prompt catches fewer names, and what it misses " +
+                    (localDestination
+                      ? "stays on this Mac and still lands in the finished note and in the audit log."
+                      : "goes to Google.")
+                  }
+                >
+                  Your prompt is now the de-identification step — what it misses{" "}
+                  {localDestination ? "still reaches the note and the audit log" : "goes to Google"}.
+                  Read the redaction list before filing.
+                </span>
+              )}
+            </div>
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -1335,8 +1382,8 @@ function CustomModeDrawer({
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <aside className="drawer-panel relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-start justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="flex items-center gap-2 text-sm font-semibold">
@@ -2120,8 +2167,8 @@ function HistoryDrawer({
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="relative flex h-full w-full max-w-2xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <aside className="drawer-panel relative flex h-full w-full max-w-2xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-start justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold">Past notes</h3>
@@ -2311,8 +2358,8 @@ function WireView({
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <aside className="drawer-panel relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-start justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold">What Cloudflare sees</h3>
@@ -2463,8 +2510,8 @@ function PromptsDrawer({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <aside className="drawer-panel relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-start justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold">What each model is told</h3>
@@ -2707,8 +2754,8 @@ const STEPS: { n: string; where: keyof typeof LOCUS_STYLE; title: string; body: 
 function HowItWorks({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="relative flex h-full w-full max-w-xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <aside className="drawer-panel relative flex h-full w-full max-w-xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-start justify-between border-b border-[var(--border)] px-5 py-4">
           <div>
             <h3 className="text-sm font-semibold">How Project Airlock works</h3>
@@ -2867,8 +2914,8 @@ function PromptLibrary({
 
   return (
     <div className="fixed inset-0 z-30 flex justify-end">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="relative flex h-full w-full max-w-2xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <aside className="drawer-panel relative flex h-full w-full max-w-2xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold">Specialty routines</h3>
@@ -3170,8 +3217,8 @@ function Inspector({ result, onClose }: { result: ProcessNoteResult; onClose: ()
 
   return (
     <div className="fixed inset-0 z-30 flex justify-end">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="relative flex h-full w-full max-w-xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <aside className="drawer-panel relative flex h-full w-full max-w-xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold">PII Scrubbed Inspector</h3>

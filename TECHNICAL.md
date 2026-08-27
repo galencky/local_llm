@@ -675,6 +675,24 @@ minimal frame parser (`EventSource` cannot issue a POST). On
   panel. The two together are the whole answer to "what will this run do" —
   which prompts, and which model. It is a segmented toggle rather than a pair
   of buttons because there are exactly two states and only one can hold.
+- **Switching mode must not move the page.** The mode row is `flex-nowrap` with
+  a truncating blurb, so it is the same height in both modes; the "label only"
+  caption on the format row is rendered in both modes and merely `invisible` in
+  guided, so that row's width budget never changes either. What is left is the
+  custom-mode warning, which is always mounted and animated open with
+  `grid-template-rows: 0fr → 1fr` (`.reveal` in `globals.css`) — the only way
+  to animate to a height nobody has measured.
+
+  This was measured, not guessed. Before: switching to custom at 1024px grew
+  the block from **75px to 374px** and moved "Encrypt & structure" **329px**
+  down the page, adding a scrollbar. After: the row does not change at all and
+  the button moves by exactly the height of the warning (34–53px depending on
+  width), over 200ms.
+- **Drawers slide in** (`.drawer-panel` / `.drawer-scrim`, 180ms). Six drawers
+  open over this page and one of them — the custom editor — opens by itself when
+  the toggle is switched; a full-height panel materialising in one frame reads
+  as the layout breaking rather than as a panel opening. Both animations are
+  disabled under `prefers-reduced-motion`.
 
 **Caching headers** (`next.config.ts`): HTML and every API response are
 `no-store`, with `CDN-Cache-Control` and `Cloudflare-CDN-Cache-Control` set too —
@@ -880,8 +898,17 @@ and all six drawers — in both themes. It composites through alpha layers and
 Widening it from "controls" to "all text", and from resting to in-flight states,
 turned 0 known problems into 135 — which were three causes, not 135 bugs:
 `opacity` used to dim text, Tailwind `-600`/`-500` shades on white, and
-`animate-pulse` on a label. Current state: 1,763 text nodes, zero below AA, both
-themes.
+`animate-pulse` on a label. Current state: **2,219 text nodes, zero below AA,
+both themes**, across sixteen surfaces including both mode states.
+
+It waited on the wrong signal for a long time. "Copy note · with names" is
+rendered from the start and merely *disabled* until a result exists, so
+`waitForSelector('button:has-text("Copy note")')` returned instantly and the
+"result" surface was audited mid-run — with the inspector button, which only
+exists once there is a result, timing out immediately after. It now waits for
+the redaction count, which is the honest signal that the run finished. The same
+trap catches hand-written probes; check for a button that only exists on
+success, not one that is merely enabled by it.
 
 ### `scripts/test-session.ts`
 
@@ -1096,3 +1123,9 @@ never use `opacity` to dim text (it drags the colour toward its own background;
 spent model chips once measured **1:1**, i.e. exactly invisible), and never
 animate the opacity of a label (the busy pill dipped to 2.14:1 mid-cycle, right
 when it mattered — the icon pulses now, not the text).
+
+A third, for layout rather than colour: **a control above the primary action
+must not change height when it changes state.** The mode toggle broke this and
+pushed "Encrypt & structure" 329px down a 1024px screen. Measure the delta at
+1024, 1280, 1440 and 1920 before shipping anything that appears or disappears
+above the fold.
