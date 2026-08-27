@@ -1,3 +1,5 @@
+import type { PipelineStage } from "./pipeline-client";
+
 /**
  * Atomic single-slot compute lock, plus a live read-out of what the slot is
  * doing so other tabs can see why they are queued.
@@ -7,14 +9,13 @@
  * no `await` can interleave between the read and the write below.
  */
 
-export type PipelineStage =
-  | "decrypt"
-  | "regex"
-  | "ner"
-  | "cloud"
-  | "rehydrate"
-  | "audit"
-  | "seal";
+/**
+ * Re-exported rather than redeclared. The stage ids are the wire contract
+ * between this route and every client, so there is one list, in the module both
+ * halves already import. `import type` is erased at compile time, so nothing
+ * server-side is pulled into the browser bundle by this.
+ */
+export type { PipelineStage } from "./pipeline-client";
 
 export const STAGE_LABELS: Record<PipelineStage, string> = {
   decrypt: "Decrypting the sealed note",

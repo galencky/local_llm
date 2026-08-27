@@ -1,0 +1,4 @@
+Next.js copies this directory into the container image, and the Dockerfile's
+`COPY --from=builder /app/public ./public` fails outright when it does not
+exist. Git does not track empty directories, so a fresh clone had no `public/`
+and could not build. This file exists to keep the directory in the repository.

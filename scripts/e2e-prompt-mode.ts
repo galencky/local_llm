@@ -13,7 +13,8 @@
  */
 import "dotenv/config";
 import { LOCAL_MODEL_ID, runPipeline } from "../src/lib/pipeline-client";
-import { deidentifies, stagesFor } from "../src/lib/workspace";
+import { budgetedText, deidentifies, MAX_PROMPT_LENGTH, stagesFor } from "../src/lib/workspace";
+import { HARD_CHAR_LIMIT } from "../src/lib/limits";
 import { prisma } from "../src/lib/db";
 import { createTestSession, destroyTestUser } from "./test-session";
 
@@ -180,6 +181,44 @@ async function main() {
     }).then(
       () => check("a routine-less Others run is refused", false, "it was accepted"),
       (e: Error) => check("a routine-less Others run is refused", /saved routine alone/i.test(e.message), e.message),
+    );
+
+    section("7. The input budget covers what the local model is actually shown");
+    // Both prompt fields cap at MAX_PROMPT_LENGTH each, so a pair of legal
+    // fields could hand the de-identifier twice the length it can scan
+    // reliably — and past HARD_CHAR_LIMIT it starts missing names. The budget
+    // has to be measured against the joined text a cloud run produces.
+    const filler = "The patient remains stable overnight with no new complaints. ";
+    const longSystem = filler.repeat(Math.ceil((HARD_CHAR_LIMIT * 0.7) / filler.length));
+    const longPrompt = `${filler.repeat(Math.ceil((HARD_CHAR_LIMIT * 0.7) / filler.length))}\nSummarise.`;
+    check("each field alone is under both caps",
+      longSystem.length < MAX_PROMPT_LENGTH && longPrompt.length < HARD_CHAR_LIMIT,
+      `${longSystem.length} / ${longPrompt.length}`);
+    check("joined, a cloud run is over the scan budget",
+      budgetedText({
+        workspace: "prompt",
+        narrative: "",
+        promptRun: { systemInstruction: longSystem, prompt: longPrompt },
+        localDestination: false,
+      }).length > HARD_CHAR_LIMIT);
+    check("a local run budgets the prompt alone — nothing is scanned",
+      budgetedText({
+        workspace: "prompt",
+        narrative: "",
+        promptRun: { systemInstruction: longSystem, prompt: longPrompt },
+        localDestination: true,
+      }) === longPrompt);
+    await runPipeline<Result>({
+      baseUrl: base,
+      text: "",
+      format: "SOAP",
+      workspace: "prompt",
+      promptRun: { systemInstruction: longSystem, prompt: longPrompt },
+      headers: who.cookie,
+    }).then(
+      () => check("the server refuses it rather than under-scanning", false, "it was accepted"),
+      (e: Error) => check("the server refuses it rather than under-scanning",
+        /can only scan up to/i.test(e.message), e.message),
     );
   } finally {
     await destroyTestUser(who.userId);

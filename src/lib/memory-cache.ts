@@ -49,8 +49,30 @@ function mask(value: string): string {
   return `${chars[0]}${"*".repeat(chars.length - 2)}${chars[chars.length - 1]}`;
 }
 
-function escapeRegex(literal: string): string {
+/** Quote a literal so it can be one branch of an alternation. */
+export function escapeRegex(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Replace every key of `map` with its value, in ONE pass.
+ *
+ * The order of `pairs` is the alternation order, and JavaScript alternation is
+ * leftmost-first-alternative — so a longest-first list gives longest-match
+ * semantics. One pass is not a micro-optimisation: a chain of `split`/`join`
+ * re-reads text it has already substituted, so a short later replacement can
+ * land *inside* a placeholder an earlier one wrote. A single-character span
+ * turned `[MRN_1]` into `[MRN_[OTHER_ID_1]]` and the note could not be
+ * re-hydrated. A single pass cannot see its own output.
+ */
+function replaceAllOnce(text: string, pairs: [string, string][]): string {
+  if (pairs.length === 0) return text;
+  const lookup = new Map<string, string>();
+  // First writer wins, so an identifier claimed under two categories keeps the
+  // token that was actually issued for it first.
+  for (const [from, to] of pairs) if (!lookup.has(from)) lookup.set(from, to);
+  const pattern = new RegExp([...lookup.keys()].map(escapeRegex).join("|"), "g");
+  return text.replace(pattern, (match) => lookup.get(match) ?? match);
 }
 
 /**
@@ -135,10 +157,9 @@ export class TokenVault {
   deidentify(text: string): string {
     const pairs = [...this.tokenToPii.entries()]
       .filter(([, pii]) => pii.length > 0)
-      .sort((a, b) => b[1].length - a[1].length);
-    let out = text;
-    for (const [token, pii] of pairs) out = out.split(pii).join(token);
-    return out;
+      .sort((a, b) => b[1].length - a[1].length)
+      .map(([token, pii]): [string, string] => [pii, token]);
+    return replaceAllOnce(text, pairs);
   }
 
   /** Tokens the cloud model left unresolved — a signal the prompt drifted. */
@@ -220,19 +241,19 @@ if (!cache.sweeper) {
   cache.sweeper.unref?.();
 }
 
+/**
+ * Register a live vault so it self-destructs even if its request does not.
+ *
+ * DELIBERATELY WRITE-ONLY. Nothing reads a vault back out, and nothing should:
+ * re-hydration happens inside the request that built the mapping, so a reader
+ * could only exist to hand raw PHI to some *later* request. What this buys is a
+ * backstop — a handler that dies between `storeVault` and its `finally` still
+ * has its mapping wiped by the sweeper within TTL_MS — and a countable number
+ * for the status badge, so "how many identifier maps are in memory right now"
+ * has an answer rather than a promise.
+ */
 export function storeVault(sessionId: string, vault: TokenVault): void {
   cache.entries.set(sessionId, { vault, expiresAt: Date.now() + TTL_MS });
-}
-
-export function getVault(sessionId: string): TokenVault | null {
-  const entry = cache.entries.get(sessionId);
-  if (!entry) return null;
-  if (entry.expiresAt <= Date.now()) {
-    entry.vault.clear();
-    cache.entries.delete(sessionId);
-    return null;
-  }
-  return entry.vault;
 }
 
 /** Explicit purge — called as soon as a note is re-hydrated and returned. */

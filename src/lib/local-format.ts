@@ -13,24 +13,26 @@ import type { Sampling } from "./workspace";
  * means the request makes no outbound call at all — no Google, no quota, and
  * nothing to explain to a hospital about a third-party processor.
  *
- * WHAT DOES NOT CHANGE, and this is the point:
+ * WHAT DOES NOT CHANGE:
  *
- *  - Both de-identification passes still run, in the same order. It would be
- *    tempting to skip them when nothing leaves the box, but the audit log's
- *    de-identification invariant is not a property of the cloud boundary — it
- *    is what makes History safe to open in front of somebody. A local run that
- *    wrote raw names into Postgres would quietly undo that.
  *  - The note is still assembled by `assemblePrompt`, so the format skeleton
  *    and the saved routine compose exactly as they do for the cloud, in the
  *    same precedence.
- *  - The placeholder rules still travel with the request, so re-hydration works
- *    identically and the same `unresolvedTokens` check applies.
+ *  - The system instruction is the same one Gemini gets, so the clinical rules
+ *    that stop a model inventing findings apply here too.
+ *
+ * WHAT DOES CHANGE, and it is the whole point: NOTHING IS DE-IDENTIFIED and
+ * nothing is written down. `workspace.ts` holds the rule — de-identification
+ * happens if and only if a run is bound for Google — and it reads off the
+ * destination alone. A local run has no cloud boundary to protect and no
+ * de-identified copy of itself to store, so the passes do not run and no audit
+ * row is written. The consequence is worth saying out loud: local runs do not
+ * appear in History.
  *
  * WHAT IT COSTS. The formatting model is whatever is loaded locally, so the
- * draft is generally weaker than a flagship Flash model, and the run holds the
- * single compute slot for two local inferences instead of one. That is a
- * legitimate trade for a ward with no egress, an exhausted quota, or a note
- * somebody would simply rather not send.
+ * draft is generally weaker than a flagship Flash model. That is a legitimate
+ * trade for a ward with no egress, an exhausted quota, or a note somebody would
+ * simply rather not send.
  *
  * It NEVER falls back to the cloud. Choosing local is a statement about where
  * the work happens; quietly escalating to Google on a local failure would break
@@ -60,10 +62,10 @@ export function localModelLabel(model: string): string {
  * Run a bare system instruction and prompt against the local model.
  *
  * No note assembly, no format skeleton, no placeholder kernel — this is the
- * raw console. When the caller de-identified first (a cloud-bound prompt never
- * reaches here, but a note-mode local run does) the placeholders are already
- * in the text; when it did not, the text is whatever the user typed, and that
- * is the point of the local destination.
+ * raw console. Only a local run reaches here, and a local run is never
+ * de-identified, so the text is whatever the clinician typed. That is the point
+ * of the local destination, and the placeholder kernel would be describing a
+ * substitution that never happened.
  */
 export async function runPromptLocally(opts: {
   systemInstruction: string;
@@ -99,7 +101,10 @@ function localSampling(s: Sampling) {
  * Signature-compatible with `formatClinicalNote` so the route branches on the
  * destination and nothing downstream has to care which one answered.
  *
- * @param deidentifiedText text containing placeholders only — never raw PHI
+ * @param deidentifiedText the narrative as the model will see it. Named for the
+ * cloud twin whose signature this matches; on this path it is the RAW note,
+ * because a local run is not de-identified — nothing left the box to protect it
+ * from.
  * @param format target note structure
  * @param instructions the saved routine, if one was selected
  */

@@ -1,4 +1,4 @@
-import type { PiiCategory, TokenVault } from "./memory-cache";
+import { escapeRegex, type PiiCategory, type TokenVault } from "./memory-cache";
 import { lmStudioBaseUrl, lmStudioTimeoutMs } from "./lmstudio";
 import { DEID_SAMPLING_DEFAULTS, type Sampling } from "./workspace";
 
@@ -541,11 +541,23 @@ export async function scrubWithLlm(
   // Longest span first: replacing "林" before "林建明" would shred the latter.
   accepted.sort((a, b) => b.text.length - a.text.length);
 
-  let text = input;
+  // One pass, longest alternative first. A sequential chain would re-read text
+  // it had already replaced, so a one-character span could land inside a
+  // placeholder written moments earlier — see `replaceAllOnce` in
+  // `memory-cache.ts`. The route rebuilds this text from the vault anyway; this
+  // keeps the standalone result honest for callers that use it directly.
+  const issued = new Map<string, string>();
   for (const entity of accepted) {
-    const token = vault.assign(entity.category, entity.text, "llm");
-    text = text.split(entity.text).join(token);
+    if (!issued.has(entity.text)) {
+      issued.set(entity.text, vault.assign(entity.category, entity.text, "llm"));
+    }
   }
+  const text = issued.size
+    ? input.replace(
+        new RegExp([...issued.keys()].map(escapeRegex).join("|"), "g"),
+        (match) => issued.get(match) ?? match,
+      )
+    : input;
 
   return {
     text,

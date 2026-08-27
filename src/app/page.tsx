@@ -51,6 +51,7 @@ import {
 } from "@/lib/pipeline-client";
 import { base64ToBytes, type CryptoEnvelope } from "@/lib/crypto";
 import {
+  budgetedText,
   normalisePromptRun,
   PROMPT_DEFAULTS,
   PromptRunError,
@@ -539,23 +540,14 @@ export default function AirlockPage() {
     }
   }, []);
 
+  // Deferred into a promise rather than called in the effect body: `loadModels`
+  // sets state, and a synchronous setState inside an effect is a cascading
+  // render (and a lint error). The state lands after the fetch resolves.
   useEffect(() => {
-    let cancelled = false;
     void (async () => {
-      try {
-        const r = await fetch("/api/models", { cache: "no-store" });
-        if (!r.ok || cancelled) return;
-        const d = (await r.json()) as { models: ModelAvailability[]; default: string };
-        setModels(d.models);
-        setChosenModel((c) => c || d.default);
-      } catch {
-        /* ignore */
-      }
+      await loadModels();
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  }, [loadModels]);
 
   /* --- health polling -------------------------------------------------- */
   // Tighten the cadence whenever this tab has work outstanding — queued OR
@@ -601,13 +593,28 @@ export default function AirlockPage() {
     el.style.height = `${el.scrollHeight}px`;
   }, [input]);
 
-  // Whichever text this run will actually send is what the budget applies to.
-  const size = measure(workspace === "prompt" ? promptRun.prompt : input);
   /**
-   * The same check the route runs, run early so a broken custom prompt is
-   * caught while the note is still on screen — rather than after the input has
-   * been cleared and the note sealed.
+   * Which model writes the note. The local destination is not a separate
+   * control: it is a rung on the same selector, because it answers the same
+   * question, and it composes with either workspace unchanged.
    */
+  const localDestination = isLocalDestination(chosenModel);
+
+  /**
+   * What the input budget applies to — the same answer the route computes, from
+   * the same function, so the live counter cannot promise room the server will
+   * refuse. On a cloud prompt run that is the system instruction and the prompt
+   * together, because the de-identification pass reads them joined.
+   */
+  const size = measure(
+    budgetedText({
+      workspace,
+      narrative: input,
+      promptRun: workspace === "prompt" ? promptRun : null,
+      localDestination,
+    }),
+  );
+
   /**
    * The same check the route runs, run early so a broken prompt is caught
    * while it is still on screen rather than after the workspace has cleared.
@@ -832,12 +839,6 @@ export default function AirlockPage() {
    */
   const busy = (status?.busy ?? false) || submitting;
 
-  /**
-   * Which model writes the note. The local destination is not a separate
-   * control: it is a rung on the same selector, because it answers the same
-   * question, and it composes with either workspace unchanged.
-   */
-  const localDestination = isLocalDestination(chosenModel);
   /** Short name of whatever LM Studio has loaded, for labelling its row. */
   const localModelName = status?.lmStudio.requestModel?.split("/").pop() ?? null;
 
@@ -2525,9 +2526,9 @@ function WireView({
           </div>
 
           <div className="mt-4 grid grid-cols-3 gap-px overflow-hidden rounded border border-[var(--border)] bg-[var(--border)] text-center">
-            <Field2 label="Wrapped AES key" value={`${keyBytes.length} B`} sub="RSA-OAEP-2048" />
-            <Field2 label="Nonce (iv)" value={`${ivBytes.length} B`} sub="AES-GCM" />
-            <Field2 label="Ciphertext" value={`${dataBytes.length} B`} sub={`${note.length} chars in`} />
+            <WireStat label="Wrapped AES key" value={`${keyBytes.length} B`} sub="RSA-OAEP-2048" />
+            <WireStat label="Nonce (iv)" value={`${ivBytes.length} B`} sub="AES-GCM" />
+            <WireStat label="Ciphertext" value={`${dataBytes.length} B`} sub={`${note.length} chars in`} />
           </div>
 
           <h4 className="mt-4 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
@@ -2568,7 +2569,7 @@ function WireView({
   );
 }
 
-function Field2({ label, value, sub }: { label: string; value: string; sub: string }) {
+function WireStat({ label, value, sub }: { label: string; value: string; sub: string }) {
   return (
     <div className="bg-[var(--surface)] px-3 py-2.5">
       <div className="font-mono text-sm">{value}</div>
@@ -2767,10 +2768,9 @@ function PromptsDrawer({ onClose }: { onClose: () => void }) {
                 </h4>
                 <p className="mt-1.5 text-[12px] leading-relaxed">
                   Everything above is fixed. Your instructions go in a{" "}
-                  <strong className="font-semibold">saved routine</strong> — or the one-off box,
-                  for a single note. Both are appended <em>beneath</em> these rules, so a routine
-                  can shape the note without being able to override the parts that protect the
-                  patient.
+                  <strong className="font-semibold">saved routine</strong>, or into the Custom
+                  prompt workspace for a one-off. Both are read <em>beneath</em> these rules, so
+                  neither can override the parts that protect the patient.
                 </p>
                 <p className="mt-2 text-[12px] leading-relaxed">{cfg.customisation.why}</p>
               </div>

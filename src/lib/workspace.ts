@@ -205,6 +205,44 @@ export function normalisePromptRun(raw: unknown): PromptRun {
   return { systemInstruction, prompt };
 }
 
+/**
+ * The single string the de-identification pass reads for a prompt run.
+ *
+ * A custom prompt has two bodies that must share one set of tokens, so the
+ * local model is shown them joined and reads both in one inference rather than
+ * two. Defined here because the browser needs the same answer the route does —
+ * see {@link budgetedText}.
+ */
+export function joinForScrub(systemInstruction: string, prompt: string): string {
+  const own = systemInstruction.trim();
+  return own ? `${own}\n\n${prompt}` : prompt;
+}
+
+/**
+ * The text the input budget in `limits.ts` actually applies to.
+ *
+ * For a note it is the narrative. For a CLOUD prompt run it is the system
+ * instruction and the prompt joined, because that is what the local model is
+ * asked to scan — and budgeting the prompt alone let two 20,000-character
+ * fields put 40,000 characters in front of a model the same file says can only
+ * read 20,000 reliably. Past that it starts missing names, which is a recall
+ * problem, and recall here means identifiers.
+ *
+ * For a LOCAL prompt run nothing is scanned at all, so only the prompt itself
+ * is bounded, exactly as before.
+ */
+export function budgetedText(opts: {
+  workspace: Workspace;
+  narrative: string;
+  promptRun: PromptRun | null;
+  localDestination: boolean;
+}): string {
+  if (opts.workspace !== "prompt" || !opts.promptRun) return opts.narrative;
+  return deidentifies(opts.localDestination)
+    ? joinForScrub(opts.promptRun.systemInstruction, opts.promptRun.prompt)
+    : opts.promptRun.prompt;
+}
+
 /* ------------------------------------------------------------------ */
 /* What a given run actually does                                      */
 /* ------------------------------------------------------------------ */

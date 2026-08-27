@@ -26,8 +26,10 @@ import { getTemplate } from "@/lib/prompts";
 import { HARD_CHAR_LIMIT, measure } from "@/lib/limits";
 import {
   audits,
+  budgetedText,
   deidentifies,
   isWorkspace,
+  joinForScrub,
   normalisePromptRun,
   normaliseDeidSampling,
   normaliseSampling,
@@ -50,9 +52,11 @@ export const maxDuration = 300;
  *        -> re-hydrate -> audit (de-identified only) -> encrypt -> unlock
  *
  * The format stage goes to Gemini, or to the model already loaded in LM Studio
- * when the clinician picks the local destination. Everything either side of it
- * is identical — in particular both scrub passes still run, because the audit
- * log's de-identification invariant is not a property of the cloud boundary.
+ * when the clinician picks the local destination — and THAT choice, alone,
+ * decides what happens either side of it. Bound for Google: both scrub passes
+ * run, the answer is re-hydrated, and a de-identified row is written. Staying
+ * on this Mac: none of the three happen, because nothing leaves the box and a
+ * raw run has no de-identified copy of itself to store. See `workspace.ts`.
  *
  * Progress is emitted as Server-Sent Events so the clinician watches real
  * stages rather than a spinner. Only the final `result` event carries the
@@ -318,7 +322,14 @@ export async function POST(req: NextRequest) {
 
         // The local model can only reliably scan what fits its attention. Past
         // the cap it starts missing names, so refusing is the safe answer.
-        const size = measure(noteText);
+        //
+        // On a cloud prompt run that means the system instruction AND the
+        // prompt, because the de-identification pass reads them joined. Sizing
+        // the prompt alone let two 20k fields hand 40k characters to a model
+        // that can only read 20k of them.
+        const size = measure(
+          budgetedText({ workspace, narrative: noteText, promptRun, localDestination }),
+        );
         if (size.overHard) {
           emit("error", {
             error: scrubbing
@@ -380,7 +391,7 @@ export async function POST(req: NextRequest) {
           // applies what it found to each string separately.
           // The original, joined for a prompt run so one pass covers both
           // strings. See `scrubWithLlm` on why this is not the scrubbed text.
-          const nerInput = promptRun ? `${promptSystem}\n\n${noteText}` : noteText;
+          const nerInput = promptRun ? joinForScrub(promptSystem, noteText) : noteText;
           const llmResult = await scrubWithLlm(nerInput, vault, onToken("ner"), deidSampling);
           await flushStream(true);
           scrubMs = Date.now() - scrubStarted;
@@ -532,10 +543,6 @@ export async function POST(req: NextRequest) {
                 modelUsed: formatted.model,
                 processingTimeMs,
                 patternScrub: usePatterns,
-                // Custom prompts are never persisted — they arrive sealed and
-                // die with the request — so the row records that this note came
-                // from prompts nobody can look up, rather than implying the
-                // built-in ones produced it.
                 // A custom prompt is never persisted — it arrives sealed and
                 // dies with the request — so the row says the run came from a
                 // prompt nobody can look up, rather than naming a routine.
@@ -572,7 +579,13 @@ export async function POST(req: NextRequest) {
           deidentifiedInput,
           deidentifiedOutput: formatted.text,
           // Only what the text actually carries — see `TokenVault.summary`.
-          redactions: scrubbing ? vault.summary(deidentifiedInput) : [],
+          // A prompt run cleaned two strings, so both are searched: an
+          // identifier that appeared only in the system instruction was
+          // redacted but was missing from the list that claims to show every
+          // redaction.
+          redactions: scrubbing
+            ? vault.summary(promptRun ? `${deidentifiedInput}\n${promptSystem}` : deidentifiedInput)
+            : [],
           meta: {
             auditLogId,
             model: formatted.model,

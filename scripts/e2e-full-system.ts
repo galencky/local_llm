@@ -141,6 +141,31 @@ async function main() {
     `${page.status} ${page.headers.get("location")}`);
   check("/signin itself is public", (await fetch(`${base}/signin`)).status === 200);
 
+  // The middleware only proves a session COOKIE is present, never that it is
+  // valid — so a forged one used to walk straight into /api/status and read
+  // the loaded model, the Gemini configuration, and whether the developer
+  // password bypass was enabled and accepting remote connections. Every data
+  // route must call auth() itself.
+  const forged = { Cookie: "authjs.session-token=not-a-real-session" };
+  for (const path of [
+    "/api/status",
+    "/api/models",
+    "/api/history",
+    "/api/prompts",
+    "/api/prompt-config",
+  ]) {
+    const res = await fetch(`${base}${path}`, { headers: forged, redirect: "manual" });
+    check(`${path} refuses a forged session cookie`, res.status === 401, `got ${res.status}`);
+  }
+  // The one deliberate exception: /api/keys hands out an RSA PUBLIC key, which
+  // is meant to be public. It carries nothing about this instance or its users.
+  const keys = await fetch(`${base}/api/keys`, { headers: forged });
+  check("/api/keys is public on purpose, and only public material",
+    keys.status === 200 &&
+      Object.keys((await keys.json()) as object).every((k) =>
+        ["publicKey", "keyId", "algorithm", "hash", "modulusLength", "format"].includes(k)),
+    `got ${keys.status}`);
+
   section("0b. Developer bypass guards");
   const devPost = (body: unknown, headers: Record<string, string> = {}) =>
     fetch(`${base}/api/auth/dev-login`, {

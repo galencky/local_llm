@@ -8,9 +8,14 @@ import type { NextRequest } from "next/server";
  * route is an open door to the clinical pipeline. Only the auth endpoints, the
  * sign-in page and static assets are public.
  *
- * The session cookie's *presence* is the gate here; its validity is checked in
- * the route handlers via `auth()`. Middleware deliberately avoids a database
- * round-trip on every request.
+ * The session cookie's *presence* is the gate here, and presence is NOT proof:
+ * anyone can send `authjs.session-token=anything`. Middleware deliberately
+ * avoids a database round-trip on every request, so this is a cheap filter for
+ * the unauthenticated, never an authorisation check.
+ *
+ * Every route that returns data therefore calls `auth()` itself. Treat that as
+ * mandatory for anything added here: a handler that trusts the middleware is a
+ * handler any stranger can read.
  */
 const PUBLIC = [
   /^\/signin/,

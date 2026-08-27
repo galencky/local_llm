@@ -149,6 +149,20 @@ async function main() {
   const collide = v2.rehydrate("[MRN_11] and [MRN_1]");
   check("longest-first replacement", collide === "mrn-value-11 and mrn-value-1", collide);
 
+  console.log("\n[6b] Applying findings cannot corrupt findings already applied");
+  // `deidentify` used to walk the vault with split/join, which re-reads text it
+  // has already written. A short identifier processed last therefore landed
+  // INSIDE a placeholder an earlier, longer one had produced — and a mangled
+  // placeholder never rehydrates, so the note came back with a broken token in
+  // it. One pass over a longest-first alternation cannot see its own output.
+  const v3 = new TokenVault();
+  v3.assign("MRN", "12345678", "regex");
+  v3.assign("OTHER_ID", "1", "llm");
+  const applied = v3.deidentify("MRN 12345678, bed 1");
+  check("long identifier tokenised", applied.includes("[MRN_1]"), applied);
+  check("short identifier did not rewrite it", !applied.includes("[MRN_[") , applied);
+  check("both round-trip", v3.rehydrate(applied) === "MRN 12345678, bed 1", v3.rehydrate(applied));
+
   console.log("\n[7] Compute lock");
   const a = acquireLock();
   check("first acquire succeeds", a !== null);
