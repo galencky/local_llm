@@ -964,7 +964,12 @@ stream waiting for a full body. Verified live through the tunnel.
   pinned to `DOCKER_LMSTUDIO_URL` in the compose file for exactly this reason.
 - The `migrate` service builds the **builder** stage, because the runtime image
   deliberately has no Prisma CLI.
-- `docker builder prune -af` reclaims build cache without touching data.
+- **`docker builder prune -af` reclaims build cache without touching data**, and
+  it is not optional on a laptop. Measured after one session of repeated
+  rebuilds: **19.5 GB** of build cache, and `Docker.raw` at 21 GB on disk. The
+  prune took the image back to 3.6 GB. It leaves the images and
+  `AIRLOCK_DATA_DIR` alone, so the database, the routines and the keypair
+  survive it. See [ops/PUBLISH.md](ops/PUBLISH.md#keeping-the-ssd-alive).
 
 ## 15. Every script, and what it proves
 

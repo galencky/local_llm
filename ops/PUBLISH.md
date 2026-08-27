@@ -126,3 +126,30 @@ The remaining gap, stated plainly: the RSA public key is served from
 `/api/keys` over the same tunnel it protects. An attacker controlling the edge
 could substitute their own key. Pin `keyId` client-side, or distribute the SPKI
 out of band, if that is in your threat model.
+
+## Keeping the SSD alive
+
+Rebuilding this image repeatedly is what eats the disk, and none of it is
+visible in `docker images`. Measured after one long working session:
+
+| | |
+| --- | --- |
+| Build cache | **19.5 GB** |
+| `Docker.raw` on disk | 21 GB |
+| `~/.npm` | 2.3 GB |
+
+`docker builder prune -af` reclaims the cache and lets Docker Desktop compact
+`Docker.raw` — 21 GB down to 3.6 GB in that session. It touches neither the
+images nor `AIRLOCK_DATA_DIR`, so the database, the routines and the RSA keypair
+are unaffected.
+
+```bash
+docker builder prune -af      # the big one — build cache
+docker image prune -af        # dangling images
+npm cache clean --force       # ~/.npm, regenerable
+rm -rf .next                  # local build output, regenerated on next run
+```
+
+Worth doing after any run of rebuilds. Docker Desktop can also cap it for you:
+**Settings → Resources → Advanced → Disk usage limit**, and the build cache has
+its own limit under **Builders**.
