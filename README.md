@@ -248,6 +248,12 @@ control you opened it from.
 the chart, and the de-identified version for anywhere else. A local run gives
 you one — nothing was replaced, so there is only one version of it.
 
+**On a phone.** It works on one. Inputs are sized so iOS does not zoom the page
+when you tap them, touch targets are thumb-sized on any touch device, and the
+detail rows fold behind **Run detail** so the input and the run button are not
+buried under settings. Mode and model stay visible, because those are the two
+choices that change what a run does.
+
 **Keyboard.** **Cmd/Ctrl + Enter** runs. When the run button is greyed out it
 says why on hover.
 

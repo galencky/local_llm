@@ -571,7 +571,8 @@ export async function POST(req: NextRequest) {
           note: rehydrated,
           deidentifiedInput,
           deidentifiedOutput: formatted.text,
-          redactions: vault.summary(),
+          // Only what the text actually carries — see `TokenVault.summary`.
+          redactions: scrubbing ? vault.summary(deidentifiedInput) : [],
           meta: {
             auditLogId,
             model: formatted.model,

@@ -378,9 +378,16 @@ async function main() {
   });
   check("routine reported in metadata", styled.meta.promptTemplateName === routine.name,
     String(styled.meta.promptTemplateName));
-  check("routine shaped the output (Fall Risk line)", /fall risk/i.test(styled.note),
-    styled.note.slice(0, 120));
-  check("routine shaped the output (Braden / pressure injury)",
+  // The routine asks for a Fall Risk line "quoting the Morse Fall Scale" and a
+  // Pressure Injury line "quoting the Braden Scale". Which of those two names
+  // the model leads with is its editorial choice — it writes "Morse Fall
+  // Scale: 55 分" as readily as "Fall Risk: 55" — and demanding one exact
+  // phrase from a probabilistic model is how a suite starts failing for
+  // reasons that are not bugs. What the routine is on the hook for is that
+  // both scales are called out at all.
+  check("routine shaped the output (fall risk)",
+    /fall risk|morse fall scale/i.test(styled.note), styled.note.slice(0, 120));
+  check("routine shaped the output (pressure injury)",
     /braden|pressure injury/i.test(styled.note));
   // Same contract as section 5: whether the model echoes any given identifier
   // is its editorial choice — that every token it DID emit comes back is not.

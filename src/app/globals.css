@@ -233,3 +233,43 @@ textarea:focus-visible {
     transition: none;
   }
 }
+
+/**
+ * Never let iOS zoom the page when a field is focused.
+ *
+ * Safari zooms in on any input whose font is under 16px, and it does not zoom
+ * back out — the ward is then holding a page scrolled sideways with the run
+ * button off-screen. It does this on iPad as well as iPhone, so the rule runs
+ * to the `lg` breakpoint where the two-panel desktop layout begins.
+ */
+@media (max-width: 1023px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
+/**
+ * Touch targets get room on a phone.
+ *
+ * The interface is built for a 1024px ward monitor and a mouse, where a 22px
+ * icon button is fine. A thumb is not a mouse. Keyed on `pointer: coarse`
+ * rather than on width, because a tablet held in two hands is a touch device
+ * at 768px and at 1024px alike — and a mouse-driven desktop is untouched by it
+ * whatever its size.
+ */
+@media (pointer: coarse) {
+  button,
+  select,
+  header a,
+  footer a,
+  [role="group"] button {
+    min-height: 2.5rem;
+    min-width: 2.25rem;
+  }
+  input[type="checkbox"] {
+    width: 1.15rem;
+    height: 1.15rem;
+  }
+}

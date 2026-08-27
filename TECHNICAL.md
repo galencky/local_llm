@@ -348,6 +348,26 @@ the `DATE` the month/day rule made of `08-2`. `TokenVault.knows()` stops the
 same string being assigned twice under two categories, which would otherwise
 make re-hydration order-dependent.
 
+### The two passes deliberately overlap
+
+With the pattern rules on, the model still sees — and often returns — the MRN
+and the dates they already caught. That is not waste to be optimised away; it
+is the point. The rules know **shapes** and the model knows **meaning**, and
+each catches things the other cannot: a passport number has no rule, and a
+seven-digit accession has no meaning the model can distinguish from an MRN.
+Asking only one of them would mean trusting it alone.
+
+What the overlap must not do is redact anything twice.
+`TokenVault.knows(span)` drops any span already assigned under some category,
+so one identifier gets one token however many passes found it. Where the spans
+merely *overlap* rather than match — the rules take `08-2`, the model takes
+`08-2床` — `deidentify` replaces the longest original first, so the model's
+semantically correct span wins and the shorter token is simply never used.
+
+`summary()` therefore lists only tokens that actually appear in the text it is
+given. Without that filter the redaction list showed entries for tokens the
+note does not contain, which reads as a redaction that did not happen.
+
 ### Guards on what comes back
 
 Applied in this order to each returned span:
@@ -915,6 +935,21 @@ minimal frame parser (`EventSource` cannot issue a POST). On
   `flex-1` has something to distribute; `min-h-0` on the input container, so it
   can actually shrink; and a settings row that is present in both workspaces
   (note formats, or prompt parameters) rather than appearing in one.
+- **A phone is not a small ward monitor.** Three things, all keyed on the
+  device rather than guessed at: inputs are **16px below `lg`**, because Safari
+  zooms in on anything smaller and never zooms back out — on iPad as well as
+  iPhone; touch targets get a 2.5rem floor under `pointer: coarse`, which is a
+  property of the device and not of its width, so a tablet at 1024px gets them
+  and a mouse-driven desktop does not; and the four detail rows fold behind a
+  **Run detail** disclosure below `lg`, because with every selector above the
+  input they put the run button 1,120px down an iPhone SE. Mode and model stay
+  visible — they are the two choices that change what a run does.
+
+  Measured before and after on iPhone SE / 14 / 11 and iPad: 27 undersized tap
+  targets and a guaranteed zoom-on-focus, down to **zero issues**, with the run
+  button 1,120px → 965px and no horizontal overflow at any size. The desktop
+  layout is bit-identical — the disclosure is `lg:block`, so from `lg` the rows
+  are always open and the pinning still holds.
 - **A focus ring on a full-bleed control reads as a stray rule.** The narrative
   box has no border of its own and fills a clipping scroll container, so the
   global `outline: 2px solid var(--accent); outline-offset: 2px` was sliced by

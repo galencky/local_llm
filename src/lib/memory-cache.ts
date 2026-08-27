@@ -146,17 +146,27 @@ export class TokenVault {
     return this.tokens().filter((t) => text.includes(t));
   }
 
-  /** Safe-to-display audit trail for the UI inspector drawer. */
-  summary(): RedactionSummaryEntry[] {
-    return [...this.tokenToPii.entries()].map(([token, pii]) => {
-      const m = this.meta.get(token)!;
-      return {
-        token,
-        category: m.category,
-        preview: mask(pii),
-        source: m.source,
-      };
-    });
+  /**
+   * Safe-to-display audit trail for the UI inspector drawer.
+   *
+   * @param present when given, only tokens that actually appear in this text
+   * are listed. Both passes deliberately overlap — the rules know shapes, the
+   * model knows meaning — and where they see the same text the longer span
+   * wins, which can leave a shorter token assigned but never used. Listing one
+   * of those would show a redaction the note does not contain.
+   */
+  summary(present?: string): RedactionSummaryEntry[] {
+    return [...this.tokenToPii.entries()]
+      .filter(([token]) => present === undefined || present.includes(token))
+      .map(([token, pii]) => {
+        const m = this.meta.get(token)!;
+        return {
+          token,
+          category: m.category,
+          preview: mask(pii),
+          source: m.source,
+        };
+      });
   }
 
   /** Best-effort wipe. */

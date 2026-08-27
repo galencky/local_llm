@@ -407,6 +407,14 @@ export default function AirlockPage() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [promptsOpen, setPromptsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  /**
+   * On a phone the four detail rows push the input — and the run button — a
+   * long way down the page. Mode and model stay visible because they are the
+   * two choices that change what a run does; the rest folds away. Always open
+   * from `lg`, where there is room and the two-panel layout depends on these
+   * heights being constant.
+   */
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [user, setUser] = useState<SessionUser | null>(null);
   const [copied, setCopied] = useState<"identified" | "deidentified" | null>(null);
   const [queued, setQueued] = useState<BusyInfo | null>(null);
@@ -1004,6 +1012,30 @@ export default function AirlockPage() {
             lmStudio={status?.lmStudio ?? null}
           />
 
+          {/* ---- run detail ----
+               Folded away on a phone, where these four rows put the input and
+               the run button a thousand pixels down the page. Mode and model
+               above stay visible: they are the two choices that change what a
+               run does. Open and non-collapsible from `lg`, where there is
+               room and the two-panel layout depends on these heights. */}
+          <button
+            onClick={() => setDetailsOpen((v) => !v)}
+            aria-expanded={detailsOpen}
+            className="flex w-full items-center gap-2 border-b border-[var(--border)] px-3 py-2 text-left text-[11px] text-[var(--muted)] lg:hidden"
+          >
+            <SlidersHorizontal className="size-3.5 shrink-0" />
+            <span className="font-semibold uppercase tracking-wider">Run detail</span>
+            <span className="min-w-0 flex-1 truncate text-[var(--faint)]">
+              {workspace === "note" ? NOTE_FORMAT_TITLES[format] : "prompt decides the shape"}
+              {activeTemplate ? ` · ${activeTemplate.name}` : ""}
+              {!patternScrub && deidentifies(localDestination) ? " · no patterns" : ""}
+            </span>
+            <ChevronRight
+              className={cn("size-4 shrink-0 transition-transform", detailsOpen && "rotate-90")}
+            />
+          </button>
+
+          <div className={cn("lg:block", !detailsOpen && "hidden")}>
           {/* ---- what this run produces ----
                One row, present in both workspaces, so switching cannot change
                the height of anything below it. */}
@@ -1146,6 +1178,8 @@ export default function AirlockPage() {
             </button>
           </div>
 
+          </div>
+
           {/* The workspace IS the left panel. A narrative in one, a system
               instruction and a prompt in the other — rather than a narrative
               box that quietly stops meaning "narrative". */}
@@ -1200,7 +1234,7 @@ export default function AirlockPage() {
                 onKeyDown={onKeyDown}
                 disabled={submitting}
                 spellCheck={false}
-                rows={16}
+                rows={10}
                 placeholder={
                   "Paste or dictate the ward narrative here — names, IDs, dates and MRNs are stripped on this machine before anything reaches the cloud.\n\nCmd/Ctrl + Enter to run."
                 }
