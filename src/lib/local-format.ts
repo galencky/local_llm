@@ -2,7 +2,7 @@ import "server-only";
 import { assemblePrompt, systemInstruction, type NoteFormat, type NoteInstructions, type FormatNoteResult } from "./gemini";
 import { withPlaceholderKernel, type CustomCloudConfig } from "./custom-mode";
 import { lmStudioBaseUrl, lmStudioFormatTimeoutMs } from "./lmstudio";
-import { loadedLmStudioModel } from "./scrubber-llm";
+import { resolveLocalModel } from "./scrubber-llm";
 
 /**
  * The local formatting destination — the same note, written on this Mac.
@@ -45,25 +45,6 @@ export class LocalFormatError extends Error {
 }
 
 /**
- * The model that will actually write the note.
- *
- * `LMSTUDIO_MODEL` is a pin and it wins, because it is what the request asks
- * for — but a pin goes stale, so an unset one falls through to whatever LM
- * Studio has loaded rather than to a meaningless literal.
- *
- * Exported because the selector must label its Local chip with the model that
- * will answer, not the one that happens to be loaded. Labelling the chip
- * "gemma-4-12b" and then writing the note with a pinned `gemma-4-e4b` is
- * exactly the drift the Prompts drawer already warns about; one resolver means
- * the two cannot disagree.
- */
-export async function resolveLocalFormatModel(): Promise<string> {
-  const pinned = process.env.LMSTUDIO_MODEL?.trim();
-  if (pinned) return pinned;
-  return (await loadedLmStudioModel()) ?? "local-model";
-}
-
-/**
  * Prefixed so an audit row can never be misread.
  *
  * Every cloud rung is `gemini-…`; a bare `google/gemma-4-12b` in `modelUsed`
@@ -92,7 +73,7 @@ export async function formatWithLocalModel(
   custom: CustomCloudConfig | null = null,
 ): Promise<FormatNoteResult> {
   const started = Date.now();
-  const model = await resolveLocalFormatModel();
+  const model = await resolveLocalModel();
 
   const prompt = assemblePrompt({
     format,

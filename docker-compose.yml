@@ -76,7 +76,10 @@ services:
       # interpolation, so the host's own value (127.0.0.1) would win and point
       # the container at itself. Override with DOCKER_LMSTUDIO_URL if needed.
       LMSTUDIO_BASE_URL: ${DOCKER_LMSTUDIO_URL:-http://host.docker.internal:1234/v1}
-      LMSTUDIO_MODEL: ${LMSTUDIO_MODEL:-google/gemma-4-e4b}
+      # Fallback only: the model is detected from LM Studio, and that is what
+      # every stage uses. Left empty so nothing here can name a model other
+      # than the one actually loaded.
+      LMSTUDIO_MODEL: ${LMSTUDIO_MODEL:-}
       LMSTUDIO_TIMEOUT_MS: ${LMSTUDIO_TIMEOUT_MS:-90000}
       # The local formatting destination writes a whole note, not a short
       # entity list, so it gets its own, longer budget.

@@ -154,7 +154,9 @@ To publish it to a hospital over a Cloudflare Tunnel, see
 audit row, so two notes labelled "SOAP" are comparable.
 
 **Where the note gets written.** The model selector offers the Gemini ladder and
-one more option: **Local**. Picking it means the model already loaded in LM
+one more option: **Local**, which detects whatever LM Studio has loaded and
+shows its name beside a status light, the way the badges in the header do —
+there is nothing to configure and nothing that can fall out of step. Picking it means the model already loaded in LM
 Studio writes the note as well as reading it, so the request makes no outbound
 call whatsoever — no Google, no quota, nothing to explain to a hospital about a
 third-party processor. Useful when quota is spent, when the network is down, or

@@ -444,6 +444,17 @@ weaker than a Flash model, and the run holds the single compute slot for **two**
 local inferences instead of one. That is a legitimate trade for a ward with no
 egress, an exhausted quota, or a note somebody would simply rather not send.
 
+Measured on `gemma-4-12b` over a short ward note, once the model is warm:
+
+```
+scrub (regex + NER)   5.5 – 7.5 s
+format (local)       12   – 13.5 s
+```
+
+The first run after LM Studio changes model pays a one-off load — 17.5s on the
+de-identification pass in one measurement — which is why nothing should be
+asking it for a model other than the one already loaded.
+
 ### It never falls back to the cloud
 
 `LocalFormatError` is surfaced as `code: LOCAL_FORMAT_FAILED` and the run ends
@@ -476,15 +487,33 @@ platform cutting the stream.
 
 ### Which local model answers
 
-`resolveLocalFormatModel()` is the single resolver: `LMSTUDIO_MODEL` if it is
-set, otherwise whatever LM Studio has loaded, otherwise the literal
-`local-model`. The pin wins because the pin is what the request asks for.
+`resolveLocalModel()` in `scrubber-llm.ts` is the single resolver, and it
+**detects rather than configures**: whatever LM Studio has loaded, falling back
+to `LMSTUDIO_MODEL` only when detection fails, and to the literal `local-model`
+if there is nothing at all.
 
-`/api/status` reports it as `lmStudio.requestModel` alongside `lmStudio.models`
-(what is loaded), so the selector labels its Local chip with the model that will
-actually answer. When the two disagree the chip carries a warning triangle and
-the bar says which one writes the note — the same drift the Prompts drawer
-already reports, in the place where it changes the outcome.
+It was the other way round once — the pin outranked reality, on the reasoning
+that the pin is what the request asks for. That is true and it is exactly the
+problem: LM Studio serves one loaded model on a 16GB box, so asking for a
+different one makes it swap models mid-request. Measured with a pin naming a
+model other than the loaded one, the de-identification pass went from **4.5s to
+20s** while the box loaded the pinned model, and the interface named one model
+while another wrote the note.
+
+Every stage now shares the resolver — the status badge, the model selector, the
+de-identification pass, the formatting pass and the audit row cannot disagree
+about which model is doing the work. It is resolved **once per run** in
+`scrubWithLlm`, so the retries for a `400` or an empty `content` cannot land on
+a different model than the first attempt did.
+
+`/api/status` reports it as `lmStudio.requestModel` beside `lmStudio.models`,
+and the Local chip reads like a status badge: a light that is on when LM Studio
+answers, and the detected model name next to it. `LMSTUDIO_MODEL` is documented
+as a fallback, and the Prompts drawer says so in one quiet line if a value is
+set that is not in use.
+
+Custom mode may still name a local model explicitly (`custom.local.model`); that
+is a deliberate per-run override and it wins over detection.
 
 ### How it shows up
 
@@ -715,7 +744,7 @@ stream waiting for a full body. Verified live through the tunnel.
 | `GEMINI_MODEL_LADDER` | Optional override of the whole ladder, best first, comma separated |
 | `GEMINI_BASE_URL` | Optional endpoint override (egress proxy, regional endpoint, local stub). Unset normally. |
 | `LMSTUDIO_BASE_URL` | Local NER endpoint. In Docker this is pinned to `DOCKER_LMSTUDIO_URL`. |
-| `LMSTUDIO_MODEL` | Model id each request asks LM Studio for |
+| `LMSTUDIO_MODEL` | **Fallback only.** The model is detected from LM Studio; this is used only when detection fails. Normally empty. |
 | `LMSTUDIO_TIMEOUT_MS` | De-identification pass timeout, default 90000 |
 | `LMSTUDIO_FORMAT_TIMEOUT_MS` | Local *formatting* timeout, default 240000. See [section 8b](#8b-the-local-destination). |
 | `ALLOW_DEGRADED_SCRUB` | `false` (default) aborts when the local pass is unavailable. `true` permits regex-only. |
@@ -944,7 +973,8 @@ count, degraded-scrub policy, build id, dev-login policy.
 | Same, but only on long notes | The entity JSON was truncated | Raise `max_tokens` (custom mode) or split the note |
 | Local pass returns nothing, model looks broken | A reasoning model put the answer in `reasoning_content` | Already handled by the empty-`content` retry; confirm the model actually answers `/chat/completions` |
 | Status badge says "LM Studio down" during every note | Probing a server that serialises | Expected and handled — `/api/status` uses the cached health while locked |
-| Prompts drawer names a model you did not load | `LMSTUDIO_MODEL` pins a different id than LM Studio has loaded | The drawer now shows both and warns; fix the pin or clear it |
+| Prompts drawer names a model you did not load | Stale health cache, or LM Studio was unreachable when it was read | It refreshes on the next status poll; `curl $LMSTUDIO_BASE_URL/models` to confirm what is loaded |
+| A run is far slower than usual on its local pass | LM Studio swapped models mid-request | Should no longer happen — every stage resolves the same detected model. If it recurs, check nothing is setting `custom.local.model`. |
 | Badge stays "Mac Mini Online" during a run | Fixed — the badge now treats a submitting tab as busy and polls at 1 s | If it recurs, check `/api/status` returns `busy: true` directly |
 | Every note 429 | A wedged request holds the lock | It self-reclaims after 5 minutes; `/api/status` shows `lockHeldForMs` |
 | A model chip greys out unexpectedly | Google refused it and the cooldown persisted | `select * from "ModelCooldown"` |

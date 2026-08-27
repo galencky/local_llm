@@ -166,13 +166,16 @@ async function callLmStudio(
   signal: AbortSignal,
   useSchema: boolean,
   custom: CustomLocalConfig | null,
+  /** Resolved once per run — see `resolveLocalModel`. */
+  model: string,
 ): Promise<Response> {
   return fetch(`${baseUrl()}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal,
     body: JSON.stringify({
-      model: custom?.model || process.env.LMSTUDIO_MODEL || "local-model",
+      // Custom mode may name a model explicitly; otherwise use the detected one.
+      model: custom?.model || model,
       temperature: custom ? custom.temperature : 0,
       ...(custom && custom.topP < 1 ? { top_p: custom.topP } : {}),
       // A long shift note can carry 60+ entities. Too low a cap truncates the
@@ -226,11 +229,6 @@ export function lastKnownLmStudioHealth(): LmStudioHealth {
 
 /**
  * The model LM Studio actually has loaded right now, or null if we cannot tell.
- *
- * `LMSTUDIO_MODEL` is what each request *asks* for; this is what is *there*.
- * The two drift — a model is swapped in LM Studio and the env var is not
- * updated — and the read-only prompt view showed the stale env value, so the
- * page named a model that was not the one reading the notes.
  */
 export async function loadedLmStudioModel(): Promise<string | null> {
   const cached = globalForHealth.__lmStudioLastHealthy;
@@ -238,6 +236,30 @@ export async function loadedLmStudioModel(): Promise<string | null> {
   // mid-inference: LM Studio serialises, so the probe would block a note.
   if (cached && Date.now() - cached.at < 60_000) return cached.models[0] ?? null;
   return (await checkLmStudioHealth()).models[0] ?? null;
+}
+
+/**
+ * The local model every stage should use — detected, not configured.
+ *
+ * LM Studio serves one loaded model on a 16GB box, so "whatever is loaded" is
+ * both the true answer and the only one that cannot go stale. `LMSTUDIO_MODEL`
+ * is therefore a FALLBACK for when detection fails, not an override: a pin that
+ * outranked reality meant asking for a model that was not there, and LM Studio
+ * answers that by swapping models mid-request. Measured, with the pin naming a
+ * model other than the loaded one: the de-identification pass went from 4.5s to
+ * 20s while the box loaded the pinned model, and the interface named one model
+ * while another wrote the note.
+ *
+ * Every caller shares this so the status badge, the model selector, the
+ * de-identification pass, the formatting pass and the audit row cannot disagree
+ * about which model is doing the work.
+ */
+export async function resolveLocalModel(): Promise<string> {
+  return (
+    (await loadedLmStudioModel()) ??
+    process.env.LMSTUDIO_MODEL?.trim() ??
+    "local-model"
+  );
 }
 
 /** Is the local inference server up and holding a model? */
@@ -297,6 +319,10 @@ export async function scrubWithLlm(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs());
 
+  // Resolve once, so the retries below cannot land on a different model than
+  // the first attempt did.
+  const model = await resolveLocalModel();
+
   let content: string;
   try {
     type ChatBody = { choices?: { message?: { content?: string } }[] };
@@ -307,10 +333,10 @@ export async function scrubWithLlm(
       return ((await r.json()) as ChatBody).choices?.[0]?.message?.content ?? "";
     };
 
-    let res = await callLmStudio(input, controller.signal, true, custom);
+    let res = await callLmStudio(input, controller.signal, true, custom, model);
     if (res.status === 400) {
       // Older LM Studio builds / GGUFs without grammar support.
-      res = await callLmStudio(input, controller.signal, false, custom);
+      res = await callLmStudio(input, controller.signal, false, custom, model);
       content = await read(res);
     } else {
       content = await read(res);
@@ -320,7 +346,7 @@ export async function scrubWithLlm(
         // 400 branch above never fires, so without this the pipeline fails
         // closed on every note and the model looks broken. Retry once with no
         // schema, which puts the answer back in `content`.
-        res = await callLmStudio(input, controller.signal, false, custom);
+        res = await callLmStudio(input, controller.signal, false, custom, model);
         content = await read(res);
       }
     }

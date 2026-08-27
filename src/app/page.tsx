@@ -1765,14 +1765,17 @@ function ModelBar({
 }) {
   const local = chosen === LOCAL_MODEL_ID;
   const localReady = Boolean(lmStudio?.online);
-  // Label the model that will ANSWER, not the one that happens to be loaded.
-  // LMSTUDIO_MODEL is what the request asks for, so a stale pin would
-  // otherwise have the chip promise one model and the audit row name another.
-  const loaded = lmStudio?.models[0] ?? null;
-  const willAnswer = lmStudio?.requestModel ?? loaded;
-  const pinMismatch = Boolean(loaded && willAnswer && loaded !== willAnswer);
+  // Detected from LM Studio, exactly like the status badge in the header —
+  // there is nothing to configure and nothing that can go stale.
+  const detected = lmStudio?.requestModel ?? lmStudio?.models[0] ?? null;
   // "google/gemma-4-12b" does not fit on a chip. The full id is in the tooltip.
-  const localName = willAnswer?.split("/").pop() ?? null;
+  const localName = detected?.split("/").pop() ?? null;
+  // LM Studio reports "not online" both when it is unreachable and when it is
+  // up with nothing loaded. Only the first carries an error string, and the
+  // two need different advice.
+  const localHint = lmStudio?.error
+    ? "LM Studio is not reachable"
+    : "LM Studio has no model loaded";
 
   if (models.length === 0 && !lmStudio) return null;
 
@@ -1798,7 +1801,7 @@ function ModelBar({
         )}
         <span className="whitespace-nowrap text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
           {local
-            ? "Writing the note on this Mac — nothing leaves"
+            ? `Writing the note on this Mac${detected ? ` · ${detected}` : ""} — nothing leaves`
             : "Model — cloud ladder falls back rightward"}
         </span>
         {!local && nextUp && nextUp.id !== chosen && (
@@ -1809,15 +1812,17 @@ function ModelBar({
       </div>
 
       <div className="flex flex-wrap items-center gap-1">
+        {/* Reads like the status badges in the header: a light that is on when
+            LM Studio answers, and the name of whatever it has loaded. There is
+            no model to choose and nothing to keep in step — the name is
+            detected on every status poll. */}
         <button
           onClick={() => onChoose(LOCAL_MODEL_ID)}
           disabled={disabled || !localReady}
           title={
-            !localReady
-              ? "LM Studio is not reachable, so there is no local model to write with."
-              : pinMismatch
-                ? `${willAnswer} — writes the note on this Mac. LM Studio currently has ${loaded} loaded, but LMSTUDIO_MODEL pins requests to ${willAnswer}.`
-                : `${willAnswer ?? "the loaded model"} — writes the note on this Mac. No cloud call, no quota, and both de-identification passes still run.`
+            localReady
+              ? `${detected} — detected in LM Studio. Writes the note on this Mac: no cloud call, no quota, and both de-identification passes still run.`
+              : `${localHint}, so there is no local model to write with.`
           }
           className={cn(
             "flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed",
@@ -1825,12 +1830,25 @@ function ModelBar({
               ? "border-[var(--border)] bg-[var(--background)] text-[var(--muted)]"
               : local
                 ? "border-[var(--accent-solid)] bg-[var(--accent-solid)] text-[var(--on-accent)]"
-                : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)]",
+                : "border-emerald-500/40 text-[var(--muted)] hover:text-[var(--foreground)]",
           )}
         >
+          {/* Solid dot, not a translucent one: an alpha wash over an off-white
+              panel is what once made a control invisible in light mode. */}
+          <span
+            aria-hidden
+            className={cn(
+              "size-1.5 shrink-0 rounded-full",
+              !localReady
+                ? "bg-[var(--faint)]"
+                : local
+                  ? "bg-[var(--on-accent)]"
+                  : "bg-emerald-600 dark:bg-emerald-400",
+            )}
+          />
           <Cpu className="size-3 shrink-0" />
           Local
-          {localName && (
+          {localReady && localName ? (
             <span
               className={cn(
                 "font-mono text-[9px]",
@@ -1839,16 +1857,9 @@ function ModelBar({
             >
               {localName}
             </span>
+          ) : (
+            <span className="text-[var(--muted)]">· {lmStudio?.error ? "offline" : "no model"}</span>
           )}
-          {pinMismatch && localReady && (
-            <AlertTriangle
-              className={cn(
-                "size-3 shrink-0",
-                local ? "text-[var(--on-accent)]" : "text-amber-700 dark:text-amber-400",
-              )}
-            />
-          )}
-          {!localReady && <span className="text-[var(--muted)]">· offline</span>}
         </button>
 
         {models.length > 0 && (
@@ -1909,14 +1920,7 @@ function ModelBar({
         </p>
       )}
 
-      {local && pinMismatch && (
-        <p className="mt-1.5 text-[10px] leading-relaxed text-amber-700 dark:text-amber-400">
-          LM Studio has <span className="font-mono">{loaded}</span> loaded, but{" "}
-          <span className="font-mono">LMSTUDIO_MODEL</span> pins requests to{" "}
-          <span className="font-mono">{willAnswer}</span> — that is the one that will write the
-          note. Point the pin at the loaded model, or clear it.
-        </p>
-      )}
+
 
       {!local && !nextUp && (
         <p className="mt-1.5 text-[10px] text-rose-700 dark:text-rose-400">
@@ -2575,18 +2579,18 @@ function PromptsDrawer({ onClose }: { onClose: () => void }) {
                   When the two disagree the pin is what each request asks for,
                   which is worth saying out loud rather than quietly showing
                   one of the two names. */}
+              {/* Not a warning any more: detection wins, so a stale
+                  LMSTUDIO_MODEL changes nothing. Worth one quiet line so the
+                  value in .env does not look like it is in force. */}
               {cfg.local.loadedModel &&
                 cfg.local.configuredModel &&
                 cfg.local.loadedModel !== cfg.local.configuredModel && (
-                  <div className="mb-3 flex gap-2 rounded border border-amber-500/40 bg-amber-500/10 p-2.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
-                    <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                    <span>
-                      LM Studio has <strong>{cfg.local.loadedModel}</strong> loaded, but{" "}
-                      <code className="font-mono">LMSTUDIO_MODEL</code> pins requests to{" "}
-                      <strong>{cfg.local.configuredModel}</strong>. Point the pin at the loaded
-                      model, or clear it, so the note is read by the model named here.
-                    </span>
-                  </div>
+                  <p className="mb-3 text-[11px] leading-relaxed text-[var(--muted)]">
+                    <code className="font-mono">LMSTUDIO_MODEL</code> is set to{" "}
+                    <span className="font-mono">{cfg.local.configuredModel}</span> and is not in
+                    use — the loaded model above is detected from LM Studio and is what reads the
+                    notes. The setting is only a fallback for when LM Studio cannot be reached.
+                  </p>
                 )}
               <PromptBlock title="System prompt" body={cfg.local.prompt} />
             </>

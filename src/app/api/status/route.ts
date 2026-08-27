@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { currentActivity, isLocked, lockHeldForMs } from "@/lib/concurrency";
-import { checkLmStudioHealth, lastKnownLmStudioHealth } from "@/lib/scrubber-llm";
-import { resolveLocalFormatModel } from "@/lib/local-format";
+import {
+  checkLmStudioHealth,
+  lastKnownLmStudioHealth,
+  resolveLocalModel,
+} from "@/lib/scrubber-llm";
+
 import { vaultCount, VAULT_TTL_MS } from "@/lib/memory-cache";
 import { geminiModel } from "@/lib/gemini";
 import { devLoginAllowsRemote, devLoginEnabled } from "@/lib/dev-login";
@@ -29,10 +33,11 @@ export async function GET() {
 
   const busy = busyNow;
 
-  // What a request will actually ask LM Studio for. `lmStudio.models` is what
-  // is loaded; these differ whenever LMSTUDIO_MODEL pins something else, and
-  // the selector must label its Local option with the one that will answer.
-  const requestModel = await resolveLocalFormatModel();
+  // What a request will actually ask LM Studio for. Normally this IS the loaded
+  // model — it falls back to LMSTUDIO_MODEL only when detection fails — but the
+  // selector should label its Local option from one resolved value rather than
+  // guessing from the model list.
+  const requestModel = await resolveLocalModel();
 
   return NextResponse.json(
     {

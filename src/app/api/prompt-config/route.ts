@@ -43,9 +43,9 @@ export async function GET() {
     return NextResponse.json({ error: "Sign in required." }, { status: 401 });
   }
 
-  // Report the model that is actually there, not the one the environment names.
-  // A model swapped in LM Studio without updating LMSTUDIO_MODEL used to leave
-  // this page naming a model that was not the one reading the notes.
+  // Report the model that is actually there. LMSTUDIO_MODEL is only a fallback
+  // for when LM Studio cannot be reached, so it is surfaced separately rather
+  // than mixed into the name this page shows.
   const configuredLocal = process.env.LMSTUDIO_MODEL?.trim() || null;
   const loadedLocal = await loadedLmStudioModel();
 
@@ -56,7 +56,7 @@ export async function GET() {
         model: loadedLocal ?? configuredLocal ?? "local",
         /** What LM Studio has loaded, or null when it is unreachable. */
         loadedModel: loadedLocal,
-        /** What LMSTUDIO_MODEL pins each request to, or null when unset. */
+        /** The LMSTUDIO_MODEL fallback, used only if detection fails. */
         configuredModel: configuredLocal,
         prompt: NER_SYSTEM_PROMPT,
       },
