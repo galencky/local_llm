@@ -94,37 +94,43 @@ async function main() {
   await new Promise<void>((r) => geminiStub.listen(8899, r));
   console.log("stubs up: LM Studio :1234, Gemini :8899\n");
 
-  const decoded = await runPipeline<{
-    note: string;
-    deidentifiedInput: string;
-    redactions: { preview: string }[];
-    meta: { unresolvedTokens: string[]; auditLogId: string | null; degradedScrub: boolean };
-  }>({ baseUrl: base, text: NOTE, format: "SOAP", headers: who.cookie });
+  // Cleanup in a `finally`: a run that dies partway would otherwise leave a
+  // harness user in the database and two listeners holding :1234 and :8899 —
+  // and :1234 is the port the real LM Studio wants back.
+  try {
+    const decoded = await runPipeline<{
+      note: string;
+      deidentifiedInput: string;
+      redactions: { preview: string }[];
+      meta: { unresolvedTokens: string[]; auditLogId: string | null; degradedScrub: boolean };
+    }>({ baseUrl: base, text: NOTE, format: "SOAP", headers: who.cookie });
 
-  console.log("--- what the cloud actually received ---");
-  console.log(decoded.deidentifiedInput.split("\n").map((l: string) => "   " + l).join("\n"));
-  console.log("\n--- re-hydrated note returned to the browser ---");
-  console.log(decoded.note.split("\n").map((l: string) => "   " + l).join("\n"));
-  console.log();
+    console.log("--- what the cloud actually received ---");
+    console.log(decoded.deidentifiedInput.split("\n").map((l: string) => "   " + l).join("\n"));
+    console.log("\n--- re-hydrated note returned to the browser ---");
+    console.log(decoded.note.split("\n").map((l: string) => "   " + l).join("\n"));
+    console.log();
 
-  for (const pii of ["王小明", "王美華", "陳大文", "8A病房", "87654321", "B234567890", "0912-345-678", "02-27123456", "2024/05/02", "113/05/05"]) {
-    check(`cloud never saw ${pii}`, !promptSeenByCloud.includes(pii));
+    for (const pii of ["王小明", "王美華", "陳大文", "8A病房", "87654321", "B234567890", "0912-345-678", "02-27123456", "2024/05/02", "113/05/05"]) {
+      check(`cloud never saw ${pii}`, !promptSeenByCloud.includes(pii));
+    }
+    check("clinical data preserved for the cloud", decoded.deidentifiedInput.includes("12.4") && decoded.deidentifiedInput.includes("100mg"));
+    check("CRP not mistaken for a person", decoded.deidentifiedInput.includes("CRP"));
+    check("patient name restored", decoded.note.includes("王小明"));
+    check("MRN restored", decoded.note.includes("87654321"));
+    check("attending restored", decoded.note.includes("陳大文"));
+    check("ROC date restored", decoded.note.includes("113/05/05"));
+    check("no placeholders left in the note", decoded.meta.unresolvedTokens.length === 0, JSON.stringify(decoded.meta.unresolvedTokens));
+    check("audit row written", Boolean(decoded.meta.auditLogId), "audit write failed");
+    check("scrub was not degraded", decoded.meta.degradedScrub === false);
+    check("inspector has redactions", decoded.redactions.length >= 8, `${decoded.redactions.length}`);
+    check("inspector previews are masked", decoded.redactions.every((r: { preview: string }) => r.preview.includes("*")));
+
+  } finally {
+    await destroyTestUser(who.userId);
+    await new Promise<void>((r) => lmStudio.close(() => r()));
+    await new Promise<void>((r) => geminiStub.close(() => r()));
   }
-  check("clinical data preserved for the cloud", decoded.deidentifiedInput.includes("12.4") && decoded.deidentifiedInput.includes("100mg"));
-  check("CRP not mistaken for a person", decoded.deidentifiedInput.includes("CRP"));
-  check("patient name restored", decoded.note.includes("王小明"));
-  check("MRN restored", decoded.note.includes("87654321"));
-  check("attending restored", decoded.note.includes("陳大文"));
-  check("ROC date restored", decoded.note.includes("113/05/05"));
-  check("no placeholders left in the note", decoded.meta.unresolvedTokens.length === 0, JSON.stringify(decoded.meta.unresolvedTokens));
-  check("audit row written", Boolean(decoded.meta.auditLogId), "audit write failed");
-  check("scrub was not degraded", decoded.meta.degradedScrub === false);
-  check("inspector has redactions", decoded.redactions.length >= 8, `${decoded.redactions.length}`);
-  check("inspector previews are masked", decoded.redactions.every((r: { preview: string }) => r.preview.includes("*")));
-
-  await destroyTestUser(who.userId);
-  await new Promise<void>((r) => lmStudio.close(() => r()));
-  await new Promise<void>((r) => geminiStub.close(() => r()));
   console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
   process.exit(failures === 0 ? 0 : 1);
 }

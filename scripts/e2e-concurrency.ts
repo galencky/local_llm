@@ -67,24 +67,29 @@ async function main() {
   await new Promise<void>((r) => stub.listen(1234, r));
   console.log("stub LM Studio listening on :1234 (2s latency)\n");
 
-  const results = await Promise.all([fire(1), fire(2), fire(3)]);
-  for (const r of results) {
-    console.log(`req ${r.n}: ${r.status} ${r.code ?? ""} ${r.error ? "— " + r.error.slice(0, 90) : ""}`);
+  // Cleanup in a `finally`: a run that dies partway would otherwise leave both
+  // a harness user in the database and a listener holding port 1234 — the port
+  // the real LM Studio wants back.
+  try {
+    const results = await Promise.all([fire(1), fire(2), fire(3)]);
+    for (const r of results) {
+      console.log(`req ${r.n}: ${r.status} ${r.code ?? ""} ${r.error ? "— " + r.error.slice(0, 90) : ""}`);
+    }
+
+    const busy = results.filter((r) => r.status === 429).length;
+    const admitted = results.filter((r) => r.status !== 429).length;
+    console.log(`\nadmitted=${admitted} rejected429=${busy}`);
+    console.log(admitted === 1 && busy === 2 ? "PASS: single-slot limit enforced" : "FAIL");
+
+    // Lock must be free again once the in-flight request finished.
+    const after = (await (
+      await fetch(`${base}/api/status`, { headers: who.cookie })
+    ).json()) as { busy: boolean };
+    console.log(after.busy === false ? "PASS: lock released" : "FAIL: lock still held");
+  } finally {
+    await destroyTestUser(who.userId);
+    await new Promise<void>((r) => stub.close(() => r()));
   }
-
-  const busy = results.filter((r) => r.status === 429).length;
-  const admitted = results.filter((r) => r.status !== 429).length;
-  console.log(`\nadmitted=${admitted} rejected429=${busy}`);
-  console.log(admitted === 1 && busy === 2 ? "PASS: single-slot limit enforced" : "FAIL");
-
-  // Lock must be free again once the in-flight request finished.
-  const after = (await (
-    await fetch(`${base}/api/status`, { headers: who.cookie })
-  ).json()) as { busy: boolean };
-  console.log(after.busy === false ? "PASS: lock released" : "FAIL: lock still held");
-
-  await destroyTestUser(who.userId);
-  await new Promise<void>((r) => stub.close(() => r()));
   process.exit(0);
 }
 

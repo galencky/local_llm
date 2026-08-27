@@ -35,33 +35,40 @@ async function run(promptId?: string) {
 
 async function main() {
   who = await createTestSession("routine");
-  const { templates } = (await (
-    await fetch(`${base}/api/prompts`, { headers: who.cookie })
-  ).json()) as {
-    templates: { id: string; name: string }[];
-  };
-  const routine = templates.find((t) => t.name === wanted);
-  if (!routine) {
+  // One `finally`, so a run that dies mid-pipeline leaves no harness user
+  // behind either. The unhappy path used to clean up only where it was
+  // remembered, which is exactly where it will eventually not be.
+  try {
+    const { templates } = (await (
+      await fetch(`${base}/api/prompts`, { headers: who.cookie })
+    ).json()) as {
+      templates: { id: string; name: string }[];
+    };
+    const routine = templates.find((t) => t.name === wanted);
+    if (!routine) {
+      throw new Error(
+        `No routine named "${wanted}" is visible to a fresh user. ` +
+          `Visible: ${templates.map((t) => t.name).join(", ") || "(none)"}. ` +
+          `Routines are per-owner, so a fresh harness user sees only shared ` +
+          `(ownerless) ones — pass the name of a shared routine, or create one.`,
+      );
+    }
+
+    console.log("=== WITHOUT routine ===");
+    const plain = await run();
+    console.log(plain.note);
+
+    console.log(`\n=== WITH routine "${routine.name}" ===`);
+    const styled = await run(routine.id);
+    console.log(styled.note);
+
+    console.log("\nroutine recorded in meta:", styled.meta.promptTemplateName);
+    console.log("routine recorded in audit row:", styled.meta.auditLogId);
+  } finally {
+    // Cascades to the session and to any audit row this run wrote.
     await destroyTestUser(who.userId);
-    throw new Error(
-      `No routine named "${wanted}" is visible to a fresh user. ` +
-        `Visible: ${templates.map((t) => t.name).join(", ") || "(none)"}`,
-    );
   }
-
-  console.log("=== WITHOUT routine ===");
-  const plain = await run();
-  console.log(plain.note);
-
-  console.log(`\n=== WITH routine "${routine.name}" ===`);
-  const styled = await run(routine.id);
-  console.log(styled.note);
-
-  console.log("\nroutine recorded in meta:", styled.meta.promptTemplateName);
-  console.log("routine recorded in audit row:", styled.meta.auditLogId);
-  await destroyTestUser(who.userId);
   process.exit(0);
-
 }
 
 void main();
