@@ -153,15 +153,13 @@ for (const scheme of ["light", "dark"]) {
     if (await close.count()) await close.click().catch(() => {});
     await p.waitForTimeout(400);
   }
-  // The mode toggle and its warning are new furniture directly above the
-  // primary action; audit both of its states rather than only the default.
-  await p.click('button[aria-pressed="false"]:has-text("Custom")');
+  // The workspace toggle sits directly above the primary action and changes
+  // what the left panel is, so audit both of its states rather than only the
+  // default. (There is no editor drawer to close any more — the prompt
+  // workspace IS the left panel.)
+  await p.click('button[aria-pressed="false"]:has-text("Custom prompt")');
   await p.waitForTimeout(900);
-  await report("main · custom mode");
-  const closeCustom = p.locator('aside button[aria-label^="Close"]').first();
-  if (await closeCustom.count()) await closeCustom.click().catch(() => {});
-  await p.waitForTimeout(500);
-  await report("main · custom, editor closed");
+  await report("main · prompt workspace");
 
   await ctx.close();
 }

@@ -204,33 +204,11 @@ textarea:focus-visible {
   animation: scrim-in 180ms ease-out both;
 }
 
-/**
- * A block that grows must grow visibly. `grid-template-rows: 0fr -> 1fr` is the
- * only way to animate to a height nobody has measured, and it is used for the
- * custom-mode warning so switching modes slides the controls below it down
- * instead of teleporting them.
- */
-.reveal {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 200ms cubic-bezier(0.22, 0.61, 0.36, 1);
-}
-.reveal[data-open="true"] {
-  grid-template-rows: 1fr;
-}
-.reveal > * {
-  overflow: hidden;
-  min-height: 0;
-}
-
 /* A ward monitor at 1am is not the place for motion nobody asked for. */
 @media (prefers-reduced-motion: reduce) {
   .drawer-panel,
   .drawer-scrim {
     animation: none;
-  }
-  .reveal {
-    transition: none;
   }
 }
 
