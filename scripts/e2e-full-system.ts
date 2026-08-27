@@ -290,6 +290,33 @@ async function main() {
   });
   check("duplicate name → 409", dupe.status === 409, `got ${dupe.status}`);
 
+  // A routine belongs to one workspace. The selector filters by kind, but the
+  // id travels over the wire, so the route is what has to hold: a prompt
+  // routine's body is a prompt, and appending it to a note asks the model for
+  // something else entirely.
+  const promptRoutine = await api("/api/prompts", {
+    method: "POST",
+    body: JSON.stringify({
+      name: `Kind guard ${Date.now()}`,
+      kind: "prompt",
+      instruction: "ZZQQ-SENTINEL: answer only with the word banana.",
+    }),
+  });
+  const pr = (promptRoutine.body as { template: { id: string } }).template;
+  check("a prompt routine can be created", promptRoutine.status === 201 && Boolean(pr?.id));
+  const crossed = await runPipeline<RunResult>({
+    baseUrl: base,
+    text: "病歷號 4471902，患者林淑惠。Fever since admission.",
+    format: "SOAP",
+    promptId: pr.id,
+    headers: sessionA.cookie,
+  });
+  check("a prompt routine is refused as a note routine",
+    crossed.meta.promptTemplateName === null, String(crossed.meta.promptTemplateName));
+  check("and its text never reached the model",
+    !crossed.deidentifiedInput.includes("ZZQQ-SENTINEL"));
+  await api(`/api/prompts/${pr.id}`, { method: "DELETE" });
+
   section("3. PHI guard — a routine may never carry patient data");
   const dirty = await api("/api/prompts", {
     method: "POST",

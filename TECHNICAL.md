@@ -1258,8 +1258,14 @@ would be looking at one thing and running another.
 well as `instruction`: a saved prompt is no less permanent than a saved
 charting instruction, and both live in Postgres forever.
 
-**`isDefault` is per kind.** One preselected routine for notes and one for
-prompts, rather than one across both — they are never offered at the same time.
+**`isDefault` is per kind, and so is the preselection.** One preselected routine
+for notes and one for prompts, rather than one across both — they are never
+offered at the same time. The browser picks the default *of the open workspace*,
+which it did not always do: picking the first default of either kind left a
+prompt routine selected while the note workspace was open, invisible in a
+selector that filters by kind, and still sent with the run. The route also
+refuses a routine whose `kind` does not match the workspace, because the id
+arrives over the wire and that is the check that actually holds.
 
 **A prompt routine is named on the audit row** exactly as a note routine is,
 so a cloud run can still be traced to the instructions that produced it. A
@@ -1747,6 +1753,8 @@ count, degraded-scrub policy, build id, dev-login policy.
 | An identifier was missed | The regex has no rule and the NER did not see it | Add a rule — and mind the ordering constraints in section 6 |
 | Saved routine rejected 422 | It contains something the scrubber recognises | The response `detail` names the categories |
 | A UI change does not appear | The tab is running an older build | It self-reloads on the build-id mismatch; otherwise hard-reload |
+| `tsc --noEmit` reports duplicate `LayoutProps` / `unstable_cache` from `.next/types/…d 2.ts` | Stale generated types left behind by overlapping builds — the ` 2` suffix is the giveaway | `rm -rf .next && npm run build`. Nothing in `src/` is wrong. |
+| A routine you did not choose shaped a note | A preselected routine from the *other* workspace was still attached | Fixed — `isDefault` is per workspace on both sides, and the route refuses a routine whose `kind` does not match. If it recurs, check `applyTemplates`. |
 | History empty for a user who has notes | History is per-owner | Rows are scoped by `userId`; a fresh test user sees nothing |
 
 ### Reading the SSE stream by hand

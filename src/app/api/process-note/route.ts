@@ -438,7 +438,12 @@ export async function POST(req: NextRequest) {
         if (promptId && workspace === "note") {
           try {
             const found = await getTemplate(userId, promptId);
-            if (found) {
+            // A routine belongs to ONE workspace. A prompt routine's body is a
+            // prompt, not a charting instruction, so appending it to a note
+            // would quietly ask the model for something else entirely. The
+            // browser filters the selector by kind; this is the check that
+            // actually holds, because the id arrives over the wire.
+            if (found && found.kind !== "prompt") {
               template = { name: found.name, instruction: found.instruction };
               if (!isNoteFormat(format) && isNoteFormat(found.format)) {
                 resolvedFormat = found.format;

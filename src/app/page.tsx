@@ -461,8 +461,13 @@ export default function AirlockPage() {
   const chooseWorkspace = useCallback((next: Workspace) => {
     writeRunSettings({ ...getRunSettings(), workspace: next });
     // A routine belongs to one workspace, so a selection made in the other is
-    // not merely inapplicable — it would be silently ignored at request time.
-    setActiveTemplateId("");
+    // not merely inapplicable — it is invisible in the selector and would still
+    // be sent with the run. Drop it, and fall to this workspace's own default.
+    setTemplates((list) => {
+      const mine = list.filter((t) => (t.kind === "prompt" ? "prompt" : "note") === next);
+      setActiveTemplateId(mine.find((t) => t.isDefault)?.id ?? "");
+      return list;
+    });
   }, []);
 
   /* --- server public key ---------------------------------------------- */
@@ -485,24 +490,33 @@ export default function AirlockPage() {
   }, []);
 
   /* --- prompt library -------------------------------------------------- */
-  const applyTemplates = useCallback((list: PromptTemplate[]) => {
+  /**
+   * `isDefault` is per workspace, so the preselection has to be too.
+   *
+   * Picking the first default of either kind meant a preselected *prompt*
+   * routine was left selected while the note workspace was open — invisible in
+   * the selector, which filters by kind, but still sent with the run. The
+   * route now refuses a mismatched routine as well; this stops it being sent.
+   */
+  const applyTemplates = useCallback((list: PromptTemplate[], forWorkspace: Workspace) => {
     setTemplates(list);
+    const mine = list.filter((t) => (t.kind === "prompt" ? "prompt" : "note") === forWorkspace);
     setActiveTemplateId((current) => {
-      if (current && list.some((t) => t.id === current)) return current;
-      return list.find((t) => t.isDefault)?.id ?? "";
+      if (current && mine.some((t) => t.id === current)) return current;
+      return mine.find((t) => t.isDefault)?.id ?? "";
     });
   }, []);
 
   const loadTemplates = useCallback(async () => {
     const list = await fetchTemplates();
-    if (list) applyTemplates(list);
+    if (list) applyTemplates(list, getRunSettings().workspace);
   }, [applyTemplates]);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       const list = await fetchTemplates();
-      if (!cancelled && list) applyTemplates(list);
+      if (!cancelled && list) applyTemplates(list, getRunSettings().workspace);
     })();
     return () => {
       cancelled = true;
