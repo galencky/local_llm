@@ -17,8 +17,7 @@ script in `scripts/` actually exercises.
 8. [The cloud layer and the model ladder](#8-the-cloud-layer-and-the-model-ladder)
 8b. [The local destination](#8b-the-local-destination)
 9. [Concurrency: one compute slot](#9-concurrency-one-compute-slot)
-10. [Custom mode](#10-custom-mode)
-10b. [The Custom prompt format](#10b-the-custom-prompt-format)
+10. [Workspaces, and the one rule](#10-workspaces-and-the-one-rule)
 11. [Authentication](#11-authentication)
 12. [Persistence](#12-persistence)
 13. [The browser client](#13-the-browser-client)
@@ -64,7 +63,8 @@ memory, so a second replica would silently break it.
 | `src/lib/local-format.ts` | The local formatting destination — the same note, written on this Mac |
 | `src/lib/lmstudio.ts` | Where LM Studio lives and how long each kind of call may take |
 | `src/lib/concurrency.ts` | Single-slot lock with stale reclaim, plus the live stage read-out |
-| `src/lib/custom-mode.ts` | Custom mode's contract: defaults, ranges, the placeholder kernel, and the clamp both sides run |
+| `src/lib/workspace.ts` | The two workspaces, the one privacy rule, and the clamp both sides run |
+| `src/lib/placeholders.ts` | The placeholder-integrity rules every cloud-bound prompt carries |
 | `src/lib/limits.ts` | Input budget, shared by browser and server |
 | `src/lib/prompts.ts` | Routine CRUD plus the guard that keeps PHI out of saved prompts |
 | `src/lib/auth.ts` | Google sign-in and the mandatory allowlist |
@@ -357,7 +357,7 @@ generating. So:
 UI shows cannot drift from what is sent. Precedence, weakest to strongest:
 
 ```
-format skeleton  (built-in, or custom mode's replacement)
+format skeleton  (built-in)
   └─ saved routine  ("Departmental charting routine …")
        └─ one-off instruction for this note
             └─ the de-identified narrative
@@ -463,18 +463,18 @@ there. Quietly escalating to Google on a local failure would break exactly the
 promise the option exists to make. This is the one place in the pipeline where
 a failure is deliberately *not* routed around.
 
-### Custom mode maps onto it
+### The custom-prompt workspace maps onto it
 
-Custom mode's `cloud` block is really the *formatting* block, so it applies
-whichever model is formatting. `topK` and `maxOutputTokens` carry over to their
-OpenAI-compatible names:
+A custom prompt runs through the same local transport, with the two parameters
+the workspace exposes:
 
-| Custom field | Gemini | LM Studio |
+| Prompt workspace | Gemini | LM Studio |
 | --- | --- | --- |
 | `temperature` | `temperature` | `temperature` |
-| `topP` | `topP` | `top_p` (sent only when < 1) |
-| `topK` | `topK` | `top_k` (sent only when > 0) |
-| `maxOutputTokens` | `maxOutputTokens` | `max_tokens` (default 8192) |
+| `maxTokens` | `maxOutputTokens` | `max_tokens` |
+
+Only a cloud-bound prompt gets the placeholder kernel appended to its system
+instruction; a raw local run has nothing to preserve.
 
 ### Timeouts
 
@@ -513,8 +513,8 @@ answers, and the detected model name next to it. `LMSTUDIO_MODEL` is documented
 as a fallback, and the Prompts drawer says so in one quiet line if a value is
 set that is not in use.
 
-Custom mode may still name a local model explicitly (`custom.local.model`); that
-is a deliberate per-run override and it wins over detection.
+Nothing overrides detection any more: the model is whatever LM Studio has
+loaded, everywhere.
 
 ### How it shows up
 
@@ -559,80 +559,75 @@ treats "this tab is submitting" as busy directly, so it flips the instant the
 button is pressed instead of waiting for a poll to confirm what the tab already
 knows.
 
-## 10. Custom mode
+## 10. Workspaces, and the one rule
 
-`src/lib/custom-mode.ts` is isomorphic: the editor imports it for defaults and
-clamps, the route imports it to re-clamp whatever actually arrives.
-`normaliseCustomConfig()` is the boundary and the client's numbers are never
-trusted.
+`src/lib/workspace.ts` is the whole model, and it is deliberately small enough
+to hold in your head:
 
-| | User owns | Range |
+```
+TWO WORKSPACES     note    a ward narrative becomes a chart entry
+                   prompt  a system instruction and a prompt become an answer
+
+TWO DESTINATIONS   cloud   a rung of the Gemini ladder
+                   local   the model already loaded in LM Studio
+
+ONE RULE           anything bound for Google is de-identified first,
+                   without exception, failing closed if the local model
+                   is unavailable to do it
+```
+
+| | Note | Custom prompt |
 | --- | --- | --- |
-| Local | De-identification prompt, LM Studio model | ≤ 8000 chars |
-| Local | `temperature`, `topP`, `maxTokens` | 0–2, 0–1, 256–16384 |
-| Cloud | System instruction, formatting instruction | ≤ 8000 chars each |
-| Cloud | `temperature`, `topP`, `topK`, `maxOutputTokens` | 0–2, 0–1, 0–200, 0–65536 |
+| Cloud | scrub → format → re-hydrate → audit | scrub → answer → re-hydrate → audit |
+| Local | scrub → format → re-hydrate → audit | **raw: no scrub, no audit** |
 
-Empty or over-long prompts are **refused**, not silently defaulted: running a
-note under instructions the clinician never saw is worse than not running it.
-Numbers out of range are clamped.
+`deidentifies(workspace, local)`, `audits(workspace, local)` and
+`stagesFor(workspace, local)` are the three functions that encode it, and the
+route, the progress list and the acceptance suite all read them rather than
+re-deriving the rule.
 
-### Four properties custom mode cannot switch off
+### Why the raw combination exists, and why it writes nothing
 
-They are structural rather than prompt-borne, and `npm run e2e:custom` asserts
-each one:
+When nothing leaves the box there is nothing to protect it from — that is the
+point of the local destination, and refusing to let a clinician use their own
+model on their own machine would be theatre rather than safety.
 
-1. **The pattern scrub runs first, always.** The floor is regex-only, never
-   nothing.
-2. **The local pass must still return parsable entity JSON** with a token-safe
-   category on every span. A prompt that talks the model out of that shape fails
-   the run closed.
-3. **Every span is still checked verbatim**, screened against the clinical
-   stop-list, and shape-capped.
-4. **`PLACEHOLDER_KERNEL` is appended** to whatever system instruction the user
-   writes. Without it Gemini renumbers `[DATE_2]` and the note can no longer be
-   re-hydrated — a broken note every time is not a setting worth offering.
+But it writes **no audit row**, and that is not an oversight. A row would be the
+only unredacted copy of that text anywhere on disk, which is the exact thing the
+rest of the design exists to prevent. The audit log's de-identification
+invariant holds by never writing rather than by writing something safe.
 
-Custom prompts live in `localStorage` and nowhere else. They travel inside the
-sealed envelope, are used once, and die with the request — so the audit row reads
-`"Custom mode — prompts not stored"` rather than implying the built-in prompts
-produced that note.
+Note runs always de-identify, on both destinations, for the same reason: they
+produce a chart entry and an audit trail, and History has to stay safe to open
+in front of somebody.
 
-## 10b. The Custom prompt format
+### Two strings, one set of tokens
 
-`NOTE_FORMATS.CUSTOM`. A sixth format that has no compiled-in skeleton: the
-clinician writes it, per run.
+A custom-prompt run bound for the cloud has a system instruction *and* a prompt,
+and both may carry identifiers. They must share one set of tokens — the same
+name has to become the same placeholder in both — so:
 
-**It is the light door, and the safest one.** The format skeleton is the
-*weakest* instruction in `assemblePrompt` — the saved routine, the one-off steer
-and the system instruction all sit above it — so replacing it cannot reach the
-placeholder rules, the clinical rules, or either de-identification pass. Custom
-mode is the heavy door: it replaces both system prompts and both sets of
-sampling parameters.
+1. the deterministic pass runs over each string with the same vault;
+2. the local model reads the two **joined**, once, and populates the vault;
+3. `TokenVault.deidentify()` applies what it found to each string separately.
 
-| | Custom prompt (format) | Custom mode |
-| --- | --- | --- |
-| Replaces | the note skeleton | both system prompts + the skeleton |
-| Sampling parameters | untouched | yours |
-| De-identification prompt | built-in | yours |
-| Audit row | `noteFormat = CUSTOM` | `promptTemplateName = "Custom mode — …"` |
-| Stored | browser only | browser only |
+Running the model twice would double the slowest stage in the pipeline. Joining
+and splitting the *text* would be fragile, because the replacements change its
+length. Applying the vault to each original is neither.
 
-**Precedence.** `custom?.instruction ?? instructions.skeleton` — custom mode
-outranks the written skeleton, because in that mode the format is only a label
-and the editor is the more explicit statement of what the note should be.
+### What replaced what
 
-**Refused, never defaulted.** `normaliseFormatPrompt()` rejects an empty or
-over-8000-character skeleton, and the route answers `FORMAT_PROMPT_INVALID`
-rather than falling back to `FORMAT_INSTRUCTIONS.CUSTOM`. That constant exists
-only to keep the type total and to stop a hand-rolled client reaching the cloud
-with no formatting instruction at all. Same rule as custom mode: running a note
-under instructions the clinician never saw is worse than not running it.
+This collapsed four controls that could all express "I want to write the prompt
+myself": a guided/custom toggle, a `CUSTOM` note format, a saved routine and a
+free-text steer. Custom mode's per-model sampling parameters went with it; the
+prompt workspace keeps two (temperature, max tokens) where they are visible
+beside the thing they affect.
 
-The skeleton lives in the run-settings store alongside the custom-mode config —
-`localStorage`, per browser, cross-tab synced, never Postgres. `BUILT_IN_FORMATS`
-excludes `CUSTOM` so `/api/prompt-config` does not advertise a skeleton that
-does not exist.
+The de-identification prompt is no longer editable by anyone. It was editable in
+custom mode, guarded by four properties that could not be switched off — which
+is a lot of machinery to make a dangerous setting safe, for a setting nobody
+needed. It is the de-identification step itself; making it configurable makes
+the safety property configurable.
 
 ## 11. Authentication
 
@@ -758,7 +753,7 @@ minimal frame parser (`EventSource` cannot issue a POST). On
   a truncating blurb, so it is the same height in both modes; the "label only"
   caption on the format row is rendered in both modes and merely `invisible` in
   guided, so that row's width budget never changes either. What is left is the
-  custom-mode warning, which is always mounted and animated open with
+  custom-prompt notice, which is always mounted and animated open with
   `grid-template-rows: 0fr → 1fr` (`.reveal` in `globals.css`) — the only way
   to animate to a height nobody has measured.
 
@@ -891,8 +886,8 @@ is released afterwards.
 
 **Port collision.** This script and `e2e:full` both bind `:1234`, which is where
 the real LM Studio lives. Stop LM Studio first, or point the server at a
-different port and use `e2e:custom`, which takes its stub ports from the
-environment for exactly this reason.
+different port. `e2e:prompt` and `e2e:system` use the real dependencies and do
+not bind anything.
 
 ### `npm run e2e:routine` — `scripts/e2e-routine.ts`
 
@@ -902,23 +897,18 @@ an argument. Note that routines are per-owner: a fresh harness user sees only
 shared (ownerless) routines, and the script names what it *can* see if it cannot
 find yours.
 
-### `npm run e2e:custom` — `scripts/e2e-custom-mode.ts`
+### `npm run e2e:prompt` — `scripts/e2e-prompt-mode.ts`
 
-The custom-mode contract. Both stubs record what they were asked, so the run can
-assert the user's prompts and every sampling parameter actually reached both
-models, **and** that the four properties custom mode may not switch off held
-anyway. Stub ports are configurable because a dev box usually has the real LM
-Studio on `:1234`:
+The privacy rule, asserted from both sides. Live server, real dependencies. It
+runs the *same* prompt to Gemini and to the local model and checks that the
+destination alone decided what happened to it: de-identified, re-hydrated and
+audited on the way to Google; raw, unredacted and unlogged on the way to LM
+Studio, with the note log confirmed not to have grown.
 
-```bash
-GEMINI_API_KEY=stub GEMINI_BASE_URL=http://localhost:8899 \
-  LMSTUDIO_BASE_URL=http://localhost:1299/v1 npm run dev -- -p 3100
-
-AIRLOCK_BASE=http://localhost:3100 LMSTUDIO_STUB_PORT=1299 npm run e2e:custom
-```
-
-It also asserts a broken config is refused rather than silently defaulted, and
-that guided mode is untouched afterwards.
+It also sends a system instruction that explicitly asks the model to ignore the
+placeholder rules and repeat every name verbatim, and confirms that a
+cloud-bound run is scrubbed anyway — because the rule is read from the
+destination, and nothing in a prompt is consulted when deciding it.
 
 ### `npm run e2e:system` — `scripts/e2e-full-system.ts`
 
@@ -984,7 +974,7 @@ and all six drawers — in both themes. It composites through alpha layers and
 Widening it from "controls" to "all text", and from resting to in-flight states,
 turned 0 known problems into 135 — which were three causes, not 135 bugs:
 `opacity` used to dim text, Tailwind `-600`/`-500` shades on white, and
-`animate-pulse` on a label. Current state: **2,350 text nodes, zero below AA,
+`animate-pulse` on a label. Current state: **2,199 text nodes, zero below AA,
 both themes**, across sixteen surfaces including both mode states.
 
 It waited on the wrong signal for a long time. "Copy note · with names" is
@@ -1027,7 +1017,7 @@ count, degraded-scrub policy, build id, dev-login policy.
 | Sign-in fails with `MissingCSRF` | An edge cached `/api/auth/csrf` and stripped `Set-Cookie` | The `no-store` headers in `next.config.ts` |
 | Script dies on `Key endpoint returned 401` | The script is not presenting a session | It should use `createTestSession()` — see section 15 |
 | `LOCAL_SCRUB_UNAVAILABLE` on every note | LM Studio down, wrong URL, or no model loaded | `curl $LMSTUDIO_BASE_URL/models`; inside Docker the URL must be `host.docker.internal` |
-| Same, but only on long notes | The entity JSON was truncated | Raise `max_tokens` (custom mode) or split the note |
+| Same, but only on long notes | The entity JSON was truncated | Split the note; the cap is compiled in at 6144 |
 | Local pass returns nothing, model looks broken | A reasoning model put the answer in `reasoning_content` | Already handled by the empty-`content` retry; confirm the model actually answers `/chat/completions` |
 | Status badge says "LM Studio down" during every note | Probing a server that serialises | Expected and handled — `/api/status` uses the cached health while locked |
 | Prompts drawer names a model you did not load | Stale health cache, or LM Studio was unreachable when it was read | It refreshes on the next status poll; `curl $LMSTUDIO_BASE_URL/models` to confirm what is loaded |
@@ -1040,7 +1030,7 @@ count, degraded-scrub policy, build id, dev-login policy.
 | A local run is much slower than a cloud one | It is two local inferences on one compute slot, not one | Expected; `meta.scrubMs` and `meta.geminiMs` split it |
 | The note arrives from a lighter model | The ladder walked down | The amber footer and `AuditLog.modelUsed` both say which |
 | `DECRYPT_FAILED` | The keypair rotated under an open tab | The client retries once with a fresh key; if it persists, `.keys/` was not persisted |
-| Placeholders left in the finished note | The cloud model renumbered or dropped them | `meta.unresolvedTokens`; in custom mode confirm the kernel is appended |
+| Placeholders left in the finished note | The cloud model renumbered or dropped them | `meta.unresolvedTokens`; confirm the placeholder kernel reached the system instruction |
 | A clinical term was redacted | The local model mislabelled it and it escaped the stop-list | `meta.rejectedClinicalSpans`; add the pattern to `CLINICAL_STOPLIST` |
 | An identifier was missed | The regex has no rule and the NER did not see it | Add a rule — and mind the ordering constraints in section 6 |
 | Saved routine rejected 422 | It contains something the scrubber recognises | The response `detail` names the categories |
@@ -1095,7 +1085,7 @@ Before you push anything that touches the PHI path:
    and the lock.
 2. `npx tsc --noEmit && npm run lint`.
 3. `npm run e2e:full` against a stubbed server if you touched the route or the
-   client, `npm run e2e:custom` if you touched custom mode.
+   client, `npm run e2e:prompt` if you touched the workspaces or the privacy rule.
 4. `npm run e2e:system` against the live stack before shipping.
 5. `npm run db:inspect` if you touched anything that writes.
 

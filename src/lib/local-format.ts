@@ -1,16 +1,16 @@
 import "server-only";
 import { assemblePrompt, systemInstruction, type NoteFormat, type NoteInstructions, type FormatNoteResult } from "./gemini";
-import { withPlaceholderKernel, type CustomCloudConfig } from "./custom-mode";
+
 import { lmStudioBaseUrl, lmStudioFormatTimeoutMs } from "./lmstudio";
 import { resolveLocalModel } from "./scrubber-llm";
 
 /**
  * The local formatting destination — the same note, written on this Mac.
  *
- * Guided and custom mode decide *what* the models are told. This decides *who*
- * writes the note: the Gemini ladder, or the model already loaded in LM Studio.
- * Picking local means the request makes no outbound call at all — no Google, no
- * quota, and nothing to explain to a hospital about a third-party processor.
+ * The workspace decides *what* the model is asked. This decides *who* answers:
+ * the Gemini ladder, or the model already loaded in LM Studio. Picking local
+ * means the request makes no outbound call at all — no Google, no quota, and
+ * nothing to explain to a hospital about a third-party processor.
  *
  * WHAT DOES NOT CHANGE, and this is the point:
  *
@@ -56,6 +56,29 @@ export function localModelLabel(model: string): string {
 }
 
 /**
+ * Run a bare system instruction and prompt against the local model.
+ *
+ * No note assembly, no format skeleton, no placeholder kernel — this is the
+ * raw console. When the caller de-identified first (a cloud-bound prompt never
+ * reaches here, but a note-mode local run does) the placeholders are already
+ * in the text; when it did not, the text is whatever the user typed, and that
+ * is the point of the local destination.
+ */
+export async function runPromptLocally(opts: {
+  systemInstruction: string;
+  prompt: string;
+  temperature: number;
+  maxTokens: number;
+}): Promise<FormatNoteResult> {
+  return callLocalChat({
+    system: opts.systemInstruction.trim() || undefined,
+    user: opts.prompt,
+    temperature: opts.temperature,
+    maxTokens: opts.maxTokens,
+  });
+}
+
+/**
  * Format a fully de-identified narrative using the local model.
  *
  * Signature-compatible with `formatClinicalNote` so the route branches on the
@@ -64,32 +87,41 @@ export function localModelLabel(model: string): string {
  * @param deidentifiedText text containing placeholders only — never raw PHI
  * @param format target note structure
  * @param instructions saved routine and/or one-off steer
- * @param custom custom mode's prompts and parameters for the formatting stage
  */
 export async function formatWithLocalModel(
   deidentifiedText: string,
   format: NoteFormat,
   instructions: NoteInstructions = {},
-  custom: CustomCloudConfig | null = null,
 ): Promise<FormatNoteResult> {
-  const started = Date.now();
-  const model = await resolveLocalModel();
-
   const prompt = assemblePrompt({
     format,
     template: instructions.template,
     adHoc: instructions.adHoc,
     narrative: deidentifiedText,
-    skeleton: custom?.instruction ?? instructions.skeleton,
+    skeleton: instructions.skeleton,
   });
 
-  // Custom mode owns the system instruction here too, except for the
-  // placeholder kernel — a local model is, if anything, more likely to
-  // renumber [DATE_2] than a flagship is.
-  const system = custom
-    ? withPlaceholderKernel(custom.systemInstruction)
-    : systemInstruction();
+  return callLocalChat({
+    system: systemInstruction(),
+    user: prompt,
+    temperature: 0.2,
+    // A discharge summary is long. Too low a cap truncates it mid-section,
+    // which reads as the model having given up rather than as a setting.
+    maxTokens: 8192,
+  });
+}
 
+/** The one place either local path actually talks to LM Studio. */
+async function callLocalChat(opts: {
+  system?: string;
+  user: string;
+  temperature: number;
+  topP?: number;
+  topK?: number;
+  maxTokens: number;
+}): Promise<FormatNoteResult> {
+  const started = Date.now();
+  const model = await resolveLocalModel();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), lmStudioFormatTimeoutMs());
 
@@ -100,19 +132,13 @@ export async function formatWithLocalModel(
       signal: controller.signal,
       body: JSON.stringify({
         model,
-        // Custom mode's "cloud" block is really the formatting block, so it
-        // applies whichever model is doing the formatting. topK and
-        // maxOutputTokens carry over to their OpenAI-compatible names.
-        temperature: custom ? custom.temperature : 0.2,
-        ...(custom && custom.topP < 1 ? { top_p: custom.topP } : {}),
-        ...(custom && custom.topK > 0 ? { top_k: custom.topK } : {}),
-        // A discharge summary is long. Too low a cap truncates it mid-section,
-        // which reads as the model having given up rather than as a setting.
-        max_tokens:
-          custom && custom.maxOutputTokens > 0 ? custom.maxOutputTokens : 8192,
+        temperature: opts.temperature,
+        ...(opts.topP !== undefined ? { top_p: opts.topP } : {}),
+        ...(opts.topK !== undefined ? { top_k: opts.topK } : {}),
+        max_tokens: opts.maxTokens,
         messages: [
-          { role: "system", content: system },
-          { role: "user", content: prompt },
+          ...(opts.system ? [{ role: "system", content: opts.system }] : []),
+          { role: "user", content: opts.user },
         ],
       }),
     });
@@ -140,12 +166,12 @@ export async function formatWithLocalModel(
     const aborted = err instanceof Error && err.name === "AbortError";
     throw new LocalFormatError(
       aborted
-        ? `The local model did not finish writing the note within ${Math.round(
+        ? `The local model did not answer within ${Math.round(
             lmStudioFormatTimeoutMs() / 1000,
-          )}s. A long narrative on a large local model can exceed this — shorten the note, or raise LMSTUDIO_FORMAT_TIMEOUT_MS.`
-        : `The local model could not write the note: ${
+          )}s. A long input on a large local model can exceed this — shorten it, or raise LMSTUDIO_FORMAT_TIMEOUT_MS.`
+        : `The local model could not answer: ${
             err instanceof Error ? err.message.split("\n")[0] : "unknown error"
-          }. The note was NOT sent to the cloud — choosing the local model means it never is.`,
+          }. Nothing was sent to the cloud — choosing the local model means it never is.`,
       err,
     );
   } finally {

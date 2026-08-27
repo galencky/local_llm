@@ -11,28 +11,27 @@ import { openRequest, sealResponse, type CryptoEnvelope } from "@/lib/crypto";
 import { getServerKeys } from "@/lib/keystore";
 import { scrubWithRegex } from "@/lib/scrubber-regex";
 import { LocalScrubUnavailableError, scrubWithLlm } from "@/lib/scrubber-llm";
-import {
-  purgeVault,
-  storeVault,
-  TokenVault,
-  type RedactionSummaryEntry,
-} from "@/lib/memory-cache";
+import { purgeVault, storeVault, TokenVault, type RedactionSummaryEntry } from "@/lib/memory-cache";
 import {
   formatClinicalNote,
   GeminiUnavailableError,
   isNoteFormat,
+  runPromptOnCloud,
   type NoteFormat,
 } from "@/lib/gemini";
-import { formatWithLocalModel, LocalFormatError } from "@/lib/local-format";
+import { formatWithLocalModel, LocalFormatError, runPromptLocally } from "@/lib/local-format";
 import { isLocalDestination } from "@/lib/pipeline-client";
 import { getTemplate } from "@/lib/prompts";
-import {
-  CustomConfigError,
-  normaliseCustomConfig,
-  normaliseFormatPrompt,
-  type CustomConfig,
-} from "@/lib/custom-mode";
 import { HARD_CHAR_LIMIT, measure } from "@/lib/limits";
+import {
+  audits,
+  deidentifies,
+  isWorkspace,
+  normalisePromptRun,
+  PromptRunError,
+  type PromptRun,
+  type Workspace,
+} from "@/lib/workspace";
 import { prisma } from "@/lib/db";
 import { auth } from "@/lib/auth";
 
@@ -70,10 +69,10 @@ interface DecryptedPayload {
   promptId?: string;
   /** Rung of the model ladder to start from. Falls back downward from here. */
   model?: string;
-  /** Custom mode: the user's own prompts and parameters for both models. */
-  custom?: unknown;
-  /** The CUSTOM format's own note skeleton, written by the clinician. */
-  formatPrompt?: unknown;
+  /** "note" (default) or "prompt" — which workspace produced this request. */
+  workspace?: unknown;
+  /** The custom-prompt workspace's system instruction, prompt and parameters. */
+  promptRun?: unknown;
 }
 
 export interface ProcessNoteResult {
@@ -86,10 +85,12 @@ export interface ProcessNoteResult {
     model: string;
     format: NoteFormat;
     promptTemplateName: string | null;
-    /** Which prompt set produced this note. */
-    mode: "guided" | "custom";
     /** Where the note was written. "local" means nothing left the Mac at all. */
     destination: "cloud" | "local";
+    /** Which workspace produced it. */
+    workspace: "note" | "prompt";
+    /** False only for a raw local prompt — the one run that is not scrubbed. */
+    deidentified: boolean;
     /** Models exhausted or unavailable before the one that served this note. */
     modelFallbacks: { model: string; reason: string }[];
     processingTimeMs: number;
@@ -196,8 +197,8 @@ export async function POST(req: NextRequest) {
         let instruction: string | undefined = body.instruction;
         let promptId: string | undefined;
         let startModel: string | undefined;
-        let rawCustom: unknown;
-        let rawFormatPrompt: unknown;
+        let workspace: Workspace = "note";
+        let rawPromptRun: unknown;
         if (plaintext.trimStart().startsWith("{")) {
           try {
             const payload = JSON.parse(plaintext) as DecryptedPayload;
@@ -207,32 +208,43 @@ export async function POST(req: NextRequest) {
               instruction = payload.instruction ?? instruction;
               promptId = payload.promptId ?? undefined;
               startModel = payload.model ?? undefined;
-              rawCustom = payload.custom ?? undefined;
-              rawFormatPrompt = payload.formatPrompt ?? undefined;
+              if (isWorkspace(payload.workspace)) workspace = payload.workspace;
+              rawPromptRun = payload.promptRun ?? undefined;
             }
           } catch {
             /* not a payload object; treat the whole thing as the narrative */
           }
         }
 
-        // Re-clamp on this side of the wire. The editor's own bounds are a
-        // courtesy to the person typing; these are the ones that hold, because
-        // the payload is assembled in the browser.
-        let custom: CustomConfig | null = null;
-        if (rawCustom) {
+        const localDestination = isLocalDestination(startModel);
+        // The destination decides privacy, and nothing else can. A raw local
+        // prompt is the single combination that is not scrubbed, because
+        // nothing leaves the box for it to be scrubbed for.
+        const scrubbing = deidentifies(workspace, localDestination);
+
+        let promptRun: PromptRun | null = null;
+        if (workspace === "prompt") {
           try {
-            custom = normaliseCustomConfig(rawCustom);
+            promptRun = normalisePromptRun(rawPromptRun);
           } catch (err) {
-            if (err instanceof CustomConfigError) {
-              emit("error", { error: err.message, code: "CUSTOM_CONFIG_INVALID" });
+            if (err instanceof PromptRunError) {
+              emit("error", { error: err.message, code: "PROMPT_INVALID" });
               return;
             }
             throw err;
           }
+          // The prompt IS the input, so it is what the budget applies to.
+          noteText = promptRun.prompt;
         }
 
         if (!noteText.trim()) {
-          emit("error", { error: "The clinical narrative is empty.", code: "EMPTY" });
+          emit("error", {
+            error:
+              workspace === "prompt"
+                ? "There is no prompt to run."
+                : "The clinical narrative is empty.",
+            code: "EMPTY",
+          });
           return;
         }
 
@@ -241,7 +253,9 @@ export async function POST(req: NextRequest) {
         const size = measure(noteText);
         if (size.overHard) {
           emit("error", {
-            error: `That narrative is ${size.chars.toLocaleString()} characters. The local de-identification model can only scan up to ${HARD_CHAR_LIMIT.toLocaleString()} reliably, and past that it starts missing names — split it into shorter sections.`,
+            error: scrubbing
+              ? `That input is ${size.chars.toLocaleString()} characters. The local de-identification model can only scan up to ${HARD_CHAR_LIMIT.toLocaleString()} reliably, and past that it starts missing names — split it into shorter sections.`
+              : `That prompt is ${size.chars.toLocaleString()} characters. The cap is ${HARD_CHAR_LIMIT.toLocaleString()}.`,
             code: "TOO_LONG",
           });
           return;
@@ -254,55 +268,70 @@ export async function POST(req: NextRequest) {
           detail: `${size.chars.toLocaleString()} characters`,
         });
 
-        // 3. Deterministic Taiwan PII scrub.
-        setStage(lock, "regex", `${size.chars.toLocaleString()} characters`);
-        emit("progress", { stage: "regex", status: "running" });
-        const scrubStarted = Date.now();
-        const regexResult = scrubWithRegex(noteText, vault);
-        emit("progress", {
-          stage: "regex",
-          status: "done",
-          ms: Date.now() - scrubStarted,
-          detail: `${regexResult.totalReplacements} identifier${regexResult.totalReplacements === 1 ? "" : "s"}`,
-        });
+        // 3-5. Both scrub passes, unless this is the one run that skips them.
+        let scrubMs = 0;
+        let regexHits: Record<string, number> = {};
+        let llmEntityCount = 0;
+        let hallucinatedSpans = 0;
+        let rejectedClinicalSpans = 0;
+        let degradedScrub = false;
+        // What the model will actually be given.
+        let deidentifiedInput = noteText;
+        let promptSystem = promptRun?.systemInstruction ?? "";
 
-        // 4. Probabilistic local NER scrub. Fails closed by default.
-        setStage(lock, "ner", `${size.chars.toLocaleString()} characters`);
-        emit("progress", { stage: "ner", status: "running" });
-        const llmResult = await scrubWithLlm(regexResult.text, vault, custom?.local ?? null);
-        const scrubMs = Date.now() - scrubStarted;
-        const deidentifiedInput = llmResult.text;
-        emit("progress", {
-          stage: "ner",
-          status: "done",
-          ms: llmResult.latencyMs,
-          detail: `${llmResult.entities.length} name${llmResult.entities.length === 1 ? "" : "s"}/place${llmResult.entities.length === 1 ? "" : "s"}`,
-        });
+        if (scrubbing) {
+          setStage(lock, "regex", `${size.chars.toLocaleString()} characters`);
+          emit("progress", { stage: "regex", status: "running" });
+          const scrubStarted = Date.now();
 
-        // 5. Park the mapping in RAM with a 10-minute TTL.
-        storeVault(sessionId, vault);
+          // A custom-prompt run has two strings to clean and they must share
+          // one set of tokens, so both go through the deterministic pass with
+          // the same vault.
+          const regexResult = scrubWithRegex(noteText, vault);
+          if (promptRun) scrubWithRegex(promptSystem, vault);
+          emit("progress", {
+            stage: "regex",
+            status: "done",
+            ms: Date.now() - scrubStarted,
+            detail: `${regexResult.totalReplacements} identifier${regexResult.totalReplacements === 1 ? "" : "s"}`,
+          });
 
-        // Resolve the saved specialty routine, if one was selected.
-        let resolvedFormat: NoteFormat = isNoteFormat(format) ? format : "SOAP";
+          setStage(lock, "ner", `${size.chars.toLocaleString()} characters`);
+          emit("progress", { stage: "ner", status: "running" });
+          // The local model reads the two joined once — running it twice would
+          // double the slowest stage in the pipeline — and the vault then
+          // applies what it found to each string separately.
+          const nerInput = promptRun
+            ? `${vault.deidentify(promptSystem)}\n\n${regexResult.text}`
+            : regexResult.text;
+          const llmResult = await scrubWithLlm(nerInput, vault);
+          scrubMs = Date.now() - scrubStarted;
 
-        // The CUSTOM format has no compiled-in skeleton, so the run cannot
-        // proceed without the one the clinician wrote. Refuse rather than fall
-        // back to a generic shape they never chose. Custom mode supplies its
-        // own instruction and outranks this, so it is exempt.
-        let writtenSkeleton: string | null = null;
-        if (resolvedFormat === "CUSTOM" && !custom) {
-          try {
-            writtenSkeleton = normaliseFormatPrompt(rawFormatPrompt);
-          } catch (err) {
-            if (err instanceof CustomConfigError) {
-              emit("error", { error: err.message, code: "FORMAT_PROMPT_INVALID" });
-              return;
-            }
-            throw err;
-          }
+          deidentifiedInput = promptRun ? vault.deidentify(regexResult.text) : llmResult.text;
+          if (promptRun) promptSystem = vault.deidentify(promptSystem);
+
+          regexHits = regexResult.hits;
+          llmEntityCount = llmResult.entities.length;
+          hallucinatedSpans = llmResult.hallucinated;
+          rejectedClinicalSpans = llmResult.rejectedClinical;
+          degradedScrub = llmResult.degraded;
+          emit("progress", {
+            stage: "ner",
+            status: "done",
+            ms: llmResult.latencyMs,
+            detail: `${llmEntityCount} name${llmEntityCount === 1 ? "" : "s"}/place${llmEntityCount === 1 ? "" : "s"}`,
+          });
+
+          // Park the mapping in RAM with a 10-minute TTL.
+          storeVault(sessionId, vault);
         }
+
+        // Resolve the saved specialty routine, if one was selected. Routines
+        // and formats belong to the note workspace; a custom prompt is the
+        // whole instruction by itself.
+        let resolvedFormat: NoteFormat = isNoteFormat(format) ? format : "SOAP";
         let template: { name: string; instruction: string } | null = null;
-        if (promptId) {
+        if (promptId && !promptRun) {
           try {
             const found = await getTemplate(userId, promptId);
             if (found) {
@@ -321,9 +350,8 @@ export async function POST(req: NextRequest) {
 
         // 6. Formatting. For the cloud destination, placeholders only cross
         //    the wire; for the local one, nothing crosses it at all.
-        const localDestination = isLocalDestination(startModel);
-        const promptLabel = custom
-          ? "custom instruction"
+        const promptLabel = promptRun
+          ? "custom prompt"
           : template
             ? `routine: ${template.name}`
             : resolvedFormat;
@@ -332,30 +360,46 @@ export async function POST(req: NextRequest) {
         emit("progress", {
           stage: "cloud",
           status: "running",
-          detail: localDestination || custom || template ? cloudLabel : undefined,
+          detail: localDestination || promptRun || template ? cloudLabel : undefined,
         });
-        const formatted = localDestination
-          ? await formatWithLocalModel(
-              deidentifiedInput,
-              resolvedFormat,
-              { template, adHoc: instruction, skeleton: writtenSkeleton },
-              custom?.cloud ?? null,
-            )
-          : await formatClinicalNote(
-              deidentifiedInput,
-              resolvedFormat,
-              { template, adHoc: instruction, skeleton: writtenSkeleton },
-              // Surface the downgrade live rather than letting the note quietly
-              // arrive from a lighter model than the clinician expects.
-              (step, next) =>
-                emit("progress", {
-                  stage: "cloud",
-                  status: "running",
-                  detail: `${step.model} ${step.reason} → ${next}`,
-                }),
-              startModel,
-              custom?.cloud ?? null,
-            );
+        const onFallback = (step: { model: string; reason: string }, next: string) =>
+          // Surface the downgrade live rather than letting the answer quietly
+          // arrive from a lighter model than the clinician expects.
+          emit("progress", {
+            stage: "cloud",
+            status: "running",
+            detail: `${step.model} ${step.reason} → ${next}`,
+          });
+
+        const formatted = promptRun
+          ? localDestination
+            ? await runPromptLocally({
+                systemInstruction: promptSystem,
+                prompt: deidentifiedInput,
+                temperature: promptRun.temperature,
+                maxTokens: promptRun.maxTokens,
+              })
+            : await runPromptOnCloud({
+                systemInstruction: promptSystem,
+                prompt: deidentifiedInput,
+                temperature: promptRun.temperature,
+                maxTokens: promptRun.maxTokens,
+                startModel,
+                onFallback,
+              })
+          : localDestination
+            ? await formatWithLocalModel(
+                deidentifiedInput,
+                resolvedFormat,
+                { template, adHoc: instruction },
+              )
+            : await formatClinicalNote(
+                deidentifiedInput,
+                resolvedFormat,
+                { template, adHoc: instruction },
+                onFallback,
+                startModel,
+              );
         emit("progress", {
           stage: "cloud",
           status: "done",
@@ -363,50 +407,70 @@ export async function POST(req: NextRequest) {
           detail: formatted.model,
         });
 
-        // 7/8. Re-hydrate the structured note back into a usable chart entry.
-        setStage(lock, "rehydrate");
-        emit("progress", { stage: "rehydrate", status: "running" });
-        const rehydrated = vault.rehydrate(formatted.text);
-        const unresolvedTokens = vault.unresolvedTokens(rehydrated);
-        emit("progress", {
-          stage: "rehydrate",
-          status: "done",
-          detail: `${vault.size} token${vault.size === 1 ? "" : "s"} restored`,
-        });
+        // 7/8. Put the identifiers back. Nothing to put back on a raw run.
+        let rehydrated = formatted.text;
+        let unresolvedTokens: string[] = [];
+        if (scrubbing) {
+          setStage(lock, "rehydrate");
+          emit("progress", { stage: "rehydrate", status: "running" });
+          rehydrated = vault.rehydrate(formatted.text);
+          unresolvedTokens = vault.unresolvedTokens(rehydrated);
+          emit("progress", {
+            stage: "rehydrate",
+            status: "done",
+            detail: `${vault.size} token${vault.size === 1 ? "" : "s"} restored`,
+          });
+        }
 
-        // 9. Audit log — de-identified text ONLY. This is a hard PDPA boundary.
-        setStage(lock, "audit");
-        emit("progress", { stage: "audit", status: "running" });
+        // 9. Audit log — de-identified text ONLY. This is a hard PDPA boundary,
+        //    and it is why a raw local run writes no row at all: there is no
+        //    de-identified copy of it to write, and storing the raw text would
+        //    put the only unredacted copy of it on disk.
         const processingTimeMs = Date.now() - startedAt;
         let auditLogId: string | null = null;
-        try {
-          const record = await prisma.auditLog.create({
-            data: {
-              deidentifiedInput,
-              deidentifiedOutput: formatted.text,
-              modelUsed: formatted.model,
-              processingTimeMs,
-              // Custom prompts are never persisted — they arrive sealed and
-              // die with the request — so the row records that this note came
-              // from prompts nobody can look up, rather than implying the
-              // built-in ones produced it.
-              promptTemplateName: custom
-                ? "Custom mode — prompts not stored"
-                : template?.name ?? null,
-              noteFormat: resolvedFormat,
-              userId,
-            },
-            select: { id: true },
-          });
-          auditLogId = record.id;
-          emit("progress", { stage: "audit", status: "done", detail: auditLogId.slice(0, 8) });
-        } catch (err) {
-          // A dead audit DB must not destroy the clinician's note.
-          console.error(
-            "[process-note] audit log write failed:",
-            err instanceof Error ? err.message.split("\n")[0] : "unknown error",
-          );
-          emit("progress", { stage: "audit", status: "failed", detail: "write failed" });
+        if (audits(workspace, localDestination)) {
+          setStage(lock, "audit");
+          emit("progress", { stage: "audit", status: "running" });
+          try {
+            const record = await prisma.auditLog.create({
+              data: {
+                deidentifiedInput,
+                deidentifiedOutput: formatted.text,
+                modelUsed: formatted.model,
+                processingTimeMs,
+                // Custom prompts are never persisted — they arrive sealed and
+                // die with the request — so the row records that this note came
+                // from prompts nobody can look up, rather than implying the
+                // built-in ones produced it.
+                // A custom prompt is never persisted — it arrives sealed and
+                // dies with the request — so the row says the run came from a
+                // prompt nobody can look up, rather than naming a routine.
+                promptTemplateName: promptRun
+                  ? "Custom prompt — not stored"
+                  : (template?.name ?? null),
+                noteFormat: resolvedFormat,
+                userId,
+              },
+              select: { id: true },
+            });
+            auditLogId = record.id;
+            emit("progress", {
+              stage: "audit",
+              status: "done",
+              detail: auditLogId.slice(0, 8),
+            });
+          } catch (err) {
+            // A dead audit DB must not destroy the clinician's note.
+            console.error(
+              "[process-note] audit log write failed:",
+              err instanceof Error ? err.message.split("\n")[0] : "unknown error",
+            );
+            emit("progress", {
+              stage: "audit",
+              status: "failed",
+              detail: "write failed",
+            });
+          }
         }
 
         const result: ProcessNoteResult = {
@@ -419,18 +483,19 @@ export async function POST(req: NextRequest) {
             model: formatted.model,
             format: resolvedFormat,
             promptTemplateName: template?.name ?? null,
-            mode: custom ? "custom" : "guided",
             destination: localDestination ? "local" : "cloud",
+            workspace,
+            deidentified: scrubbing,
             modelFallbacks: formatted.fallbacks,
             processingTimeMs,
             scrubMs,
             geminiMs: formatted.latencyMs,
-            regexHits: regexResult.hits,
-            llmEntityCount: llmResult.entities.length,
-            hallucinatedSpans: llmResult.hallucinated,
-            rejectedClinicalSpans: llmResult.rejectedClinical,
+            regexHits,
+            llmEntityCount,
+            hallucinatedSpans,
+            rejectedClinicalSpans,
             unresolvedTokens,
-            degradedScrub: llmResult.degraded,
+            degradedScrub,
           },
         };
 
@@ -442,14 +507,22 @@ export async function POST(req: NextRequest) {
         emit("result", envelope);
       } catch (err) {
         if (err instanceof LocalScrubUnavailableError) {
-          emit("error", { error: err.message, code: "LOCAL_SCRUB_UNAVAILABLE" });
+          emit("error", {
+            error: err.message,
+            code: "LOCAL_SCRUB_UNAVAILABLE",
+          });
         } else if (err instanceof LocalFormatError) {
           // Deliberately not retried against Gemini: the clinician chose the
           // local destination, and silently escalating to the cloud would
           // break the one promise that choice makes.
           emit("error", { error: err.message, code: "LOCAL_FORMAT_FAILED" });
+        } else if (err instanceof PromptRunError) {
+          emit("error", { error: err.message, code: "PROMPT_INVALID" });
         } else if (err instanceof GeminiUnavailableError) {
-          emit("error", { error: err.message, code: `GEMINI_${err.kind.toUpperCase()}` });
+          emit("error", {
+            error: err.message,
+            code: `GEMINI_${err.kind.toUpperCase()}`,
+          });
         } else {
           const message = err instanceof Error ? err.message : "Unexpected pipeline failure.";
           console.error("[process-note] pipeline error:", message.split("\n")[0]);

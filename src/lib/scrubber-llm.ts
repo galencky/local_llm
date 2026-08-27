@@ -1,5 +1,4 @@
 import type { PiiCategory, TokenVault } from "./memory-cache";
-import type { CustomLocalConfig } from "./custom-mode";
 import { lmStudioBaseUrl, lmStudioTimeoutMs } from "./lmstudio";
 
 /**
@@ -74,7 +73,7 @@ If a span identifies someone or something but none of the categories above fit, 
 
 CRITICAL RULES:
 1. Copy each span EXACTLY as it appears in the source, character for character. Do not trim titles, do not normalise, do not fix typos.
-2. Do NOT extract text already replaced by a bracketed placeholder such as [MRN_1] or [DATE_2].
+2. Do NOT extract text already replaced by a bracketed placeholder such as [MRN_1] or [DATE_2]. A placeholder means some OTHER identifier was already removed; it NEVER means the text has been dealt with. Names, wards, places and codes sitting beside a placeholder must still be listed.
 3. Do NOT extract clinical content: diseases, drugs, doses, procedures, anatomy, lab values, vital signs, or device names.
 4. Do NOT extract generic role words used without a name.
 5. Do NOT extract named medical entities such as eponymous diseases, syndromes, signs, scores, or classifications (Crohn's disease, Glasgow Coma Scale, Foley catheter). These are not people.
@@ -165,7 +164,6 @@ async function callLmStudio(
   prompt: string,
   signal: AbortSignal,
   useSchema: boolean,
-  custom: CustomLocalConfig | null,
   /** Resolved once per run — see `resolveLocalModel`. */
   model: string,
 ): Promise<Response> {
@@ -174,17 +172,15 @@ async function callLmStudio(
     headers: { "Content-Type": "application/json" },
     signal,
     body: JSON.stringify({
-      // Custom mode may name a model explicitly; otherwise use the detected one.
-      model: custom?.model || model,
-      temperature: custom ? custom.temperature : 0,
-      ...(custom && custom.topP < 1 ? { top_p: custom.topP } : {}),
+      model: model,
+      temperature: 0,
       // A long shift note can carry 60+ entities. Too low a cap truncates the
       // JSON mid-array, which fails closed and looks to the user like an
       // unexplained 503 — so the cap is generous but still bounded, to stop a
       // looping model pinning the single compute slot for minutes.
-      max_tokens: custom ? custom.maxTokens : 6144,
+      max_tokens: 6144,
       messages: [
-        { role: "system", content: custom?.systemPrompt || NER_SYSTEM_PROMPT },
+        { role: "system", content: NER_SYSTEM_PROMPT },
         { role: "user", content: prompt },
       ],
       ...(useSchema
@@ -298,22 +294,18 @@ export async function checkLmStudioHealth(): Promise<LmStudioHealth> {
 /**
  * Run the local NER pass over regex-scrubbed text and replace what it finds.
  *
- * Custom mode swaps the system prompt and the sampling parameters, and nothing
- * else: the output still has to be parsable entity JSON with a token-safe
- * category on every span, every span is still checked verbatim against the
- * source, and an unusable answer still fails the run closed. A custom prompt can therefore
- * change what gets caught — it cannot turn the check into a rubber stamp.
+ * There is one prompt and one set of parameters, compiled in. Nothing a user
+ * can type reaches this: it is the de-identification step itself, and making
+ * it configurable would make the safety property configurable.
  *
  * @param input text that has already been through {@link scrubWithRegex}
  * @param vault volatile token store, mutated in place
- * @param custom per-run overrides from custom mode; null uses the built-ins
  * @throws {LocalScrubUnavailableError} when LM Studio is unreachable and
  *         `ALLOW_DEGRADED_SCRUB` is not explicitly enabled.
  */
 export async function scrubWithLlm(
   input: string,
   vault: TokenVault,
-  custom: CustomLocalConfig | null = null,
 ): Promise<LlmScrubResult> {
   const started = Date.now();
   const controller = new AbortController();
@@ -324,6 +316,8 @@ export async function scrubWithLlm(
   const model = await resolveLocalModel();
 
   let content: string;
+  /** Set when the answer we ended up parsing came from a schema-constrained call. */
+  let usedSchema = true;
   try {
     type ChatBody = { choices?: { message?: { content?: string } }[] };
     const read = async (r: Response): Promise<string> => {
@@ -333,10 +327,11 @@ export async function scrubWithLlm(
       return ((await r.json()) as ChatBody).choices?.[0]?.message?.content ?? "";
     };
 
-    let res = await callLmStudio(input, controller.signal, true, custom, model);
+    let res = await callLmStudio(input, controller.signal, true, model);
     if (res.status === 400) {
       // Older LM Studio builds / GGUFs without grammar support.
-      res = await callLmStudio(input, controller.signal, false, custom, model);
+      res = await callLmStudio(input, controller.signal, false, model);
+      usedSchema = false;
       content = await read(res);
     } else {
       content = await read(res);
@@ -346,7 +341,8 @@ export async function scrubWithLlm(
         // 400 branch above never fires, so without this the pipeline fails
         // closed on every note and the model looks broken. Retry once with no
         // schema, which puts the answer back in `content`.
-        res = await callLmStudio(input, controller.signal, false, custom, model);
+        res = await callLmStudio(input, controller.signal, false, model);
+        usedSchema = false;
         content = await read(res);
       }
     }
@@ -397,9 +393,49 @@ export async function scrubWithLlm(
     };
   }
 
-  const raw = Array.isArray((parsed as { entities?: unknown }).entities)
+  let raw = Array.isArray((parsed as { entities?: unknown }).entities)
     ? ((parsed as { entities: unknown[] }).entities as RawEntity[])
     : [];
+
+  /**
+   * "Nothing here" is the one answer worth asking twice.
+   *
+   * Grammar-constrained decoding makes the shape certain and the content less
+   * so: measured on gemma-4-12b, a short input already dense with placeholders
+   * came back `{"entities": []}` under `json_schema` while the identical call
+   * without it found both names. Every other answer fails safe — a wrong span
+   * is discarded by the verbatim check, a wrong category is normalised — but an
+   * empty list fails OPEN, and quietly.
+   *
+   * So an empty result from a constrained call is retried once unconstrained,
+   * and whatever that finds wins. It costs a second inference only when the
+   * first pass claims there is nothing to redact, which for a real ward note is
+   * the rare case and the one worth paying for.
+   */
+  if (raw.length === 0 && usedSchema) {
+    // Its own deadline: the first call's timer was cleared in the `finally`
+    // above, so reusing that signal would leave this retry able to hang.
+    const retryController = new AbortController();
+    const retryTimer = setTimeout(() => retryController.abort(), timeoutMs());
+    try {
+      const retry = await callLmStudio(input, retryController.signal, false, model);
+      if (retry.ok) {
+        const body = (await retry.json()) as {
+          choices?: { message?: { content?: string } }[];
+        };
+        const retried = body.choices?.[0]?.message?.content ?? "";
+        if (retried.trim()) {
+          const reparsed = extractJson(retried) as { entities?: unknown };
+          if (Array.isArray(reparsed.entities)) raw = reparsed.entities as RawEntity[];
+        }
+      }
+    } catch {
+      // The constrained answer stands. An empty list is still a valid one, and
+      // the caller has already been told nothing came back.
+    } finally {
+      clearTimeout(retryTimer);
+    }
+  }
 
   const accepted: { text: string; category: PiiCategory }[] = [];
   const seen = new Set<string>();

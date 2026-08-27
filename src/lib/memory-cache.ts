@@ -113,6 +113,28 @@ export class TokenVault {
     return text.replace(pattern, (match) => this.tokenToPii.get(match) ?? match);
   }
 
+  /**
+   * Replace every identifier this vault already knows with its token.
+   *
+   * The mirror of {@link rehydrate}, and it exists because a custom-prompt run
+   * has TWO strings to clean — a system instruction and a prompt — that must
+   * share one set of tokens. Running the local model twice to do that would
+   * double the slowest stage in the pipeline; instead the model reads the two
+   * joined once, and this applies what it found to each string separately.
+   *
+   * Longest ORIGINAL first, for the same reason `rehydrate` sorts by token
+   * length: replacing a surname before the full name it sits inside would
+   * shred the longer one.
+   */
+  deidentify(text: string): string {
+    const pairs = [...this.tokenToPii.entries()]
+      .filter(([, pii]) => pii.length > 0)
+      .sort((a, b) => b[1].length - a[1].length);
+    let out = text;
+    for (const [token, pii] of pairs) out = out.split(pii).join(token);
+    return out;
+  }
+
   /** Tokens the cloud model left unresolved — a signal the prompt drifted. */
   unresolvedTokens(text: string): string[] {
     return this.tokens().filter((t) => text.includes(t));

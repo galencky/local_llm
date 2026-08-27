@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { loadedLmStudioModel, NER_SYSTEM_PROMPT } from "@/lib/scrubber-llm";
 import { defaultModel } from "@/lib/model-registry";
-import { PLACEHOLDER_KERNEL } from "@/lib/custom-mode";
+import { PLACEHOLDER_KERNEL } from "@/lib/placeholders";
 import {
   BUILT_IN_FORMATS,
   builtInFormatInstruction,
@@ -31,11 +31,9 @@ export const dynamic = "force-dynamic";
  * versioned, owned, PII-screened on save, and recorded by name on every audit
  * row. That is the supported customisation path.
  *
- * Custom mode is the other one, and it is deliberately a different door: it
- * replaces both prompts wholesale for a single run, keeps nothing, and is
- * marked as such on the audit row. This endpoint is where its editor reads the
- * built-in text from, so "start from the built-in prompt" cannot drift from
- * what guided mode actually sends.
+ * The custom-prompt workspace is the other door, and deliberately a different
+ * one: it asks its own question entirely, keeps nothing, and is marked as such
+ * on the audit row.
  */
 export async function GET() {
   const session = await auth();

@@ -150,58 +150,47 @@ To publish it to a hospital over a Cloudflare Tunnel, see
 
 ## Using it
 
-**Formats.** Five built-in note shapes — SOAP, admission, progress, hospital
-course, discharge summary — plus **Custom prompt**, where you write the note's
-shape yourself. The format you pick is recorded on the audit row, so two notes
-labelled "SOAP" are comparable, and a written one is labelled `CUSTOM`.
+There is one thing to decide before a run, and it is decided by two controls
+sitting together: **what you are doing**, and **which model does it**.
 
-Custom prompt is the light door into customisation and deliberately the safest:
-the note skeleton is the *weakest* instruction in the prompt, so replacing it
-cannot touch the placeholder rules, the clinical rules, or either
-de-identification pass. Your skeleton is kept in the browser, and an empty one
-is refused rather than quietly replaced with a default you never chose.
+|  | Note | Custom prompt |
+| --- | --- | --- |
+| You give it | a ward narrative | a system instruction and a prompt |
+| You get back | a structured note | an answer |
+| **Gemini** | de-identified, logged | de-identified, logged |
+| **Local model** | de-identified, logged | **raw — nothing redacted, nothing logged** |
 
-**Where the note gets written.** The model selector offers the Gemini ladder and
-one more option: **Local**, which detects whatever LM Studio has loaded and
-shows its name beside a status light, the way the badges in the header do —
-there is nothing to configure and nothing that can fall out of step. Picking it means the model already loaded in LM
-Studio writes the note as well as reading it, so the request makes no outbound
-call whatsoever — no Google, no quota, nothing to explain to a hospital about a
-third-party processor. Useful when quota is spent, when the network is down, or
-simply for a note you would rather not send.
+**The rule is the destination, not the prompt.** Anything bound for Google is
+de-identified first, without exception, and the run is refused outright if the
+local model is unavailable to do it. No prompt you can write changes that,
+because nothing in a prompt is consulted when deciding it. The cloud options
+grey out when LM Studio is not running, for the same reason.
 
-Both de-identification passes still run on a local note. That is deliberate: the
-audit log stays de-identified whether or not a cloud is involved, which is what
-makes History safe to open in front of someone. The trade is that a local model
-writes a weaker draft than a flagship Flash model, and the run holds the compute
-slot for two local inferences instead of one. If the local model fails, the note
-is **not** quietly sent to the cloud instead — choosing Local is a promise, not a
-preference.
+The corollary is what makes the local model worth having: when nothing leaves
+the box there is nothing to protect it from. **Custom prompt + Local** is the
+one combination that runs raw — your text reaches the model exactly as written,
+and no row is written to the note log, because that row would be the only
+unredacted copy of it anywhere on disk. It is your machine talking to your
+model. The interface says so, in those words, while it is selected.
+
+**Formats.** In the Note workspace, five note shapes — SOAP, admission,
+progress, hospital course, discharge summary. The format is recorded on the
+audit row, so two notes labelled "SOAP" are comparable.
 
 **Routines.** A saved instruction block per department — "always call out
 dialysis access and dry weight under Objective". Written once, appended to every
 note that uses it. Routines are screened for patient data when you save them and
 refused if any is found.
 
-**Custom mode.** The heavy door, and a toggle beside the model selector. Hands
-you both models' prompts *and* both sets of sampling parameters for a single
-run, and composes with either destination — your prompts apply to whichever
-model writes the note. Reach for Custom prompt first; reach for custom mode when
-you need to change what the models are told, not just what shape the note takes. Four things it still cannot switch off: the pattern scrub, the
-requirement that the local pass return usable output, the verbatim check on every
-span it returns, and the placeholder rules the cloud model is given. Custom
-prompts are never stored — the audit row says so rather than implying the
-built-in prompts wrote the note.
+**Checking the work.** Four drawers: the **redaction list** (what was taken
+out), **Wire view** (what crossed the internet), **Prompts** (exactly what each
+model is told, read live from the running server), and **History** (your past
+notes, de-identified, searchable). Every drawer closes on **Escape** or a click
+outside, keeps the keyboard inside it while open, and hands focus back to the
+control you opened it from.
 
-**Checking the work.** Four drawers: the **redaction list** (what was taken out),
-**Wire view** (what crossed the internet), **Prompts** (exactly what each model
-is told, read live from the running server), and **History** (your past notes,
-de-identified, searchable). Every drawer closes on **Escape** or a click outside,
-keeps the keyboard inside it while open, and hands focus back to the control you
-opened it from.
-
-**Keyboard.** **Cmd/Ctrl + Enter** runs the note. When the run button is greyed
-out it says why on hover — no note yet, over the length cap, or a prompt that
+**Keyboard.** **Cmd/Ctrl + Enter** runs. When the run button is greyed out it
+says why on hover — nothing typed yet, over the length cap, or a prompt that
 needs fixing.
 
 ## Proving it rather than asserting it
@@ -211,6 +200,7 @@ npm run verify        # offline: encryption, both scrubbers, re-hydration, the l
 npm run prove:e2ee    # wiretap the traffic and try to read the note out of it
 npm run db:inspect    # dump the audit schema and scan every row for identifiers
 npm run e2e:system    # full acceptance run against the live stack
+npm run e2e:prompt    # the custom-prompt workspace on both destinations
 ```
 
 `prove:e2ee` puts a recording proxy exactly where Cloudflare sits, captures every

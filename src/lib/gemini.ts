@@ -1,6 +1,6 @@
 import "server-only";
 import { GoogleGenAI } from "@google/genai";
-import { withPlaceholderKernel, type CustomCloudConfig } from "./custom-mode";
+import { PLACEHOLDER_KERNEL, withPlaceholderKernel } from "./placeholders";
 import {
   chainFrom,
   defaultModel,
@@ -20,8 +20,8 @@ import {
  */
 
 /**
- * The system instruction below is NOT editable in guided mode and is not stored
- * in the database. The placeholder rules are what keep `[PATIENT_1]` intact
+ * The system instruction below is NOT editable and is not stored in the
+ * database. The placeholder rules are what keep `[PATIENT_1]` intact
  * through the round trip, and the clinical rules are what stop the model
  * inventing findings. Making them a setting would make the safety properties a
  * setting. `systemInstruction()` exports the text so the UI can show it
@@ -111,8 +111,8 @@ export function assemblePrompt(opts: {
   adHoc?: string | null;
   narrative: string;
   /**
-   * Custom mode's replacement for the built-in format skeleton. When set,
-   * `format` is only a label — it no longer chooses the note's shape.
+   * A replacement for the built-in format skeleton. When set, `format` is
+   * only a label — it no longer chooses the note's shape.
    */
   skeleton?: string | null;
 }): string {
@@ -127,6 +127,19 @@ export function assemblePrompt(opts: {
     opts.narrative,
     "\n--- END NARRATIVE ---",
   ].join("");
+}
+
+/**
+ * The system instruction a custom-prompt run actually gets on the cloud.
+ *
+ * The user's own text, plus the placeholder kernel — because the prompt was
+ * de-identified on the way out and has to be re-hydratable on the way back.
+ * That is not a style choice the user can decline; without it the answer comes
+ * back with `[PATIENT_1]` renumbered and the round trip is broken.
+ */
+export function promptSystemInstruction(userInstruction: string): string {
+  const own = userInstruction.trim();
+  return own ? withPlaceholderKernel(own) : PLACEHOLDER_KERNEL;
 }
 
 let client: GoogleGenAI | null = null;
@@ -243,7 +256,7 @@ export interface FormatNoteResult {
  * Format a fully de-identified narrative into a structured note.
  *
  * Instruction precedence, weakest to strongest: the format skeleton (built-in,
- * or custom mode's replacement for it), then the saved specialty template,
+ * or a replacement for it), then the saved specialty template,
  * then the clinician's ad-hoc steer. The placeholder rules in the system
  * instruction outrank all three — neither a template nor a custom instruction
  * can talk the model into inventing a name.
@@ -252,42 +265,68 @@ export interface FormatNoteResult {
  * @param format target note structure
  * @param instructions saved template and/or one-off steer
  */
+export async function runPromptOnCloud(opts: {
+  /** Already de-identified: placeholders only. */
+  systemInstruction: string;
+  /** Already de-identified: placeholders only. */
+  prompt: string;
+  temperature: number;
+  maxTokens: number;
+  startModel?: string;
+  onFallback?: (step: FallbackStep, next: string) => void;
+}): Promise<FormatNoteResult> {
+  return walkTheLadder({
+    system: promptSystemInstruction(opts.systemInstruction),
+    prompt: opts.prompt,
+    generation: {
+      temperature: opts.temperature,
+      ...(opts.maxTokens > 0 ? { maxOutputTokens: opts.maxTokens } : {}),
+    },
+    startModel: opts.startModel,
+    onFallback: opts.onFallback,
+  });
+}
+
 export async function formatClinicalNote(
   deidentifiedText: string,
   format: NoteFormat,
   instructions: NoteInstructions = {},
   onFallback?: (step: FallbackStep, next: string) => void,
   startModel?: string,
-  custom: CustomCloudConfig | null = null,
 ): Promise<FormatNoteResult> {
-  const started = Date.now();
-
   const prompt = assemblePrompt({
     format,
     template: instructions.template,
     adHoc: instructions.adHoc,
     narrative: deidentifiedText,
-    // Custom mode's instruction outranks the CUSTOM format's skeleton: in that
-    // mode the format is only a label, and the editor is the more explicit
-    // statement of what the note should look like.
-    skeleton: custom?.instruction ?? instructions.skeleton,
+    skeleton: instructions.skeleton,
   });
 
-  // Custom mode owns the system instruction, except for the placeholder
-  // kernel: without it the model renumbers [DATE_2] and the note can no longer
-  // be re-hydrated, which breaks every run rather than any particular one.
-  const system = custom
-    ? withPlaceholderKernel(custom.systemInstruction)
-    : SYSTEM_INSTRUCTION;
+  return walkTheLadder({
+    system: SYSTEM_INSTRUCTION,
+    prompt,
+    generation: { temperature: 0.2 },
+    startModel,
+    onFallback,
+  });
+}
 
-  const generation = custom
-    ? {
-        temperature: custom.temperature,
-        topP: custom.topP,
-        ...(custom.topK > 0 ? { topK: custom.topK } : {}),
-        ...(custom.maxOutputTokens > 0 ? { maxOutputTokens: custom.maxOutputTokens } : {}),
-      }
-    : { temperature: 0.2 };
+/**
+ * Try each rung from `startModel` down, and report every refusal on the way.
+ *
+ * Shared by the note path and the custom-prompt path: the ladder, the cooldown
+ * bookkeeping and the which-failures-are-worth-retrying rules are identical
+ * whatever the prompt is made of.
+ */
+async function walkTheLadder(opts: {
+  system: string;
+  prompt: string;
+  generation: Record<string, number>;
+  startModel?: string;
+  onFallback?: (step: FallbackStep, next: string) => void;
+}): Promise<FormatNoteResult> {
+  const { system, prompt, generation, startModel, onFallback } = opts;
+  const started = Date.now();
 
   // Persisted cooldowns must be loaded before we decide which rung to try.
   await ensureCooldownsLoaded();

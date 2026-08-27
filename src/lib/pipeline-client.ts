@@ -1,5 +1,5 @@
 import { openResponse, sealRequest, type CryptoEnvelope } from "./crypto";
-import type { CustomConfig } from "./custom-mode";
+import type { PromptRun, Workspace } from "./workspace";
 
 /**
  * Client half of the streaming pipeline: seals the note, POSTs it, and reports
@@ -116,14 +116,10 @@ export interface RunOptions {
   promptId?: string;
   /** Starting rung of the model ladder; the server falls back downward. */
   model?: string;
-  /**
-   * Custom mode: the user's own prompts and sampling parameters for both
-   * models. Travels inside the sealed envelope like the note itself, so a
-   * prompt never sits in a query string or a server log.
-   */
-  custom?: CustomConfig | null;
-  /** The CUSTOM format's own note skeleton. Ignored for the built-in formats. */
-  formatPrompt?: string | null;
+  /** Which workspace this came from. Defaults to "note" server-side. */
+  workspace?: Workspace;
+  /** The custom-prompt workspace's instruction, prompt and parameters. */
+  promptRun?: PromptRun | null;
   onProgress?: (event: ProgressEvent) => void;
   /**
    * Called with the exact bytes that are about to go on the wire, plus the
@@ -166,8 +162,8 @@ async function attempt<T>(opts: RunOptions, bustKeyCache: boolean): Promise<T> {
     instruction: opts.instruction || undefined,
     promptId: opts.promptId || undefined,
     model: opts.model || undefined,
-    custom: opts.custom ?? undefined,
-    formatPrompt: opts.formatPrompt || undefined,
+    workspace: opts.workspace,
+    promptRun: opts.promptRun ?? undefined,
   });
   const { envelope, aesKey } = await sealRequest(publicKey, plaintext);
   opts.onSealed?.({ envelope, plaintext });
