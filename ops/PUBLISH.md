@@ -4,6 +4,10 @@ The container listens on `localhost:3000`. Cloudflare Tunnel gives it a public
 HTTPS hostname without opening a single port on your router — the tunnel dials
 *out* to Cloudflare, so there is no inbound path to your home network.
 
+> This runbook names one real instance — `llm.galenchen.uk` on `galenchen.uk` —
+> because a concrete example is easier to follow than a placeholder. Substitute
+> your own hostname and zone throughout; nothing else changes.
+
 ## Route A — dashboard token (recommended, no browser login on the Mac)
 
 Cloudflare's dashboard creates the tunnel and hands you a token; nothing needs
@@ -113,8 +117,19 @@ this must be the public HTTPS name or sign-in silently fails to stick.
   hostname is not authentication. The bypass refuses non-localhost hosts by
   default, but turn it off entirely rather than relying on that.
 - **Check `AUTH_ALLOWED_EMAILS`** contains only clinicians who should be there.
-- Confirm the banner is gone: with the dev bypass off, the amber warning strip
-  at the top of the page disappears.
+- **Verify it from outside, not from the Mac.** From another network:
+
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+    -H 'Content-Type: application/json' -d '{"password":"llm"}' \
+    https://<your-host>/api/auth/dev-login          # want 404 (disabled)
+  curl -s -o /dev/null -w '%{http_code}\n' \
+    -H 'Cookie: authjs.session-token=forged' \
+    https://<your-host>/api/status                   # want 401
+  ```
+
+  The sign-in page should also show no **Developer sign-in** section — it is
+  rendered only when the bypass is enabled.
 
 ## What the tunnel does and does not protect
 
@@ -149,6 +164,11 @@ docker image prune -af        # dangling images
 npm cache clean --force       # ~/.npm, regenerable
 rm -rf .next                  # local build output, regenerated on next run
 ```
+
+`rm -rf .next` is also the fix when `tsc --noEmit` starts reporting duplicate
+`LayoutProps` or `unstable_cache` definitions out of nowhere: overlapping builds
+can leave a second copy of a generated type file behind, and the ` 2` in
+`.next/types/routes.d 2.ts` is the tell. Nothing in `src/` is wrong.
 
 Worth doing after any run of rebuilds. Docker Desktop can also cap it for you:
 **Settings → Resources → Advanced → Disk usage limit**, and the build cache has

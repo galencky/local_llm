@@ -46,23 +46,44 @@ network.
 │ …            │                  │ processingTimeMs   int             │
 └──────────────┘                  │ noteFormat         text?           │
   OAuth tokens                    │ promptTemplateName text?           │
-  from Google                     └────────────────────────────────────┘
+  from Google                     │ patternScrub       boolean         │
+                                  └────────────────────────────────────┘
                                     ▲ ON DELETE CASCADE from User
 
-┌────────────────────────────────────┐   ┌──────────────────────────────┐
-│ PromptTemplate    ← saved routines │   │ ModelCooldown                │
-│────────────────────────────────────│   │──────────────────────────────│
-│ id          uuid   PK              │   │ model      text     PK       │
-│ userId      text?  FK  (null =     │   │ until      timestamp         │
-│                    shared)         │   │ reason     text              │
-│ name        text   UQ(userId,name) │   │ daily      boolean           │
-│ specialty   text?                  │   │ updatedAt  timestamp         │
-│ instruction text                   │   └──────────────────────────────┘
-│ format      text?                  │     which Gemini models are spent
-│ isDefault   boolean                │     — learned only by being refused
-│ createdAt / updatedAt              │
-└────────────────────────────────────┘
+┌──────────────────────────────────────┐ ┌──────────────────────────────┐
+│ PromptTemplate      ← saved routines │ │ ModelCooldown                │
+│──────────────────────────────────────│ │──────────────────────────────│
+│ id                uuid   PK          │ │ model      text     PK       │
+│ userId            text?  FK  (null = │ │ until      timestamp         │
+│                          shared)     │ │ reason     text              │
+│ name              text  UQ(user,name)│ │ daily      boolean           │
+│ specialty         text?              │ │ updatedAt  timestamp         │
+│ kind              text   note|prompt │ └──────────────────────────────┘
+│ instruction       text               │   which Gemini models are spent
+│ systemInstruction text?  prompt only │   — learned only by being refused
+│ format            text?  note only   │
+│ temperature/topP/topK/maxTokens      │
+│                   nullable numbers   │
+│ isDefault         boolean  (per kind)│
+│ createdAt / updatedAt                │
+└──────────────────────────────────────┘
 ```
+
+`kind` splits the two workspaces: a **note** routine is a charting instruction
+appended beneath the format skeleton; a **prompt** routine *is* the prompt, and
+carries its own system instruction and sampling so selecting it restores the
+whole run. `isDefault` is per kind — one preselected routine for notes and one
+for prompts, because they are never offered at the same time.
+
+The four sampling columns are nullable, and null means "leave whatever the
+browser already has" — which is what every row written before routines carried
+sampling means.
+
+`patternScrub` records whether the deterministic pass ran for that note. It can
+be switched off for a cloud run, which leaves the local model alone responsible
+for every identifier, and a note whose de-identification worked differently has
+to be traceable as such. It defaults to true, so every row written before the
+switch existed says what was true of it.
 
 Prompts are **not** in the database. Both system prompts and the five format
 skeletons are compiled into the image and read-only — see the Prompts drawer.
@@ -86,6 +107,17 @@ A real row:
 ```
 deidentifiedInput │ 病歷號 [MRN_1]，患者[PATIENT_1]，身分證 [TAIWAN_ID_1]，男性 81 歲…
 ```
+
+## What is not written at all
+
+**A local run writes no row.** The rule in `src/lib/workspace.ts` is that
+de-identification happens if and only if a run is bound for the cloud — so a
+local run has no de-identified copy of itself, and the invariant below holds by
+never writing rather than by writing something and hoping it is safe.
+
+The clinical consequence is worth stating: notes written on the local model do
+not appear in History and leave no audit trail. History is a record of what
+crossed to the cloud, which is what it has always claimed to be.
 
 ## What is deliberately absent
 
