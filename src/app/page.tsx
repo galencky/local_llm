@@ -224,12 +224,21 @@ const MODES: {
   id: RunMode;
   label: string;
   icon: typeof ShieldCheck;
+  /**
+   * Shown in the mode row, which is one line and shares it with the toggle and
+   * the Edit button. Budgeted at ~40 characters, because that is what survives
+   * at 1024px — the width this is built for. Anything longer truncates, and a
+   * sentence cut to "You write…" tells the reader less than nothing.
+   */
+  summary: string;
+  /** The whole sentence. Tooltip on both the segment and the summary. */
   blurb: string;
 }[] = [
   {
     id: "guided",
     label: "Guided",
     icon: ShieldCheck,
+    summary: "Built-in prompts and note skeletons.",
     blurb:
       "Built-in prompts, fixed note skeletons, tuned sampling. Your instructions go in a saved routine.",
   },
@@ -237,6 +246,7 @@ const MODES: {
     id: "custom",
     label: "Custom",
     icon: SlidersHorizontal,
+    summary: "You write both prompts.",
     blurb:
       "You write both prompts — the local de-identifier and the formatter — and set both models' parameters.",
   },
@@ -762,9 +772,20 @@ export default function AirlockPage() {
             />
             <HealthPill
               icon={Sparkles}
+              // The vendor prefix is noise on a chip capped at 9rem: with it,
+              // "google/gemma-4-12b" was cut mid-name at 1024px, which is the
+              // width this is built for. Short name on the chip, full id in
+              // the tooltip — the same choice the model selector makes.
+              title={
+                status?.lmStudio.online
+                  ? `LM Studio · ${status.lmStudio.models[0] ?? "a model is loaded"}${status.lmStudio.busy ? " · working" : ""}`
+                  : `LM Studio is not answering${status?.lmStudio.error ? ` — ${status.lmStudio.error}` : ""}`
+              }
               label={
                 status?.lmStudio.online
-                  ? `LM Studio${status.lmStudio.busy ? " (working)" : ""} · ${status.lmStudio.models[0] ?? "loaded"}`
+                  ? `LM Studio${status.lmStudio.busy ? " (working)" : ""} · ${
+                      status.lmStudio.models[0]?.split("/").pop() ?? "loaded"
+                    }`
                   : "LM Studio down"
               }
               tone={status?.lmStudio.online ? "ok" : "bad"}
@@ -1432,39 +1453,37 @@ function ModeBar({
           })}
         </div>
 
-        {/* Truncates rather than wraps — the full text is in the tooltip, and
-            the toggle's own labels already say which mode is on. */}
+        {/* Short enough to be read whole at every supported width; the full
+            sentence is the tooltip. `truncate` stays as a backstop, but it
+            should never fire — a blurb cut to "You write…" is worse than no
+            blurb, which is exactly what a 252px parameter read-out sitting
+            beside it used to cause at 1920. */}
         <p
           title={active.blurb}
           className="min-w-0 flex-1 truncate text-[11px] text-[var(--muted)]"
         >
-          {active.blurb}
+          {active.summary}
         </p>
 
         {mode === "custom" && (
-          <>
-            <span
-              title="What the two models are running with right now"
-              className="hidden shrink-0 font-mono text-[10px] text-[var(--muted)] 2xl:inline"
-            >
-              local {custom.local.temperature.toFixed(2)} · {custom.local.maxTokens} tok
-              {" · "}format {custom.cloud.temperature.toFixed(2)} / {custom.cloud.topP.toFixed(2)}
+          <button
+            onClick={onEdit}
+            // The live parameters used to sit in the row as their own element
+            // and starved the blurb of every pixel it needed. They are a
+            // glance, not a control, so they belong on the control that opens
+            // the thing they describe.
+            title={`Open the custom prompt and parameter editor — local ${custom.local.temperature.toFixed(2)} / ${custom.local.maxTokens} tok, format ${custom.cloud.temperature.toFixed(2)} / ${custom.cloud.topP.toFixed(2)}`}
+            className="flex shrink-0 items-center gap-1.5 rounded border border-[var(--accent-solid)] bg-[var(--accent-solid)] px-2.5 py-1 text-[11px] font-medium text-[var(--on-accent)] transition-opacity hover:opacity-90"
+          >
+            <Pencil className="size-3.5 shrink-0" />
+            {/* One flex item, not two: a bare text node beside a span makes
+                each an anonymous flex item, and the row's gap then opens up
+                between "Edit" and the rest of its own label. The word alone
+                carries it below xl, where the full label would wrap the row. */}
+            <span className="whitespace-nowrap">
+              Edit<span className="hidden xl:inline"> prompts &amp; parameters</span>
             </span>
-            <button
-              onClick={onEdit}
-              title="Open the custom prompt and parameter editor"
-              className="flex shrink-0 items-center gap-1.5 rounded border border-[var(--accent-solid)] bg-[var(--accent-solid)] px-2.5 py-1 text-[11px] font-medium text-[var(--on-accent)] transition-opacity hover:opacity-90"
-            >
-              <Pencil className="size-3.5 shrink-0" />
-              {/* One flex item, not two: a bare text node beside a span makes
-                  each an anonymous flex item, and the row's gap then opens up
-                  between "Edit" and the rest of its own label. The word alone
-                  carries it below xl, where the full label would wrap the row. */}
-              <span className="whitespace-nowrap">
-                Edit<span className="hidden xl:inline"> prompts &amp; parameters</span>
-              </span>
-            </button>
-          </>
+          </button>
         )}
       </div>
 

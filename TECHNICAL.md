@@ -737,6 +737,15 @@ minimal frame parser (`EventSource` cannot issue a POST). On
 - **The Prompts drawer reads `/api/prompt-config` live** on every open, so the
   prompts it shows are the ones the running server would send, and the local
   model name is the one LM Studio actually has loaded.
+- **Text in a shared row is budgeted, not just truncated.** `truncate` stops a
+  row wrapping, but a flex item that shrinks to nothing produces a worse
+  result than wrapping did: the mode blurb was cut to "You write…" — 11% of it
+  — at 1920px, because a 252px parameter read-out beside it took the space
+  first. The rule is to size the text to the narrowest supported width (~40
+  characters in that row at 1024px), keep the whole sentence in `title`, and
+  move anything that is a glance rather than a control onto the control it
+  describes. `MODES[].summary` is what the row shows; `MODES[].blurb` is the
+  tooltip. Verified across 32 surface/width combinations: zero clipped text.
 - **A disabled primary action says why.** The run button carries
   `disabledReason` as its tooltip, naming whichever precondition is missing —
   no note, no server key, over the cap, or a prompt that needs fixing. A greyed
@@ -975,7 +984,7 @@ and all six drawers — in both themes. It composites through alpha layers and
 Widening it from "controls" to "all text", and from resting to in-flight states,
 turned 0 known problems into 135 — which were three causes, not 135 bugs:
 `opacity` used to dim text, Tailwind `-600`/`-500` shades on white, and
-`animate-pulse` on a label. Current state: **2,356 text nodes, zero below AA,
+`animate-pulse` on a label. Current state: **2,350 text nodes, zero below AA,
 both themes**, across sixteen surfaces including both mode states.
 
 It waited on the wrong signal for a long time. "Copy note · with names" is
