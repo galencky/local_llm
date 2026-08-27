@@ -169,7 +169,26 @@ const FORMATS = [
   { id: "PROGRESS_NOTE", label: "Progress" },
   { id: "HOSPITAL_COURSE", label: "Course timeline" },
   { id: "DISCHARGE_SUMMARY", label: "Discharge" },
+  /**
+   * Write the skeleton instead of picking one.
+   *
+   * The light door into customisation, and the safest: the format skeleton is
+   * the weakest instruction in the assembled prompt, so this cannot reach the
+   * placeholder rules, the clinical rules, or either de-identification pass.
+   * Custom *mode* is the heavy door.
+   */
+  { id: "CUSTOM", label: "Custom prompt" },
 ] as const;
+
+/** Where the written skeleton is remembered. Per browser, like custom mode. */
+const FORMAT_PROMPT_KEY = "airlock-format-prompt";
+
+const EXAMPLE_FORMAT_PROMPT = `Produce a ward handover note under these headings exactly: **Situation**, **Background**, **Assessment**, **Recommendation**.
+
+- Situation: one line — who the patient is and why they are still in.
+- Background: the admission, the working diagnosis, and what has been done.
+- Assessment: current status, most active problem first.
+- Recommendation: what the next shift must do, numbered, one line each.`;
 
 const CATEGORY_TINT: Record<string, string> = {
   TAIWAN_ID: "bg-rose-500/10 text-rose-700 dark:text-rose-400",
@@ -240,6 +259,8 @@ const CUSTOM_MODE_KEY = "airlock.run-mode.v1";
 interface RunSettings {
   mode: RunMode;
   config: CustomConfig;
+  /** The CUSTOM format's own note skeleton. Per browser, like the prompts. */
+  formatPrompt: string;
 }
 
 const runListeners = new Set<() => void>();
@@ -258,6 +279,7 @@ function readRunSettings(): RunSettings {
     const saved = raw ? (JSON.parse(raw) as Partial<CustomConfig>) : {};
     return {
       mode: window.localStorage.getItem(CUSTOM_MODE_KEY) === "custom" ? "custom" : "guided",
+      formatPrompt: window.localStorage.getItem(FORMAT_PROMPT_KEY) ?? EXAMPLE_FORMAT_PROMPT,
       // Merged field by field: a config written by an older build is missing
       // whatever was added since, and a half-applied one is worse than none.
       config: {
@@ -268,7 +290,7 @@ function readRunSettings(): RunSettings {
   } catch {
     // Private window, disabled storage, or a corrupt entry. Guided is the
     // right thing to fall back to — never a half-read custom prompt.
-    return { mode: "guided", config: fresh };
+    return { mode: "guided", config: fresh, formatPrompt: EXAMPLE_FORMAT_PROMPT };
   }
 }
 
@@ -277,7 +299,7 @@ function subscribeRunSettings(fn: () => void) {
   // Another tab writing the prompts fires `storage` here, never in the tab
   // that wrote them — hence the explicit notify in `writeRunSettings` too.
   const onStorage = (e: StorageEvent) => {
-    if (e.key === CUSTOM_STORAGE_KEY || e.key === CUSTOM_MODE_KEY) {
+    if (e.key === CUSTOM_STORAGE_KEY || e.key === CUSTOM_MODE_KEY || e.key === FORMAT_PROMPT_KEY) {
       runCache = null;
       runListeners.forEach((l) => l());
     }
@@ -294,7 +316,11 @@ function getRunSettings(): RunSettings {
 }
 
 /** The server cannot know what this browser saved; guided is the honest default. */
-const SERVER_RUN_SETTINGS: RunSettings = { mode: "guided", config: blankCustomConfig() };
+const SERVER_RUN_SETTINGS: RunSettings = {
+  mode: "guided",
+  config: blankCustomConfig(),
+  formatPrompt: EXAMPLE_FORMAT_PROMPT,
+};
 
 function getServerRunSettings(): RunSettings {
   return SERVER_RUN_SETTINGS;
@@ -305,6 +331,7 @@ function writeRunSettings(next: RunSettings): void {
   try {
     window.localStorage.setItem(CUSTOM_STORAGE_KEY, JSON.stringify(next.config));
     window.localStorage.setItem(CUSTOM_MODE_KEY, next.mode);
+    window.localStorage.setItem(FORMAT_PROMPT_KEY, next.formatPrompt);
   } catch {
     // The setting still applies to this session; it just will not survive.
   }
@@ -352,7 +379,7 @@ export default function AirlockPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   /* --- run mode, remembered per browser -------------------------------- */
-  const { mode, config: custom } = useSyncExternalStore(
+  const { mode, config: custom, formatPrompt } = useSyncExternalStore(
     subscribeRunSettings,
     getRunSettings,
     getServerRunSettings,
@@ -373,6 +400,15 @@ export default function AirlockPage() {
   const chooseMode = useCallback((next: RunMode) => {
     writeRunSettings({ ...getRunSettings(), mode: next });
     if (next === "custom") setCustomOpen(true);
+  }, []);
+
+  /**
+   * Kept in the run-settings store rather than Postgres, for the same reason
+   * custom mode's prompts are: a saved routine is PII-screened on write and
+   * named on every audit row, and a free-form prompt store would be neither.
+   */
+  const updateFormatPrompt = useCallback((value: string) => {
+    writeRunSettings({ ...getRunSettings(), formatPrompt: value });
   }, []);
 
   /* --- server public key ---------------------------------------------- */
@@ -528,12 +564,46 @@ export default function AirlockPage() {
     }
   }, [mode, custom]);
 
+  /**
+   * The CUSTOM format replaces the built-in skeleton, so an empty one has
+   * nothing to fall back to. Caught here as well as on the server, so the
+   * problem is named while the note is still on screen.
+   */
+  const formatPromptError =
+    mode === "guided" && format === "CUSTOM"
+      ? !formatPrompt.trim()
+        ? "Write the note skeleton for the Custom prompt format, or pick a built-in one."
+        : formatPrompt.length > MAX_CUSTOM_PROMPT_LENGTH
+          ? `That formatting instruction is ${formatPrompt.length.toLocaleString()} characters. The cap is ${MAX_CUSTOM_PROMPT_LENGTH.toLocaleString()}.`
+          : null
+      : null;
+
   const ready =
     Boolean(publicKey) &&
     !submitting &&
     input.trim().length > 0 &&
     !size.overHard &&
-    !customError;
+    !customError &&
+    !formatPromptError;
+
+  /**
+   * A greyed-out primary action with no explanation is a dead end. Say which
+   * of the five preconditions is missing, in the order the clinician would
+   * hit them.
+   */
+  const disabledReason = submitting
+    ? "A note is already running on this Mac."
+    : !publicKey
+      ? "Waiting for the server's public key — the note cannot be sealed yet."
+      : input.trim().length === 0
+        ? "Paste the ward narrative first."
+        : size.overHard
+          ? `That narrative is ${size.chars.toLocaleString()} characters. The cap is ${HARD_CHAR_LIMIT.toLocaleString()} — past that the local model starts missing names.`
+          : customError
+            ? customError
+            : formatPromptError
+              ? formatPromptError
+              : "Cmd/Ctrl + Enter";
   const activeTemplate = templates.find((t) => t.id === activeTemplateId) ?? null;
 
   /** Live pipeline stages for the current run. */
@@ -550,6 +620,7 @@ export default function AirlockPage() {
           text,
           format,
           instruction: instruction.trim() || undefined,
+          formatPrompt: format === "CUSTOM" ? formatPrompt : undefined,
           promptId: activeTemplateId || undefined,
           model: chosenModel || undefined,
           custom: mode === "custom" ? custom : null,
@@ -579,7 +650,7 @@ export default function AirlockPage() {
         throw e;
       }
     },
-    [format, instruction, activeTemplateId, chosenModel, mode, custom, loadModels],
+    [format, instruction, formatPrompt, activeTemplateId, chosenModel, mode, custom, loadModels],
   );
 
   const submit = useCallback(async () => {
@@ -832,6 +903,58 @@ export default function AirlockPage() {
             </div>
           )}
 
+          {/* ---- the written note skeleton, for the Custom prompt format ----
+               Uses the same reveal as the custom-mode warning, so choosing this
+               format slides the controls below it down instead of teleporting
+               them. In custom mode the editor owns the skeleton and the format
+               is only a label, so this stays shut. */}
+          <div className="reveal" data-open={mode === "guided" && format === "CUSTOM"}>
+            <div>
+              <div className="border-t border-[var(--border)] px-3 py-2 sm:px-4 sm:py-2.5">
+                <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                  <Wand2 className="size-3.5 shrink-0 text-[var(--accent)]" />
+                  <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+                    Your note skeleton — replaces the built-in one
+                  </span>
+                  <span className="font-mono text-[10px] text-[var(--muted)]">
+                    {formatPrompt.length.toLocaleString()} / {MAX_CUSTOM_PROMPT_LENGTH.toLocaleString()}
+                  </span>
+                  <button
+                    onClick={() => updateFormatPrompt(EXAMPLE_FORMAT_PROMPT)}
+                    disabled={submitting}
+                    className="ml-auto shrink-0 rounded border border-[var(--border)] px-2 py-0.5 text-[10px] text-[var(--muted)] hover:text-[var(--foreground)] disabled:cursor-not-allowed"
+                  >
+                    Load example
+                  </button>
+                </div>
+                <textarea
+                  aria-label="Custom note skeleton"
+                  value={formatPrompt}
+                  onChange={(e) => updateFormatPrompt(e.target.value)}
+                  disabled={submitting}
+                  rows={6}
+                  spellCheck={false}
+                  placeholder={"Produce a note with these headings exactly: …"}
+                  className="scroll-visible block max-h-56 w-full resize-y overflow-auto rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 font-mono text-[12px] leading-relaxed outline-none placeholder:text-[var(--muted)]/60 disabled:cursor-not-allowed disabled:text-[var(--muted)]"
+                />
+                {formatPromptError ? (
+                  <p className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-relaxed text-rose-700 dark:text-rose-300">
+                    <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                    {formatPromptError}
+                  </p>
+                ) : (
+                  <p className="mt-1.5 text-[10px] leading-relaxed text-[var(--muted)]">
+                    This replaces the note skeleton only — the weakest instruction in the prompt.
+                    The placeholder rules, the clinical rules and both de-identification passes are
+                    untouched. The saved routine and the one-off box are still appended beneath it.
+                    Kept in this browser; the audit row records the format as{" "}
+                    <span className="font-mono">CUSTOM</span>.
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+
           {/* ---- extra instruction for this note only ---- */}
           <div className="border-t border-[var(--border)] px-3 py-1.5 sm:px-4 sm:py-2">
             <label className="flex items-center gap-2">
@@ -856,6 +979,7 @@ export default function AirlockPage() {
               Saved routine
             </span>
             <select
+              aria-label="Saved specialty routine"
               value={activeTemplateId}
               onChange={(e) => setActiveTemplateId(e.target.value)}
               disabled={submitting}
@@ -942,6 +1066,7 @@ export default function AirlockPage() {
             <button
               onClick={() => void submit()}
               disabled={!ready}
+              title={ready ? "Cmd/Ctrl + Enter" : disabledReason}
               className="ml-auto flex items-center gap-2 rounded bg-[var(--accent-solid)] px-4 py-1.5 text-sm font-medium text-[var(--on-accent)] transition-opacity disabled:cursor-not-allowed disabled:border-[var(--border)] disabled:bg-[var(--border)]/40 disabled:text-[var(--faint)]"
             >
               {submitting ? <Loader2 className="size-4 animate-spin" /> : <Lock className="size-4" />}
@@ -1145,6 +1270,82 @@ export default function AirlockPage() {
 }
 
 
+
+/* ------------------------------------------------------------------ */
+/* Drawer behaviour                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Everything a drawer has to do besides render.
+ *
+ * Seven drawers open over this page and every one of them was missing the
+ * same four things: Escape did nothing, focus stayed on the button behind the
+ * overlay, Tab walked through the thirty controls underneath it, and the page
+ * scrolled when you turned the wheel over a drawer that had already reached
+ * its own end. Measured at 1024x600, a wheel gesture over an open drawer moved
+ * the page behind it 342px.
+ *
+ * Returns a ref for the drawer's own element. Attach it and pass
+ * `role="dialog" aria-modal="true"`, which the callers do.
+ */
+function useDrawer(onClose: () => void) {
+  const ref = useRef<HTMLElement>(null);
+  // Held in a ref so the effect runs once per open, not on every parent
+  // render — re-running it would yank focus back to the top mid-typing.
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    const focusable = () =>
+      [
+        ...(ref.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? []),
+      ].filter((el) => el.offsetParent !== null);
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeRef.current();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      // Keep Tab inside the drawer rather than walking the page behind it.
+      const items = focusable();
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !ref.current?.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKey);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    // The close button is first in every drawer's markup and is a safe, quiet
+    // landing place — it does not read a whole panel of text at the reader.
+    focusable()[0]?.focus();
+
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previousOverflow;
+      // Put the keyboard back where it was, or the next Tab starts from the
+      // top of the document.
+      opener?.focus?.();
+    };
+  }, []);
+
+  return ref;
+}
 
 /* ------------------------------------------------------------------ */
 /* Run mode                                                            */
@@ -1380,10 +1581,17 @@ function CustomModeDrawer({
 
   const fresh = blankCustomConfig();
 
+  const drawerRef = useDrawer(onClose);
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
       <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="drawer-panel relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <aside
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Custom mode editor"
+          tabIndex={-1}
+          className="drawer-panel relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-start justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="flex items-center gap-2 text-sm font-semibold">
@@ -2169,10 +2377,17 @@ function HistoryDrawer({
     setTimeout(() => setCopiedId(null), 1800);
   };
 
+  const drawerRef = useDrawer(onClose);
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
       <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="drawer-panel relative flex h-full w-full max-w-2xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <aside
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Past notes"
+          tabIndex={-1}
+          className="drawer-panel relative flex h-full w-full max-w-2xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-start justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold">Past notes</h3>
@@ -2360,10 +2575,17 @@ function WireView({
     }
   })();
 
+  const drawerRef = useDrawer(onClose);
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
       <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="drawer-panel relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <aside
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Wire view"
+          tabIndex={-1}
+          className="drawer-panel relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-start justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold">What Cloudflare sees</h3>
@@ -2512,10 +2734,17 @@ function PromptsDrawer({ onClose }: { onClose: () => void }) {
     };
   }, []);
 
+  const drawerRef = useDrawer(onClose);
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
       <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="drawer-panel relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <aside
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="What each model is told"
+          tabIndex={-1}
+          className="drawer-panel relative flex h-full w-full max-w-3xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-start justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold">What each model is told</h3>
@@ -2756,10 +2985,17 @@ const STEPS: { n: string; where: keyof typeof LOCUS_STYLE; title: string; body: 
 ];
 
 function HowItWorks({ onClose }: { onClose: () => void }) {
+  const drawerRef = useDrawer(onClose);
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
       <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="drawer-panel relative flex h-full w-full max-w-xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <aside
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="How it works"
+          tabIndex={-1}
+          className="drawer-panel relative flex h-full w-full max-w-xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-start justify-between border-b border-[var(--border)] px-5 py-4">
           <div>
             <h3 className="text-sm font-semibold">How Project Airlock works</h3>
@@ -2916,10 +3152,17 @@ function PromptLibrary({
     if (editingId === id) startNew();
   };
 
+  const drawerRef = useDrawer(onClose);
   return (
     <div className="fixed inset-0 z-30 flex justify-end">
       <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="drawer-panel relative flex h-full w-full max-w-2xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <aside
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Specialty routines"
+          tabIndex={-1}
+          className="drawer-panel relative flex h-full w-full max-w-2xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold">Specialty routines</h3>
@@ -3219,10 +3462,17 @@ function HealthPill({
 function Inspector({ result, onClose }: { result: ProcessNoteResult; onClose: () => void }) {
   const { redactions, deidentifiedInput, meta } = result;
 
+  const drawerRef = useDrawer(onClose);
   return (
     <div className="fixed inset-0 z-30 flex justify-end">
       <div className="drawer-scrim absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <aside className="drawer-panel relative flex h-full w-full max-w-xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+      <aside
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Redaction inspector"
+          tabIndex={-1}
+          className="drawer-panel relative flex h-full w-full max-w-xl flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl">
         <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold">PII Scrubbed Inspector</h3>

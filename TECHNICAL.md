@@ -18,6 +18,7 @@ script in `scripts/` actually exercises.
 8b. [The local destination](#8b-the-local-destination)
 9. [Concurrency: one compute slot](#9-concurrency-one-compute-slot)
 10. [Custom mode](#10-custom-mode)
+10b. [The Custom prompt format](#10b-the-custom-prompt-format)
 11. [Authentication](#11-authentication)
 12. [Persistence](#12-persistence)
 13. [The browser client](#13-the-browser-client)
@@ -597,6 +598,42 @@ sealed envelope, are used once, and die with the request — so the audit row re
 `"Custom mode — prompts not stored"` rather than implying the built-in prompts
 produced that note.
 
+## 10b. The Custom prompt format
+
+`NOTE_FORMATS.CUSTOM`. A sixth format that has no compiled-in skeleton: the
+clinician writes it, per run.
+
+**It is the light door, and the safest one.** The format skeleton is the
+*weakest* instruction in `assemblePrompt` — the saved routine, the one-off steer
+and the system instruction all sit above it — so replacing it cannot reach the
+placeholder rules, the clinical rules, or either de-identification pass. Custom
+mode is the heavy door: it replaces both system prompts and both sets of
+sampling parameters.
+
+| | Custom prompt (format) | Custom mode |
+| --- | --- | --- |
+| Replaces | the note skeleton | both system prompts + the skeleton |
+| Sampling parameters | untouched | yours |
+| De-identification prompt | built-in | yours |
+| Audit row | `noteFormat = CUSTOM` | `promptTemplateName = "Custom mode — …"` |
+| Stored | browser only | browser only |
+
+**Precedence.** `custom?.instruction ?? instructions.skeleton` — custom mode
+outranks the written skeleton, because in that mode the format is only a label
+and the editor is the more explicit statement of what the note should be.
+
+**Refused, never defaulted.** `normaliseFormatPrompt()` rejects an empty or
+over-8000-character skeleton, and the route answers `FORMAT_PROMPT_INVALID`
+rather than falling back to `FORMAT_INSTRUCTIONS.CUSTOM`. That constant exists
+only to keep the type total and to stop a hand-rolled client reaching the cloud
+with no formatting instruction at all. Same rule as custom mode: running a note
+under instructions the clinician never saw is worse than not running it.
+
+The skeleton lives in the run-settings store alongside the custom-mode config —
+`localStorage`, per browser, cross-tab synced, never Postgres. `BUILT_IN_FORMATS`
+excludes `CUSTOM` so `/api/prompt-config` does not advertise a skeleton that
+does not exist.
+
 ## 11. Authentication
 
 **Middleware** (`src/middleware.ts`) gates everything on the *presence* of a
@@ -700,6 +737,10 @@ minimal frame parser (`EventSource` cannot issue a POST). On
 - **The Prompts drawer reads `/api/prompt-config` live** on every open, so the
   prompts it shows are the ones the running server would send, and the local
   model name is the one LM Studio actually has loaded.
+- **A disabled primary action says why.** The run button carries
+  `disabledReason` as its tooltip, naming whichever precondition is missing —
+  no note, no server key, over the cap, or a prompt that needs fixing. A greyed
+  control with no explanation is a dead end.
 - **The mode toggle sits directly above the model selector**, inside the input
   panel. The two together are the whole answer to "what will this run do" —
   which prompts, and which model. It is a segmented toggle rather than a pair
@@ -717,6 +758,13 @@ minimal frame parser (`EventSource` cannot issue a POST). On
   down the page, adding a scrollbar. After: the row does not change at all and
   the button moves by exactly the height of the warning (34–53px depending on
   width), over 200ms.
+- **Every drawer is a real dialog.** `useDrawer()` gives all seven the same
+  four behaviours, which none of them had: Escape closes, focus moves inside on
+  open and returns to the trigger on close, Tab is trapped, and the background
+  is scroll-locked. Each `<aside>` carries `role="dialog"`, `aria-modal` and an
+  accessible name. Measured before the fix at 1024×600: a wheel gesture over an
+  open drawer moved the page behind it **342px**, and 30 controls stayed
+  tabbable behind the overlay.
 - **Drawers slide in** (`.drawer-panel` / `.drawer-scrim`, 180ms). Six drawers
   open over this page and one of them — the custom editor — opens by itself when
   the toggle is switched; a full-height panel materialising in one frame reads
@@ -927,7 +975,7 @@ and all six drawers — in both themes. It composites through alpha layers and
 Widening it from "controls" to "all text", and from resting to in-flight states,
 turned 0 known problems into 135 — which were three causes, not 135 bugs:
 `opacity` used to dim text, Tailwind `-600`/`-500` shades on white, and
-`animate-pulse` on a label. Current state: **2,219 text nodes, zero below AA,
+`animate-pulse` on a label. Current state: **2,356 text nodes, zero below AA,
 both themes**, across sixteen surfaces including both mode states.
 
 It waited on the wrong signal for a long time. "Copy note · with names" is

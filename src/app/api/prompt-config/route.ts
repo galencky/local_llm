@@ -4,10 +4,10 @@ import { loadedLmStudioModel, NER_SYSTEM_PROMPT } from "@/lib/scrubber-llm";
 import { defaultModel } from "@/lib/model-registry";
 import { PLACEHOLDER_KERNEL } from "@/lib/custom-mode";
 import {
+  BUILT_IN_FORMATS,
   builtInFormatInstruction,
   NOTE_FORMATS,
   systemInstruction,
-  type NoteFormat,
 } from "@/lib/gemini";
 
 export const runtime = "nodejs";
@@ -65,7 +65,9 @@ export async function GET() {
         // would not actually start on.
         model: defaultModel(),
         systemInstruction: systemInstruction(),
-        formats: (Object.keys(NOTE_FORMATS) as NoteFormat[]).map((f) => ({
+        // CUSTOM is deliberately absent: it has no compiled-in skeleton to
+        // show, because the clinician writes it per run.
+        formats: BUILT_IN_FORMATS.map((f) => ({
           format: f,
           label: NOTE_FORMATS[f],
           instruction: builtInFormatInstruction(f),

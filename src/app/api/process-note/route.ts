@@ -29,6 +29,7 @@ import { getTemplate } from "@/lib/prompts";
 import {
   CustomConfigError,
   normaliseCustomConfig,
+  normaliseFormatPrompt,
   type CustomConfig,
 } from "@/lib/custom-mode";
 import { HARD_CHAR_LIMIT, measure } from "@/lib/limits";
@@ -71,6 +72,8 @@ interface DecryptedPayload {
   model?: string;
   /** Custom mode: the user's own prompts and parameters for both models. */
   custom?: unknown;
+  /** The CUSTOM format's own note skeleton, written by the clinician. */
+  formatPrompt?: unknown;
 }
 
 export interface ProcessNoteResult {
@@ -194,6 +197,7 @@ export async function POST(req: NextRequest) {
         let promptId: string | undefined;
         let startModel: string | undefined;
         let rawCustom: unknown;
+        let rawFormatPrompt: unknown;
         if (plaintext.trimStart().startsWith("{")) {
           try {
             const payload = JSON.parse(plaintext) as DecryptedPayload;
@@ -204,6 +208,7 @@ export async function POST(req: NextRequest) {
               promptId = payload.promptId ?? undefined;
               startModel = payload.model ?? undefined;
               rawCustom = payload.custom ?? undefined;
+              rawFormatPrompt = payload.formatPrompt ?? undefined;
             }
           } catch {
             /* not a payload object; treat the whole thing as the narrative */
@@ -279,6 +284,23 @@ export async function POST(req: NextRequest) {
 
         // Resolve the saved specialty routine, if one was selected.
         let resolvedFormat: NoteFormat = isNoteFormat(format) ? format : "SOAP";
+
+        // The CUSTOM format has no compiled-in skeleton, so the run cannot
+        // proceed without the one the clinician wrote. Refuse rather than fall
+        // back to a generic shape they never chose. Custom mode supplies its
+        // own instruction and outranks this, so it is exempt.
+        let writtenSkeleton: string | null = null;
+        if (resolvedFormat === "CUSTOM" && !custom) {
+          try {
+            writtenSkeleton = normaliseFormatPrompt(rawFormatPrompt);
+          } catch (err) {
+            if (err instanceof CustomConfigError) {
+              emit("error", { error: err.message, code: "FORMAT_PROMPT_INVALID" });
+              return;
+            }
+            throw err;
+          }
+        }
         let template: { name: string; instruction: string } | null = null;
         if (promptId) {
           try {
@@ -316,13 +338,13 @@ export async function POST(req: NextRequest) {
           ? await formatWithLocalModel(
               deidentifiedInput,
               resolvedFormat,
-              { template, adHoc: instruction },
+              { template, adHoc: instruction, skeleton: writtenSkeleton },
               custom?.cloud ?? null,
             )
           : await formatClinicalNote(
               deidentifiedInput,
               resolvedFormat,
-              { template, adHoc: instruction },
+              { template, adHoc: instruction, skeleton: writtenSkeleton },
               // Surface the downgrade live rather than letting the note quietly
               // arrive from a lighter model than the clinician expects.
               (step, next) =>

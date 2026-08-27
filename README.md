@@ -150,8 +150,16 @@ To publish it to a hospital over a Cloudflare Tunnel, see
 
 ## Using it
 
-**Formats.** Five built-in note shapes. The format you pick is recorded on the
-audit row, so two notes labelled "SOAP" are comparable.
+**Formats.** Five built-in note shapes — SOAP, admission, progress, hospital
+course, discharge summary — plus **Custom prompt**, where you write the note's
+shape yourself. The format you pick is recorded on the audit row, so two notes
+labelled "SOAP" are comparable, and a written one is labelled `CUSTOM`.
+
+Custom prompt is the light door into customisation and deliberately the safest:
+the note skeleton is the *weakest* instruction in the prompt, so replacing it
+cannot touch the placeholder rules, the clinical rules, or either
+de-identification pass. Your skeleton is kept in the browser, and an empty one
+is refused rather than quietly replaced with a default you never chose.
 
 **Where the note gets written.** The model selector offers the Gemini ladder and
 one more option: **Local**, which detects whatever LM Studio has loaded and
@@ -175,9 +183,11 @@ dialysis access and dry weight under Objective". Written once, appended to every
 note that uses it. Routines are screened for patient data when you save them and
 refused if any is found.
 
-**Custom mode.** A toggle beside the model selector. Hands you both models'
-prompts and sampling parameters for a single run, and composes with either
-destination — your prompts apply to whichever model writes the note. Four things it still cannot switch off: the pattern scrub, the
+**Custom mode.** The heavy door, and a toggle beside the model selector. Hands
+you both models' prompts *and* both sets of sampling parameters for a single
+run, and composes with either destination — your prompts apply to whichever
+model writes the note. Reach for Custom prompt first; reach for custom mode when
+you need to change what the models are told, not just what shape the note takes. Four things it still cannot switch off: the pattern scrub, the
 requirement that the local pass return usable output, the verbatim check on every
 span it returns, and the placeholder rules the cloud model is given. Custom
 prompts are never stored — the audit row says so rather than implying the
@@ -186,7 +196,13 @@ built-in prompts wrote the note.
 **Checking the work.** Four drawers: the **redaction list** (what was taken out),
 **Wire view** (what crossed the internet), **Prompts** (exactly what each model
 is told, read live from the running server), and **History** (your past notes,
-de-identified, searchable).
+de-identified, searchable). Every drawer closes on **Escape** or a click outside,
+keeps the keyboard inside it while open, and hands focus back to the control you
+opened it from.
+
+**Keyboard.** **Cmd/Ctrl + Enter** runs the note. When the run button is greyed
+out it says why on hover — no note yet, over the length cap, or a prompt that
+needs fixing.
 
 ## Proving it rather than asserting it
 

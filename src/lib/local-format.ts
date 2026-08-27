@@ -80,7 +80,7 @@ export async function formatWithLocalModel(
     template: instructions.template,
     adHoc: instructions.adHoc,
     narrative: deidentifiedText,
-    skeleton: custom?.instruction,
+    skeleton: custom?.instruction ?? instructions.skeleton,
   });
 
   // Custom mode owns the system instruction here too, except for the

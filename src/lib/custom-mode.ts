@@ -322,6 +322,32 @@ export function normaliseCustomConfig(raw: unknown): CustomConfig {
   };
 }
 
+/**
+ * Validate the skeleton written for the CUSTOM note format.
+ *
+ * Same reasoning as `normaliseCustomConfig`: an empty or over-long prompt is
+ * REFUSED rather than silently defaulted, because running a note under
+ * instructions the clinician never saw is worse than not running it. The
+ * CUSTOM format has nothing to fall back to by design — that is the whole
+ * point of choosing it.
+ *
+ * @throws {CustomConfigError}
+ */
+export function normaliseFormatPrompt(raw: unknown): string {
+  const prompt = text(raw);
+  if (!prompt) {
+    throw new CustomConfigError(
+      "The Custom prompt format needs a formatting instruction — it replaces the built-in note skeleton, so there is nothing to fall back to. Write one, or pick a built-in format.",
+    );
+  }
+  if (prompt.length > MAX_CUSTOM_PROMPT_LENGTH) {
+    throw new CustomConfigError(
+      `The formatting instruction is ${prompt.length.toLocaleString()} characters. The cap is ${MAX_CUSTOM_PROMPT_LENGTH.toLocaleString()} — a prompt longer than the note crowds out the narrative itself.`,
+    );
+  }
+  return prompt;
+}
+
 /** The system instruction Gemini actually receives in custom mode. */
 export function withPlaceholderKernel(systemInstruction: string): string {
   return `${systemInstruction.trim()}\n\n${PLACEHOLDER_KERNEL}`;

@@ -122,6 +122,8 @@ export interface RunOptions {
    * prompt never sits in a query string or a server log.
    */
   custom?: CustomConfig | null;
+  /** The CUSTOM format's own note skeleton. Ignored for the built-in formats. */
+  formatPrompt?: string | null;
   onProgress?: (event: ProgressEvent) => void;
   /**
    * Called with the exact bytes that are about to go on the wire, plus the
@@ -165,6 +167,7 @@ async function attempt<T>(opts: RunOptions, bustKeyCache: boolean): Promise<T> {
     promptId: opts.promptId || undefined,
     model: opts.model || undefined,
     custom: opts.custom ?? undefined,
+    formatPrompt: opts.formatPrompt || undefined,
   });
   const { envelope, aesKey } = await sealRequest(publicKey, plaintext);
   opts.onSealed?.({ envelope, plaintext });

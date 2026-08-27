@@ -34,7 +34,22 @@ export const NOTE_FORMATS = {
   HOSPITAL_COURSE: "Hospital course timeline",
   ADMISSION_NOTE: "Admission note",
   PROGRESS_NOTE: "Daily progress note",
+  /**
+   * The clinician writes the skeleton instead of picking one.
+   *
+   * This is the light door into customisation, and deliberately the safest
+   * one: the format skeleton is the WEAKEST instruction in the assembled
+   * prompt, so replacing it cannot touch the placeholder rules, the clinical
+   * rules, or either de-identification pass. Custom *mode* is the heavy door —
+   * it replaces both system prompts and the sampling parameters.
+   */
+  CUSTOM: "Custom prompt",
 } as const;
+
+/** Formats with a compiled-in skeleton — everything except the written one. */
+export const BUILT_IN_FORMATS = (
+  Object.keys(NOTE_FORMATS) as NoteFormat[]
+).filter((f) => f !== "CUSTOM");
 
 export type NoteFormat = keyof typeof NOTE_FORMATS;
 
@@ -48,6 +63,11 @@ const FORMAT_INSTRUCTIONS: Record<NoteFormat, string> = {
   HOSPITAL_COURSE: `Produce a chronological hospital course timeline. Each entry begins with its time marker (a date placeholder or a relative day such as "HD#3"), then a concise account of events, interventions, and the response to them. Keep strict chronological order.`,
   ADMISSION_NOTE: `Produce an admission note with these headings exactly: **Chief Complaint**, **History of Present Illness**, **Past Medical History**, **Medications**, **Allergies**, **Physical Examination**, **Investigations**, **Impression**, **Plan**.`,
   PROGRESS_NOTE: `Produce a concise daily progress note: an interval-history line, then objective data, then a numbered active problem list with today's assessment and plan for each.`,
+  // Never sent: a CUSTOM run supplies its own skeleton, and the route refuses
+  // the run rather than falling back to this if one did not arrive. It exists
+  // so the type stays total and so a hand-rolled client cannot reach the cloud
+  // with no formatting instruction at all.
+  CUSTOM: `Produce a structured clinical note using the headings the source material implies. Keep every section grounded in the narrative.`,
 };
 
 const SYSTEM_INSTRUCTION = `You are a clinical documentation specialist producing formal hospital notes for physicians in Taiwan.
@@ -197,6 +217,12 @@ export interface NoteInstructions {
   template?: { name: string; instruction: string } | null;
   /** One-off steer typed by the clinician for this note only. */
   adHoc?: string | null;
+  /**
+   * The clinician's own note skeleton, from the CUSTOM format. Replaces the
+   * compiled-in skeleton and nothing else — it sits at the same, weakest,
+   * precedence the built-in one does.
+   */
+  skeleton?: string | null;
 }
 
 export interface FallbackStep {
@@ -241,7 +267,10 @@ export async function formatClinicalNote(
     template: instructions.template,
     adHoc: instructions.adHoc,
     narrative: deidentifiedText,
-    skeleton: custom?.instruction,
+    // Custom mode's instruction outranks the CUSTOM format's skeleton: in that
+    // mode the format is only a label, and the editor is the more explicit
+    // statement of what the note should look like.
+    skeleton: custom?.instruction ?? instructions.skeleton,
   });
 
   // Custom mode owns the system instruction, except for the placeholder
