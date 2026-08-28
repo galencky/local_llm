@@ -311,7 +311,9 @@ because it is a real weakening: the rules are certain where the model is
 probabilistic.
 
 **Whose quota.** Beside the model row is a chip reading *shared quota* or *your
-quota*. See [Whose Gemini quota](#whose-gemini-quota).
+quota*, and while you are on the shared one it is followed by **use your own
+key** — because an option nobody can see is an option nobody has. Both open the
+same drawer. See [Whose Gemini quota](#whose-gemini-quota).
 
 **Sampling.** Two labelled rows, so it is never ambiguous which model you are
 tuning. The first is the **de-identification pass**, named for the LM Studio

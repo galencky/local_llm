@@ -1253,6 +1253,34 @@ the key — so the selector greys out rungs *you* have spent rather than someone
 else's exhausted afternoon. A `quota` that is not 16 hex characters falls back to
 `instance` rather than minting a fresh namespace on demand.
 
+### Making it discoverable
+
+The first version of this shipped with the offer hidden. The header pill said
+"API key" and the chip beside the model row said "shared quota"; the only thing
+that explained either was a `title`, which needs a mouse, needs you to know to
+hover, and does not exist on a phone at all. A clinician could work for weeks on
+a shared allowance without ever learning there was another way — which makes the
+feature approximately worthless however well it is built.
+
+So the offer is visible text now: **use your own key**, beside the chip whose
+state it is about, in the shared-quota case only. On your own key there is
+nothing to offer; with no key anywhere the caption below already says it in
+stronger terms.
+
+Fitting it exposed a layout bug worth recording. That row's label read
+"Model — cloud ladder falls back rightward", which measures **270px**, and at
+1024 — the width this interface is built for — the row was already **46px over**
+and already wrapping to two lines. The label was explanation, and the caption
+below plus the greyed-out rungs say it better. Cut to "Model":
+
+```
+                       row height @1024    spare
+before                 43px (wrapped)      -46px
+after, with the offer  20px (one line)     +98px
+```
+
+Verified at 1024, 1280, 1440 and 1920: one line at every one.
+
 ### What the run reports
 
 `meta.quotaSource` is `"own"` or `"instance"`, and the footer shows a **your

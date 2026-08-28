@@ -261,10 +261,17 @@ export function ModelBar({
         ) : (
           <Cloud className="size-3.5 text-[var(--muted)]" />
         )}
+        {/* Just "Model" on the cloud path.
+            It read "Model — cloud ladder falls back rightward", which measured
+            270px and pushed this row 46px over its width at 1024 — so the row
+            wrapped to two lines at exactly the size this interface is built
+            for, which is the one thing the layout is not allowed to do. The
+            sentence was explanation, and the caption below plus the greyed-out
+            rungs already say it. */}
         <span className="whitespace-nowrap text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
           {local
             ? `Running on this Mac${detected ? ` · ${detected}` : ""} — nothing leaves, nothing logged`
-            : "Model — cloud ladder falls back rightward"}
+            : "Model"}
         </span>
         {/* Whose allowance a cloud run spends. Sits with the model selector
             because it answers the other half of the same question: not just
@@ -291,6 +298,28 @@ export function ModelBar({
           >
             <KeyRound className="size-3 shrink-0" />
             {ownKey ? "your quota" : instanceKey ? "shared quota" : "no key"}
+          </button>
+        )}
+
+        {/* THE INVITATION, IN WORDS, BESIDE THE STATE IT IS ABOUT.
+            Sharing the instance's allowance was a state you could only escape
+            if you already knew the escape existed: the header pill said "API
+            key" and this chip said "shared quota", and the only thing that
+            explained either was a tooltip — which needs a mouse, needs you to
+            know to hover, and does not exist on a phone at all. So the offer is
+            visible text now, next to the label it applies to, and it is the
+            same one click the chip is.
+
+            Only in the shared-quota state. On your own key there is nothing to
+            offer, and with no key anywhere the caption below is already saying
+            it in stronger terms. */}
+        {!local && !ownKey && instanceKey && (
+          <button
+            onClick={onOpenKey}
+            title="Google's free tier is per key. On this instance's key you share one daily allowance with everyone signed in; on your own you get the whole of it. The key stays in this browser and is sent sealed, like the note."
+            className="shrink-0 whitespace-nowrap text-[10px] text-[var(--accent)] underline decoration-dotted underline-offset-2 transition-colors hover:text-[var(--foreground)]"
+          >
+            use your own key
           </button>
         )}
         {!local && nextUp && nextUp.id !== chosen && (
