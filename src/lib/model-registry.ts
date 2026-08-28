@@ -62,7 +62,7 @@ export function defaultModel(): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* Volatile exhaustion state                                           */
+/* Observed exhaustion state, per quota                                */
 /* ------------------------------------------------------------------ */
 
 export type UnavailableReason = "quota" | "overloaded" | "model";
@@ -82,17 +82,28 @@ const globalForModels = globalThis as unknown as {
 /**
  * In-memory cache over the ModelCooldown table.
  *
- * Availability is *observed*, never predicted: Airlock has no view of your
+ * Availability is *observed*, never predicted: Airlock has no view of anyone's
  * Google AI Studio quota, so a model is only known to be spent once Google has
  * refused it. Persisting that lets the knowledge survive a restart instead of
  * costing a wasted request to relearn.
+ *
+ * EVERY ENTRY IS SCOPED TO A QUOTA. A refusal is a fact about one Google
+ * allowance, not about the model — so it is keyed `<quota>::<model>`, where
+ * `quota` is `instance` for this deployment's own key and a one-way fingerprint
+ * for a clinician's own. Without the scope, one exhausted key greyed the
+ * flagship out for everybody on the box, and the persisted row kept doing so
+ * across restarts.
  */
 const cooldowns: Map<string, Cooldown> = (globalForModels.__modelCooldowns ??= new Map());
+
+function slot(quota: string, model: string): string {
+  return `${quota}::${model}`;
+}
 
 async function hydrate(): Promise<void> {
   const rows = await prisma.modelCooldown.findMany({ where: { until: { gt: new Date() } } });
   for (const row of rows) {
-    cooldowns.set(row.model, {
+    cooldowns.set(slot(row.quota, row.model), {
       until: row.until.getTime(),
       reason: row.reason as UnavailableReason,
       daily: row.daily,
@@ -121,42 +132,71 @@ function nextPacificMidnight(): number {
 }
 
 export function markUnavailable(
+  quota: string,
   model: string,
   reason: UnavailableReason,
   opts: { daily?: boolean; retryAfterMs?: number } = {},
 ): void {
   const daily = Boolean(opts.daily);
   const until = daily ? nextPacificMidnight() : Date.now() + (opts.retryAfterMs ?? 60_000);
-  cooldowns.set(model, { until, reason, daily });
+  cooldowns.set(slot(quota, model), { until, reason, daily });
 
-  // Write through, but never let the audit DB stall the clinical path.
-  void prisma.modelCooldown
-    .upsert({
-      where: { model },
+  writeThrough(() =>
+    prisma.modelCooldown.upsert({
+      where: { quota_model: { quota, model } },
       update: { until: new Date(until), reason, daily },
-      create: { model, until: new Date(until), reason, daily },
-    })
-    .catch(() => {});
+      create: { quota, model, until: new Date(until), reason, daily },
+    }),
+  );
 }
 
-/** A model that just answered is demonstrably fine. */
-export function markAvailable(model: string): void {
-  if (!cooldowns.delete(model)) return;
-  void prisma.modelCooldown.deleteMany({ where: { model } }).catch(() => {});
+/** A model that just answered is demonstrably fine — for THIS quota. */
+export function markAvailable(quota: string, model: string): void {
+  if (!cooldowns.delete(slot(quota, model))) return;
+  writeThrough(() => prisma.modelCooldown.deleteMany({ where: { quota, model } }));
 }
 
-export function cooldownFor(model: string): Cooldown | null {
-  const c = cooldowns.get(model);
+/**
+ * Persist an observation, and never let failing to persist it cost a note.
+ *
+ * The in-memory map above is the one that matters within a process; the table
+ * only exists so a restart does not have to relearn by spending requests. So
+ * this is fire-and-forget by design.
+ *
+ * The `try` is load-bearing and was missing. `prisma` is a lazy Proxy that
+ * constructs its client on first property access, so an UNSET `DATABASE_URL`
+ * throws SYNCHRONOUSLY from `prisma.modelCooldown` — before there is a promise
+ * for `.catch()` to attach to, which is the failure mode `.catch()` alone never
+ * covers. A Postgres that is merely *down* rejects asynchronously and was
+ * always handled.
+ *
+ * Not reachable in a deployed configuration, because an instance with no
+ * DATABASE_URL cannot authenticate anyone and so never reaches this line. It is
+ * fixed because the function's contract is "never let the audit DB stall the
+ * clinical path" and it did not hold that contract — and the next caller will
+ * not know to check.
+ */
+function writeThrough(write: () => Promise<unknown>): void {
+  try {
+    void write().catch(() => {});
+  } catch {
+    /* no database reachable; the in-memory cooldown still stands */
+  }
+}
+
+export function cooldownFor(quota: string, model: string): Cooldown | null {
+  const key = slot(quota, model);
+  const c = cooldowns.get(key);
   if (!c) return null;
   if (c.until <= Date.now()) {
-    cooldowns.delete(model);
+    cooldowns.delete(key);
     return null;
   }
   return c;
 }
 
-export function isAvailable(model: string): boolean {
-  return cooldownFor(model) === null;
+export function isAvailable(quota: string, model: string): boolean {
+  return cooldownFor(quota, model) === null;
 }
 
 export interface ModelAvailability extends ModelSpec {
@@ -171,26 +211,29 @@ export interface ModelAvailability extends ModelSpec {
  * A model Google says does not exist for this key is retired, not merely busy.
  * Waiting will not bring it back, so it is dropped from the ladder and from
  * the selector rather than sitting there greyed out forever.
+ *
+ * Retirement is per quota too, and that is not pedantry: `NOT_FOUND` is exactly
+ * what Google returns for a model an *individual key* has no access to, so one
+ * key's retirement must not remove a rung another key can still use.
  */
-function isRetired(model: string): boolean {
-  const c = cooldownFor(model);
-  return c?.reason === "model";
+function isRetired(quota: string, model: string): boolean {
+  return cooldownFor(quota, model)?.reason === "model";
 }
 
-export async function availability(): Promise<ModelAvailability[]> {
+export async function availability(quota: string): Promise<ModelAvailability[]> {
   await ensureCooldownsLoaded();
   return modelLadder()
-    .filter((spec) => !isRetired(spec.id))
+    .filter((spec) => !isRetired(quota, spec.id))
     .map((spec) => {
-    const c = cooldownFor(spec.id);
-    return {
-      ...spec,
-      available: c === null,
-      reason: c?.reason ?? null,
-      retryInMs: c ? Math.max(0, c.until - Date.now()) : null,
-      daily: c?.daily ?? false,
-    };
-  });
+      const c = cooldownFor(quota, spec.id);
+      return {
+        ...spec,
+        available: c === null,
+        reason: c?.reason ?? null,
+        retryInMs: c ? Math.max(0, c.until - Date.now()) : null,
+        daily: c?.daily ?? false,
+      };
+    });
 }
 
 /**
@@ -198,10 +241,10 @@ export async function availability(): Promise<ModelAvailability[]> {
  * Exhausted rungs stay in the chain — they are skipped at call time, so a
  * cooldown that expires mid-request is still usable.
  */
-export function chainFrom(start?: string): string[] {
+export function chainFrom(quota: string, start?: string): string[] {
   const ladder = modelLadder()
     .map((m) => m.id)
-    .filter((id) => !isRetired(id));
+    .filter((id) => !isRetired(quota, id));
   const from = start && ladder.includes(start) ? ladder.indexOf(start) : ladder.indexOf(defaultModel());
   return ladder.slice(Math.max(0, from));
 }

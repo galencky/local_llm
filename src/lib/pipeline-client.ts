@@ -128,6 +128,15 @@ export interface RunOptions {
    * client that says nothing gets the safer behaviour. Ignored on a local run.
    */
   patternScrub?: boolean;
+  /**
+   * The clinician's own Gemini key, so the run spends their quota.
+   *
+   * Travels INSIDE the sealed envelope with everything else, so Cloudflare sees
+   * it no more than it sees the note. Omitted entirely on a local run: that
+   * makes no outbound call, so there is nothing for a credential to do there
+   * except be a secret in one more place.
+   */
+  geminiApiKey?: string;
   onProgress?: (event: ProgressEvent) => void;
   /**
    * Live output from the local model, already decrypted.
@@ -157,6 +166,56 @@ export async function runPipeline<T>(opts: RunOptions): Promise<T> {
   return attempt<T>(opts, false);
 }
 
+export interface GeminiKeyCheck {
+  ok: boolean;
+  /** Ladder rungs this key can actually reach. */
+  usable: string[];
+  /** Ladder rungs it cannot. Empty is the happy case. */
+  missing: string[];
+  error?: string;
+}
+
+/**
+ * Ask the server to try a Gemini key against Google, sealed both ways.
+ *
+ * Uses the same envelope as a note, for the same reason: Cloudflare terminates
+ * TLS at its edge, so a plain `POST { apiKey }` would publish the credential to
+ * exactly the intermediary this application exists to keep clinical text away
+ * from. Isomorphic like the rest of this module, so the acceptance suite checks
+ * the real path rather than a parallel one.
+ */
+export async function verifyGeminiKey(
+  apiKey: string,
+  opts: { baseUrl?: string; headers?: Record<string, string>; signal?: AbortSignal } = {},
+): Promise<GeminiKeyCheck> {
+  const base = opts.baseUrl ?? "";
+  const extra = opts.headers ?? {};
+
+  const keyRes = await fetch(`${base}/api/keys`, {
+    headers: extra,
+    cache: "no-store",
+    signal: opts.signal,
+  });
+  if (!keyRes.ok) throw new PipelineError(`Key endpoint returned ${keyRes.status}.`);
+  const { publicKey } = (await keyRes.json()) as { publicKey: string };
+
+  const { envelope, aesKey } = await sealRequest(publicKey, JSON.stringify({ apiKey }));
+  const res = await fetch(`${base}/api/gemini-key`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...extra },
+    body: JSON.stringify(envelope),
+    signal: opts.signal,
+  });
+
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+    throw new PipelineError(body.error ?? `Key check failed with status ${res.status}.`, body.code);
+  }
+  return JSON.parse(
+    await openResponse(aesKey, (await res.json()) as CryptoEnvelope),
+  ) as GeminiKeyCheck;
+}
+
 /**
  * @param bustKeyCache re-fetch the public key past any cache. Used for the one
  * automatic retry after the server reports it could not decrypt, which means
@@ -181,6 +240,10 @@ async function attempt<T>(opts: RunOptions, bustKeyCache: boolean): Promise<T> {
     sampling: opts.sampling,
     deidSampling: opts.deidSampling,
     patternScrub: opts.patternScrub,
+    // Never sent on a local run — see `RunOptions.geminiApiKey`.
+    geminiApiKey: isLocalDestination(opts.model)
+      ? undefined
+      : opts.geminiApiKey || undefined,
   });
   const { envelope, aesKey } = await sealRequest(publicKey, plaintext);
   opts.onSealed?.({ envelope, plaintext });

@@ -183,7 +183,7 @@ than none.
 | **[LM Studio](https://lmstudio.ai)** | Runs the local model. Stays on the host — see below. |
 | **A local model** | Any instruction-tuned model that reads your clinical language. `google/gemma-4-12b` is what this was tuned against; a 4B model works and misses more. |
 | **[Docker Desktop](https://docker.com)** | Runs the app and Postgres. |
-| **A Google Gemini API key** | Free tier is enough. <https://aistudio.google.com/apikey> |
+| **A Google Gemini API key** | Free tier is enough. <https://aistudio.google.com/apikey> — and it is **optional**: each clinician can bring their own instead. See [Whose Gemini quota](#whose-gemini-quota). |
 | **A Google OAuth client** | For sign-in. Ten minutes in the Cloud Console — steps in [TECHNICAL.md](TECHNICAL.md) Appendix A. |
 
 Linux and Windows are not tested. Nothing in the code is macOS-specific except
@@ -203,6 +203,7 @@ of them decide whether this works at all:
 | Variable | Why it matters |
 | --- | --- |
 | `AUTH_ALLOWED_EMAILS` | **Mandatory.** Empty means *nobody*, not everybody. Accepts addresses and whole domains (`@yourhospital.org.tw`). |
+| `GEMINI_API_KEY` | Optional, and it is the allowance *everyone shares*. Leave it empty if you would rather each clinician brought their own — see below. |
 | `AIRLOCK_DATA_DIR` | Where Postgres and the server's keypair actually live, on your own filesystem rather than inside Docker. A Docker Desktop upgrade destroyed this database once; a bind mount survives that. |
 | `AUTH_SECRET` | `openssl rand -base64 32` |
 
@@ -265,6 +266,7 @@ npm run prove:e2ee    # wiretap the traffic and try to read the note out of it
 npm run db:inspect    # dump the audit schema and scan every row for identifiers
 npm run e2e:system    # full acceptance run against the live stack
 npm run e2e:prompt    # the one rule, asserted from both destinations
+npm run e2e:key       # wiretap a key check, then sweep the database for the key
 ```
 
 `verify` needs nothing but Node — no model, no key, no database. The rest need
@@ -307,6 +309,9 @@ Doing that is marked on screen while it is off and recorded on the audit row,
 because it is a real weakening: the rules are certain where the model is
 probabilistic.
 
+**Whose quota.** Beside the model row is a chip reading *shared quota* or *your
+quota*. See [Whose Gemini quota](#whose-gemini-quota).
+
 **Sampling.** Two labelled rows, so it is never ambiguous which model you are
 tuning. The first is the **de-identification pass**, named for the LM Studio
 model doing it — it applies only to a cloud-bound run, and greys out otherwise.
@@ -341,6 +346,42 @@ you one — nothing was replaced, so there is only one version of it.
 **Keyboard.** **Cmd/Ctrl + Enter** runs. When the run button is greyed out it
 says why on hover.
 
+## Whose Gemini quota
+
+By default every cloud run spends the key in this deployment's `.env` — one
+allowance shared by everyone signed in. On Google's free tier that is twenty
+flagship requests a day *between you all*, which runs out at lunchtime on a busy
+ward.
+
+**Any clinician can paste their own key** under **API key** in the header, and
+from then on their cloud runs spend their own Google allowance. Twenty each,
+rather than twenty between you.
+
+What happens to that key is the same thing that happens to a note:
+
+- **It stays in your browser.** Nothing is stored on the server — not in the
+  database, not on disk, not in a log, not on the audit row.
+- **It crosses the internet sealed**, inside the same encrypted envelope as the
+  note. Check it yourself: paste a key, run a note, and open **Wire view**.
+- **It is checked before it is saved.** Airlock asks Google whether the key
+  works and which models it can actually reach, using a call that spends no
+  quota. A key Google refuses is not saved.
+- **It is never sent on a local run**, which makes no outbound call at all.
+- **Only a one-way fingerprint of it ever reaches the database**, and only so
+  that models *you* have exhausted are not marked as exhausted for everybody.
+
+The trade, stated plainly: browser storage is readable by any script running on
+the page, and it is per browser — a second machine means pasting it again.
+Airlock loads no third-party scripts, and anyone who can run script in the page
+can already read the note on screen, so the key is no softer a target than the
+clinical text beside it. If that is not acceptable to you, give the instance its
+own key and leave this unused.
+
+**Running with no instance key at all** is a supported configuration: leave
+`GEMINI_API_KEY` empty and the cloud models are reachable only by clinicians who
+have brought their own. The interface says so, greys the rungs out, and the
+local model works regardless.
+
 ## Making it yours
 
 The parts most people will want to change, and where they are:
@@ -350,7 +391,8 @@ The parts most people will want to change, and where they are:
 | **which identifiers the rules catch** | `src/lib/scrubber-regex.ts` | The Taiwan-specific half of the project. Rule **order is load-bearing** — the comments say why. Add a case to `scripts/verify-pipeline.ts` for anything you add. |
 | **what the local model looks for** | `NER_SYSTEM_PROMPT` in `src/lib/scrubber-llm.ts` | Naming the structured categories explicitly is what moved recall from 9/17 to 17/17 on the test note. The category list is a *suggestion*, not a whitelist: the model may invent tags, and the code guarantees the round trip. |
 | **the note formats** | `NOTE_FORMATS` and `FORMAT_INSTRUCTIONS` in `src/lib/gemini.ts` | Add a key to both. `BUILT_IN_FORMATS` must stay declared *below* `FORMAT_INSTRUCTIONS`. |
-| **which cloud models are tried** | `GEMINI_MODEL_LADDER` in `.env`, or `DEFAULT_LADDER` in `src/lib/model-registry.ts` | Best first. Availability is observed, never predicted. |
+| **which cloud models are tried** | `GEMINI_MODEL_LADDER` in `.env`, or `DEFAULT_LADDER` in `src/lib/model-registry.ts` | Best first. Availability is observed, never predicted — and scoped to the key that earned the refusal. |
+| **what counts as a valid API key** | `src/lib/gemini-key.ts` | Deliberately loose: it catches paste errors and leaves "is this real" to Google. A strict format check here once rejected a working key. |
 | **the cloud provider** | `src/lib/gemini.ts` | It is one module with one job. Whatever replaces it must keep the placeholder rules in its system instruction, or re-hydration breaks. |
 | **the input budget** | `src/lib/limits.ts` | `HARD_CHAR_LIMIT` is a **safety** limit, not a performance one: past it your local model starts missing names. Raise it only if you raise the model. |
 | **who may sign in** | `AUTH_ALLOWED_EMAILS` | Or replace the Google provider in `src/lib/auth.ts`. Keep the fail-closed allowlist. |
@@ -369,7 +411,10 @@ country it is in.
    before it becomes a placeholder.
 4. Every route that returns data calls `auth()` itself. The middleware only
    proves a session *cookie* is present, never that it is valid.
-5. The app runs as exactly one replica. The compute lock lives in that process's
+5. A clinician's API key is never persisted, never logged, and never written to
+   an audit row — and it crosses the tunnel sealed, on the check as well as on
+   the run.
+6. The app runs as exactly one replica. The compute lock lives in that process's
    memory.
 
 The full list, and how to test against it, is in
@@ -380,6 +425,8 @@ The full list, and how to test against it, is in
 | Symptom | Usually |
 | --- | --- |
 | Every cloud model is greyed out | LM Studio is not running, or has no model loaded. Gemini needs it for the de-identification pass. |
+| Cloud models greyed out saying "no Gemini key" | Neither the instance nor your browser has one. Add yours under **API key**. |
+| A model is spent for you but not a colleague | Correct — quota is per key, and so is the record of what has been refused. |
 | "Local NER de-identification is unavailable" | The same, mid-run. This is the fail-closed path working. |
 | Every request is 401 | `AUTH_URL` disagrees with how the browser reaches you, so Auth.js is looking for a differently-named cookie. |
 | Sign-in bounces with `AccessDenied` | The account is not in `AUTH_ALLOWED_EMAILS`. |

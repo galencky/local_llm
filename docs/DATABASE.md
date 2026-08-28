@@ -53,21 +53,33 @@ network.
 ┌──────────────────────────────────────┐ ┌──────────────────────────────┐
 │ PromptTemplate      ← saved routines │ │ ModelCooldown                │
 │──────────────────────────────────────│ │──────────────────────────────│
-│ id                uuid   PK          │ │ model      text     PK       │
-│ userId            text?  FK  (null = │ │ until      timestamp         │
-│                          shared)     │ │ reason     text              │
-│ name              text  UQ(user,name)│ │ daily      boolean           │
-│ specialty         text?              │ │ updatedAt  timestamp         │
-│ kind              text   note|prompt │ └──────────────────────────────┘
-│ instruction       text               │   which Gemini models are spent
-│ systemInstruction text?  prompt only │   — learned only by being refused
-│ format            text?  note only   │
-│ temperature/topP/topK/maxTokens      │
-│                   nullable numbers   │
-│ isDefault         boolean  (per kind)│
+│ id                uuid   PK          │ │ quota   text  PK  "instance" │
+│ userId            text?  FK  (null = │ │                   or a key's │
+│                          shared)     │ │                   fingerprint│
+│ name              text  UQ(user,name)│ │ model   text  PK             │
+│ specialty         text?              │ │ until      timestamp         │
+│ kind              text   note|prompt │ │ reason     text              │
+│ instruction       text               │ │ daily      boolean           │
+│ systemInstruction text?  prompt only │ │ updatedAt  timestamp         │
+│ format            text?  note only   │ └──────────────────────────────┘
+│ temperature/topP/topK/maxTokens      │   which Gemini models are spent,
+│                   nullable numbers   │   for WHICH allowance — learned
+│ isDefault         boolean  (per kind)│   only by being refused
 │ createdAt / updatedAt                │
 └──────────────────────────────────────┘
 ```
+
+`ModelCooldown.quota` is which Google allowance a refusal was observed against:
+the literal `instance` for this deployment's own `GEMINI_API_KEY`, or a truncated
+one-way SHA-256 of a clinician's own key. It is part of the primary key because a
+refusal is a fact about one allowance and not about the model — a global table
+let one clinician exhausting the flagship grey it out for everybody, and the row
+survived a restart to keep doing so.
+
+**The fingerprint is the only trace of a clinician's API key anywhere in this
+database**, it is not reversible, and it says nothing about who pasted it. The
+key itself is never stored — see
+[TECHNICAL.md § 8d](../TECHNICAL.md#8d-bring-your-own-gemini-key).
 
 `kind` splits the two workspaces: a **note** routine is a charting instruction
 appended beneath the format skeleton; a **prompt** routine *is* the prompt, and
@@ -120,6 +132,11 @@ not appear in History and leave no audit trail. History is a record of what
 crossed to the cloud, which is what it has always claimed to be.
 
 ## What is deliberately absent
+
+**There is no column for a clinician's Gemini API key.** It lives in their
+browser, crosses the tunnel sealed inside the same envelope as the note, is used
+for one request and dropped. `npm run e2e:key` sweeps every table for it after a
+real run.
 
 **There is no column for the raw note, and none for the token map.**
 

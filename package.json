@@ -21,7 +21,8 @@
     "prove:e2ee": "tsx scripts/prove-e2ee.ts",
     "db:inspect": "tsx scripts/inspect-audit-db.ts",
     "audit:contrast": "node scripts/audit-contrast.mjs",
-    "e2e:prompt": "tsx scripts/e2e-prompt-mode.ts"
+    "e2e:prompt": "tsx scripts/e2e-prompt-mode.ts",
+    "e2e:key": "tsx scripts/e2e-own-key.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.3",

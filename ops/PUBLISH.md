@@ -117,6 +117,12 @@ this must be the public HTTPS name or sign-in silently fails to stick.
   hostname is not authentication. The bypass refuses non-localhost hosts by
   default, but turn it off entirely rather than relying on that.
 - **Check `AUTH_ALLOWED_EMAILS`** contains only clinicians who should be there.
+- **Decide whose Gemini quota this instance spends.** A shared `GEMINI_API_KEY`
+  is one free-tier allowance between everybody, which on a busy ward runs out
+  before lunch. Leaving it empty and letting each clinician paste their own under
+  **API key** gives them an allowance each — and means this deployment holds no
+  third-party credential at all. Either is supported; the interface says which
+  is in force.
 - **Verify it from outside, not from the Mac.** From another network:
 
   ```bash

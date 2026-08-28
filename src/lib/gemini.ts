@@ -5,6 +5,7 @@ import type { Sampling } from "./workspace";
 import {
   chainFrom,
   defaultModel,
+  modelLadder,
   ensureCooldownsLoaded,
   isAvailable,
   markAvailable,
@@ -146,31 +147,53 @@ export function promptSystemInstruction(userInstruction: string): string {
   return own ? withPlaceholderKernel(own) : PLACEHOLDER_KERNEL;
 }
 
-let client: GoogleGenAI | null = null;
+let instanceClient: GoogleGenAI | null = null;
 
-function getClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "GEMINI_API_KEY is not set. Add it to .env on the Mac Mini.",
-    );
-  }
+/** Is this deployment able to reach Gemini on its own key at all? */
+export function instanceKeyConfigured(): boolean {
+  return Boolean(process.env.GEMINI_API_KEY?.trim());
+}
+
+/**
+ * A client for one request's key.
+ *
+ * The deployment's own key gets a memoised client, because it is the same key
+ * every time. A clinician's own key does NOT: a fresh client is built for the
+ * request and dropped with it, so no user's credential is parked in a
+ * module-level cache where it would outlive the request that carried it. The
+ * SDK object is a thin wrapper over `fetch`; building one costs nothing worth
+ * keeping a secret around for.
+ *
+ * @param apiKey the clinician's own key, or undefined for the instance's.
+ */
+export function getClient(apiKey?: string): GoogleGenAI {
   // GEMINI_BASE_URL lets you point at an egress proxy, a regional endpoint, or
   // a local stub during verification. Unset in normal operation.
   const baseUrl = process.env.GEMINI_BASE_URL;
-  client ??= new GoogleGenAI({
-    apiKey,
-    ...(baseUrl ? { httpOptions: { baseUrl } } : {}),
-  });
-  return client;
+  const httpOptions = baseUrl ? { httpOptions: { baseUrl } } : {};
+
+  const own = apiKey?.trim();
+  if (own) return new GoogleGenAI({ apiKey: own, ...httpOptions });
+
+  const configured = process.env.GEMINI_API_KEY?.trim();
+  if (!configured) {
+    throw new GeminiUnavailableError(
+      "This instance has no Gemini API key of its own, and you have not added " +
+        "one. Open API key in the header and paste your own to use your own " +
+        "quota, or pick the local model.",
+      "auth",
+    );
+  }
+  instanceClient ??= new GoogleGenAI({ apiKey: configured, ...httpOptions });
+  return instanceClient;
 }
 
 export function geminiModel(): string {
   return defaultModel();
 }
 
-export function geminiModelChain(start?: string): string[] {
-  return chainFrom(start);
+export function geminiModelChain(quota: string, start?: string): string[] {
+  return chainFrom(quota, start);
 }
 
 /** Google returns operational failures as a JSON blob; make them readable. */
@@ -187,7 +210,7 @@ export class GeminiUnavailableError extends Error {
   }
 }
 
-function translateGeminiError(err: unknown, model: string): never {
+function translateGeminiError(err: unknown, model: string, own: boolean): never {
   const raw = err instanceof Error ? err.message : String(err);
 
   if (/RESOURCE_EXHAUSTED|exceeded your current quota|quotaValue/i.test(raw)) {
@@ -222,11 +245,34 @@ function translateGeminiError(err: unknown, model: string): never {
   }
   if (/API key not valid|PERMISSION_DENIED|UNAUTHENTICATED/i.test(raw)) {
     throw new GeminiUnavailableError(
-      "Gemini rejected the API key. Check GEMINI_API_KEY in .env.",
+      own
+        ? "Google rejected your API key. Check it under API key in the header — " +
+          "a key can be revoked or restricted after it starts working."
+        : "Gemini rejected this instance's API key. Check GEMINI_API_KEY in .env.",
       "auth",
     );
   }
   throw err instanceof Error ? err : new Error(raw);
+}
+
+/**
+ * Whose Google allowance pays for a run, and under whose name its refusals are
+ * remembered.
+ *
+ * The two travel together because they must never disagree: marking a cooldown
+ * against `instance` for a refusal earned by a clinician's own key would grey
+ * out a model nobody else has spent. `apiKey` is undefined when the deployment's
+ * own key is being used, and `quota` is then the literal `instance`.
+ *
+ * The key is present for the life of one request and is never stored, logged,
+ * or written to the audit row. The fingerprint is one-way and is the only part
+ * that ever reaches Postgres.
+ */
+export interface Credentials {
+  /** A clinician's own key, or undefined for this deployment's. */
+  apiKey?: string;
+  /** `instance`, or a one-way fingerprint of `apiKey`. */
+  quota: string;
 }
 
 export interface NoteInstructions {
@@ -238,6 +284,45 @@ export interface NoteInstructions {
    * precedence the built-in one does.
    */
   skeleton?: string | null;
+}
+
+/**
+ * Ask Google whether a key works, without spending any of its generation quota.
+ *
+ * `models.list` is an authenticated read: a bad key is refused in about 200ms,
+ * a good one comes back with everything the key can actually reach. That second
+ * half is the useful part — a key can be valid and still have no access to the
+ * rungs this instance's ladder is built from (a restricted key, or a project
+ * without the API enabled), and finding that out now is much kinder than
+ * finding it out halfway through a ward round.
+ *
+ * The key reaches this function sealed and dies with the request. Nothing here
+ * writes it anywhere, and the caller returns only counts and model ids.
+ */
+export async function verifyGeminiKey(apiKey: string): Promise<{
+  ok: boolean;
+  /** Ladder rungs this key can actually reach. */
+  usable: string[];
+  /** Ladder rungs it cannot. Empty is the happy case. */
+  missing: string[];
+  error?: string;
+}> {
+  const ladder = modelLadder().map((m) => m.id);
+  try {
+    const page = await getClient(apiKey).models.list();
+    const seen = new Set<string>();
+    for await (const model of page) {
+      // Google returns fully-qualified `models/gemini-3.7-flash`.
+      if (model.name) seen.add(model.name.replace(/^models\//, ""));
+    }
+    const usable = ladder.filter((id) => seen.has(id));
+    return { ok: true, usable, missing: ladder.filter((id) => !seen.has(id)) };
+  } catch (err) {
+    let message = err instanceof Error ? err.message : String(err);
+    // Google answers with a JSON blob; the human-readable part is inside it.
+    message = message.match(/"message":\s*"([^"]+)"/)?.[1] ?? message.split("\n")[0];
+    return { ok: false, usable: [], missing: ladder, error: message.slice(0, 300) };
+  }
 }
 
 export interface FallbackStep {
@@ -274,6 +359,8 @@ export async function runPromptOnCloud(opts: {
   sampling: Sampling;
   startModel?: string;
   onFallback?: (step: FallbackStep, next: string) => void;
+  /** Whose quota pays. See {@link Credentials}. */
+  credentials: Credentials;
 }): Promise<FormatNoteResult> {
   return walkTheLadder({
     system: promptSystemInstruction(opts.systemInstruction),
@@ -281,6 +368,7 @@ export async function runPromptOnCloud(opts: {
     generation: geminiGeneration(opts.sampling),
     startModel: opts.startModel,
     onFallback: opts.onFallback,
+    credentials: opts.credentials,
   });
 }
 
@@ -289,6 +377,7 @@ export async function formatClinicalNote(
   format: NoteFormat,
   instructions: NoteInstructions = {},
   sampling: Sampling,
+  credentials: Credentials,
   onFallback?: (step: FallbackStep, next: string) => void,
   startModel?: string,
 ): Promise<FormatNoteResult> {
@@ -305,6 +394,7 @@ export async function formatClinicalNote(
     generation: geminiGeneration(sampling),
     startModel,
     onFallback,
+    credentials,
   });
 }
 
@@ -335,14 +425,18 @@ async function walkTheLadder(opts: {
   generation: Record<string, number>;
   startModel?: string;
   onFallback?: (step: FallbackStep, next: string) => void;
+  credentials: Credentials;
 }): Promise<FormatNoteResult> {
-  const { system, prompt, generation, startModel, onFallback } = opts;
+  const { system, prompt, generation, startModel, onFallback, credentials } = opts;
+  const { apiKey, quota } = credentials;
   const started = Date.now();
 
   // Persisted cooldowns must be loaded before we decide which rung to try.
   await ensureCooldownsLoaded();
 
-  const chain = geminiModelChain(startModel);
+  // Availability is per quota: a rung this key has never been refused is
+  // available to it, whatever some other key has already spent today.
+  const chain = geminiModelChain(quota, startModel);
   const fallbacks: FallbackStep[] = [];
   let lastError: unknown = null;
 
@@ -351,14 +445,14 @@ async function walkTheLadder(opts: {
     const remaining = chain.slice(i + 1);
 
     // Skip a rung already known to be spent, unless it is the last hope.
-    if (!isAvailable(model) && remaining.length > 0) {
+    if (!isAvailable(quota, model) && remaining.length > 0) {
       fallbacks.push({ model, reason: "quota" });
       onFallback?.({ model, reason: "quota" }, remaining[0]);
       continue;
     }
 
     try {
-      const response = await getClient().models.generateContent({
+      const response = await getClient(apiKey).models.generateContent({
         model,
         contents: prompt,
         config: { systemInstruction: system, ...generation },
@@ -370,12 +464,12 @@ async function walkTheLadder(opts: {
           "Gemini returned an empty response (the request may have been blocked by a safety filter).",
         );
       }
-      markAvailable(model);
+      markAvailable(quota, model);
       return { text, model, fallbacks, latencyMs: Date.now() - started };
     } catch (err) {
       let translated: unknown = err;
       try {
-        translateGeminiError(err, model);
+        translateGeminiError(err, model, Boolean(apiKey));
       } catch (e) {
         translated = e;
       }
@@ -387,7 +481,7 @@ async function walkTheLadder(opts: {
           : null;
 
       if (unavailable) {
-        markUnavailable(model, unavailable.kind as UnavailableReason, {
+        markUnavailable(quota, model, unavailable.kind as UnavailableReason, {
           daily: unavailable.daily,
           retryAfterMs: unavailable.retryAfterMs,
         });

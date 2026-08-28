@@ -9,6 +9,12 @@
  */
 import { createServer } from "node:http";
 import {
+  INSTANCE_QUOTA,
+  looksLikeGeminiKey,
+  maskGeminiKey,
+  quotaFingerprint,
+} from "../src/lib/gemini-key";
+import {
   generateRsaKeyPair,
   exportSpkiBase64,
   exportPkcs8Base64,
@@ -162,6 +168,41 @@ async function main() {
   check("long identifier tokenised", applied.includes("[MRN_1]"), applied);
   check("short identifier did not rewrite it", !applied.includes("[MRN_[") , applied);
   check("both round-trip", v3.rehydrate(applied) === "MRN 12345678, bed 1", v3.rehydrate(applied));
+
+  console.log("\n[6c] Bring-your-own key: shape, mask, and quota identity");
+  // The first version of the shape check demanded `AIza` + 35 characters and
+  // rejected the very first real key it saw — Google also issues 53-character
+  // keys beginning `AQ.A`. A validator that knows one vendor format refuses a
+  // working credential the day the vendor adds another, so both formats are
+  // pinned here alongside the paste errors it is actually for.
+  const AIZA = `AIza${"b".repeat(35)}`;
+  const AQ = `AQ.Ab8${"c".repeat(46)}`;
+  check("accepts the classic AIza format", looksLikeGeminiKey(AIZA));
+  check("accepts the newer AQ.A format", looksLikeGeminiKey(AQ), `${AQ.length} chars`);
+  for (const [label, bad] of [
+    ["empty", ""],
+    ["whitespace only", "   "],
+    ["too short", "AIzaShort"],
+    ["a whole shell command", `export GEMINI_API_KEY=${AIZA}`],
+    ["a trailing newline pasted in", `${AIZA}\nnext line`],
+    ["a whole URL", `https://example.com/?key=${AIZA}`],
+  ] as const) {
+    check(`refuses ${label}`, !looksLikeGeminiKey(bad));
+  }
+  check("refuses something absurdly long", !looksLikeGeminiKey("a".repeat(300)));
+
+  check("the mask hides the middle", !maskGeminiKey(AIZA).includes(AIZA.slice(12, 30)));
+  check("the mask keeps a recognisable tail", maskGeminiKey(AIZA).endsWith(AIZA.slice(-4)));
+
+  check("no key means the instance quota", (await quotaFingerprint(null)) === INSTANCE_QUOTA);
+  const fp = await quotaFingerprint(AIZA);
+  check("a key yields 16 hex characters", /^[0-9a-f]{16}$/.test(fp), fp);
+  check("the same key always yields the same scope", (await quotaFingerprint(AIZA)) === fp);
+  check("one character's difference yields a different scope",
+    (await quotaFingerprint(`${AIZA.slice(0, -1)}c`)) !== fp);
+  check("surrounding whitespace does not change the scope",
+    (await quotaFingerprint(`  ${AIZA}  `)) === fp);
+  check("the fingerprint reveals nothing of the key", !AIZA.includes(fp));
 
   console.log("\n[7] Compute lock");
   const a = acquireLock();

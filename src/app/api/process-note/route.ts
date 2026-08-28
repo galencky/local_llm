@@ -18,8 +18,15 @@ import {
   GeminiUnavailableError,
   isNoteFormat,
   runPromptOnCloud,
+  type Credentials,
   type NoteFormat,
 } from "@/lib/gemini";
+import {
+  GeminiKeyError,
+  INSTANCE_QUOTA,
+  normaliseGeminiKey,
+  quotaFingerprint,
+} from "@/lib/gemini-key";
 import { formatWithLocalModel, LocalFormatError, runPromptLocally } from "@/lib/local-format";
 import { isLocalDestination } from "@/lib/pipeline-client";
 import { getTemplate } from "@/lib/prompts";
@@ -86,6 +93,16 @@ interface DecryptedPayload {
   deidSampling?: unknown;
   /** Whether the deterministic pattern pass should run. Cloud runs only. */
   patternScrub?: unknown;
+  /**
+   * The clinician's own Gemini key, so the run spends their quota rather than
+   * this instance's.
+   *
+   * It arrives here INSIDE the AES-GCM envelope, exactly like the note, so
+   * Cloudflare never sees it. It is used for the life of this request and is
+   * never stored, never logged, and never written to the audit row — only its
+   * one-way fingerprint reaches Postgres, and only as a cooldown scope.
+   */
+  geminiApiKey?: unknown;
 }
 
 export interface ProcessNoteResult {
@@ -106,6 +123,12 @@ export interface ProcessNoteResult {
     deidentified: boolean;
     /** Whether the deterministic pattern pass ran. */
     patternScrub: boolean;
+    /**
+     * Whose Google allowance paid for this run: "own" or "instance". Never the
+     * key, and never the fingerprint — the clinician already knows which key
+     * they pasted, and the browser is where that belongs.
+     */
+    quotaSource: "own" | "instance";
     /** Models exhausted or unavailable before the one that served this note. */
     modelFallbacks: { model: string; reason: string }[];
     processingTimeMs: number;
@@ -262,6 +285,7 @@ export async function POST(req: NextRequest) {
         let rawPromptRun: unknown;
         let rawSampling: unknown;
         let rawDeidSampling: unknown;
+        let rawApiKey: unknown;
         // Default ON. A client that says nothing gets the safer behaviour.
         let wantsPatternScrub = true;
         if (plaintext.trimStart().startsWith("{")) {
@@ -276,6 +300,7 @@ export async function POST(req: NextRequest) {
               rawPromptRun = payload.promptRun ?? undefined;
               rawSampling = payload.sampling ?? undefined;
               rawDeidSampling = payload.deidSampling ?? undefined;
+              rawApiKey = payload.geminiApiKey ?? undefined;
               if (payload.patternScrub === false) wantsPatternScrub = false;
             }
           } catch {
@@ -294,6 +319,29 @@ export async function POST(req: NextRequest) {
         // are a courtesy to the person typing.
         const sampling: Sampling = normaliseSampling(rawSampling);
         const deidSampling: Sampling = normaliseDeidSampling(rawDeidSampling);
+
+        /**
+         * Whose Google allowance this run spends.
+         *
+         * Resolved here, once, and only for a cloud run: a local run makes no
+         * outbound call, so carrying a credential into it would be a secret
+         * held for no reason. The key is validated for SHAPE before it is used
+         * — a paste error should be a readable message now rather than an
+         * opaque 400 from Google after the scrub has already run.
+         */
+        let credentials: Credentials = { quota: INSTANCE_QUOTA };
+        if (!localDestination && rawApiKey !== undefined && rawApiKey !== "") {
+          try {
+            const apiKey = normaliseGeminiKey(rawApiKey);
+            credentials = { apiKey, quota: await quotaFingerprint(apiKey) };
+          } catch (err) {
+            if (err instanceof GeminiKeyError) {
+              emit("error", { error: err.message, code: "GEMINI_KEY_INVALID" });
+              return;
+            }
+            throw err;
+          }
+        }
         // The routine a prompt run selected, recorded on the audit row by name
         // the same way a note routine is.
         let promptRoutineName: string | null = null;
@@ -506,6 +554,7 @@ export async function POST(req: NextRequest) {
                 sampling,
                 startModel,
                 onFallback,
+                credentials,
               })
           : localDestination
             ? await formatWithLocalModel(
@@ -520,6 +569,7 @@ export async function POST(req: NextRequest) {
                 resolvedFormat,
                 { template },
                 sampling,
+                credentials,
                 onFallback,
                 startModel,
               );
@@ -615,6 +665,7 @@ export async function POST(req: NextRequest) {
             workspace,
             deidentified: scrubbing,
             patternScrub: usePatterns,
+            quotaSource: credentials.apiKey ? "own" : "instance",
             modelFallbacks: formatted.fallbacks,
             processingTimeMs,
             scrubMs,

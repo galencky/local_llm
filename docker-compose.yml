@@ -84,7 +84,12 @@ services:
       # The local formatting destination writes a whole note, not a short
       # entity list, so it gets its own, longer budget.
       LMSTUDIO_FORMAT_TIMEOUT_MS: ${LMSTUDIO_FORMAT_TIMEOUT_MS:-240000}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:?set GEMINI_API_KEY in .env}
+      # OPTIONAL since clinicians can bring their own key. Leave it empty and
+      # the cloud ladder is reachable only by someone who has pasted one under
+      # "API key" in the header — the interface says so and greys the rungs
+      # out, rather than letting every run fail with an auth error. The local
+      # model works either way.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
       GEMINI_MODEL_LADDER: ${GEMINI_MODEL_LADDER:-}
       ALLOW_DEGRADED_SCRUB: ${ALLOW_DEGRADED_SCRUB:-false}

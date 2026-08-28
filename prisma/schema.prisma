@@ -12,19 +12,29 @@ datasource db {
   provider = "postgresql"
 }
 
-/// Observed quota/availability state for a cloud model.
+/// Observed quota/availability state for a cloud model, PER QUOTA.
 ///
 /// Airlock cannot see your Google AI Studio dashboard — no API reports
 /// remaining quota — so availability is learned only by being refused. Kept in
 /// Postgres rather than memory so a container restart does not forget which
 /// models are spent and burn a request re-discovering it.
+///
+/// `quota` is which Google allowance the refusal was observed against: the
+/// literal `instance` for this deployment's own GEMINI_API_KEY, or a truncated
+/// SHA-256 of a clinician's own key. It is part of the primary key because a
+/// refusal is a fact about one allowance and not about the model: without it,
+/// one clinician exhausting the flagship greyed it out for everybody, and the
+/// row survived a restart to keep doing so. The fingerprint is one-way and
+/// carries nothing about who pasted the key — the key itself is never stored.
 model ModelCooldown {
-  model     String   @id
+  quota     String   @default("instance")
+  model     String
   until     DateTime
   reason    String
   daily     Boolean  @default(false)
   updatedAt DateTime @updatedAt
 
+  @@id([quota, model])
   @@index([until])
 }
 

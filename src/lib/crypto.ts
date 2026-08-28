@@ -68,6 +68,14 @@ export function base64ToBytes(b64: string): Uint8Array {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+/** SHA-256 of a UTF-8 string, as lower-case hex. Same answer on both ends. */
+export async function sha256Hex(input: string): Promise<string> {
+  const digest = await subtle().digest("SHA-256", buf(encoder.encode(input)));
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 /** WebCrypto wants a plain ArrayBuffer; narrow away SharedArrayBuffer. */
 function buf(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(

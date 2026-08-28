@@ -19,6 +19,7 @@ script in `scripts/` actually exercises.
 8. [The cloud layer and the model ladder](#8-the-cloud-layer-and-the-model-ladder)
 8b. [The local destination](#8b-the-local-destination)
 8c. [Watching the local model work](#8c-watching-the-local-model-work)
+8d. [Bring your own Gemini key](#8d-bring-your-own-gemini-key)
 9. [Concurrency: one compute slot](#9-concurrency-one-compute-slot)
 10. [Workspaces, and the one rule](#10-workspaces-and-the-one-rule)
 10b2. [Sampling, and whose it is](#10b2-sampling-and-whose-it-is)
@@ -64,7 +65,8 @@ memory, so a second replica would silently break it.
 | `src/lib/scrubber-regex.ts` | Deterministic Taiwan PII rules. **Rule order is load-bearing.** |
 | `src/lib/scrubber-llm.ts` | LM Studio NER, open tag vocabulary, verbatim-span validation, clinical stop-list, fail-closed |
 | `src/lib/gemini.ts` | Note formats, prompt assembly, the placeholder-preserving system instruction, error translation |
-| `src/lib/model-registry.ts` | The Gemini ladder and observed availability |
+| `src/lib/model-registry.ts` | The Gemini ladder and observed availability, **scoped per quota** |
+| `src/lib/gemini-key.ts` | Bring-your-own Gemini key: shape, masking, and the one-way quota fingerprint |
 | `src/lib/local-format.ts` | The local formatting destination — the same note, written on this Mac |
 | `src/lib/lmstudio.ts` | Where LM Studio lives and how long each kind of call may take |
 | `src/lib/concurrency.ts` | Single-slot lock with stale reclaim, plus the live stage read-out |
@@ -389,8 +391,10 @@ content. It is read by clients queued behind a run they cannot see.
 | Function | In | Out |
 | --- | --- | --- |
 | `assemblePrompt({format, template, narrative, skeleton})` | the pieces | the exact user-message text, so a preview cannot drift from what is sent |
-| `formatClinicalNote(deidText, format, instructions, sampling, onFallback?, startModel?)` | **placeholders only** | `{text, model, fallbacks, latencyMs}` |
-| `runPromptOnCloud({systemInstruction, prompt, sampling, …})` | **placeholders only** | the same shape |
+| `formatClinicalNote(deidText, format, instructions, sampling, credentials, onFallback?, startModel?)` | **placeholders only**, plus whose quota pays | `{text, model, fallbacks, latencyMs}` |
+| `runPromptOnCloud({systemInstruction, prompt, sampling, credentials, …})` | **placeholders only** | the same shape |
+| `verifyGeminiKey(apiKey)` | a key | `{ok, usable, missing, error?}` — `models.list`, which spends no generation quota |
+| `getClient(apiKey?)` | a key, or nothing | a fresh client for a clinician's key; the memoised one for the instance's |
 | `systemInstruction()` / `builtInFormatInstruction(f)` | — | the compiled-in text, for `/api/prompt-config` |
 | `isNoteFormat(v)` | anything | type guard |
 
@@ -401,13 +405,33 @@ Throws `GeminiUnavailableError` with a `kind` of `quota` / `overloaded` /
 | Function | In | Out |
 | --- | --- | --- |
 | `modelLadder()` | — | the ordered `ModelSpec[]`, or `GEMINI_MODEL_LADDER` |
-| `chainFrom(start?)` | a starting rung | the rungs to try, retired ones dropped |
-| `availability()` | — | `ModelAvailability[]` for the selector |
-| `markUnavailable(model, reason, opts)` | an observed refusal | — ; written through to `ModelCooldown` |
-| `markAvailable(model)` | a model that just answered | — |
+| `chainFrom(quota, start?)` | a quota and a starting rung | the rungs to try, retired ones dropped |
+| `availability(quota)` | a quota | `ModelAvailability[]` for the selector |
+| `markUnavailable(quota, model, reason, opts)` | an observed refusal | — ; written through to `ModelCooldown` |
+| `markAvailable(quota, model)` | a model that just answered | — |
 
 Availability is **observed, never predicted**: no API reports remaining quota, so
-a rung is spent only once Google has actually refused it.
+a rung is spent only once Google has actually refused it — and every entry is
+scoped to the quota that earned it. See
+[section 8d](#8d-bring-your-own-gemini-key).
+
+#### `src/lib/gemini-key.ts` — a clinician's own key
+Isomorphic. The editor masks with the same function the route fingerprints with,
+so the two cannot disagree about which key is which.
+
+| Function | In | Out |
+| --- | --- | --- |
+| `normaliseGeminiKey(raw)` | anything pasted | the trimmed key, or throws `GeminiKeyError` naming the paste error |
+| `looksLikeGeminiKey(raw)` | anything | `boolean`, for a live editor that should not shout while typing |
+| `maskGeminiKey(key)` | a key | `AQ.Ab8RN…Wvpg` — enough to recognise, never enough to use |
+| `quotaFingerprint(key?)` | a key, or nothing | 16 hex characters, or the literal `instance` |
+
+**May see:** a third-party credential. **Never:** stores it, logs it, or lets it
+reach the audit row. Only `quotaFingerprint`'s output ever reaches Postgres.
+
+The shape check is deliberately loose — see
+[section 8d](#8d-bring-your-own-gemini-key) for the key format that broke the
+strict one.
 
 #### `src/lib/local-format.ts` — the local destination
 | Function | In | Out |
@@ -448,7 +472,8 @@ scripts test the real path rather than a parallel one.
 
 | Function | In | Out |
 | --- | --- | --- |
-| `runPipeline<T>(opts)` | `{text, format, promptId?, model?, workspace?, promptRun?, sampling?, deidSampling?, patternScrub?, onProgress?, onStream?, onSealed?, headers?, baseUrl?, signal?}` | the decrypted `ProcessNoteResult` |
+| `runPipeline<T>(opts)` | `{text, format, promptId?, model?, workspace?, promptRun?, sampling?, deidSampling?, patternScrub?, geminiApiKey?, onProgress?, onStream?, onSealed?, headers?, baseUrl?, signal?}` | the decrypted `ProcessNoteResult` |
+| `verifyGeminiKey(apiKey, opts?)` | a key | `{ok, usable, missing, error?}`, sealed both ways |
 | `isLocalDestination(model)` | a model id | `model === "local"` — route and UI agree through one predicate |
 | `stageTitle(stage, local)` / `stageLocus(stage, local)` | a stage id | its label and which trust boundary to draw it in |
 
@@ -468,7 +493,8 @@ replayed it with `Set-Cookie` stripped.
 | `GET /api/health` | — | `{ok: true}` | **public** — the container healthcheck, and it reveals nothing |
 | `GET /api/keys` | — | `{publicKey, keyId, algorithm, hash, modulusLength, format}` | cookie only — **public material by design** |
 | `GET /api/status` | — | compute slot, LM Studio, database, Gemini config, vault count, build id, dev-login flags | `auth()` |
-| `GET /api/models` | — | `{models: ModelAvailability[], default}` | `auth()` |
+| `GET /api/models` | `?quota=` (a fingerprint, or absent) | `{models, default, quota, instanceKey}` | `auth()` |
+| `POST /api/gemini-key` | a sealed `CryptoEnvelope` containing `{apiKey}` | a **sealed** `{ok, usable, missing, error?}` | `auth()` |
 | `GET /api/prompt-config` | — | every prompt both models are given, read-only | `auth()` |
 | `POST /api/process-note` | a sealed `CryptoEnvelope` | **SSE**: `progress`, `stream` (sealed), then one `result` (sealed) or one `error` | `auth()` |
 | `GET /api/history` | `?q=&format=&cursor=` | de-identified rows, 25 a page, scoped to the caller | `auth()` |
@@ -886,13 +912,19 @@ ever be a button that fails. The 2.5-era models are absent because Google return
 `NOT_FOUND` for them on keys issued after their retirement.
 
 `GEMINI_MODEL` picks the starting rung; `GEMINI_MODEL_LADDER` replaces the list
-entirely.
+entirely. Both are per instance — a clinician bringing their own key gets the
+same ladder, spent against their own allowance.
 
 ### Availability is observed, never predicted
 
 No API reports remaining quota, so a rung is marked spent **only after Google has
 refused it**. That observation is written to the `ModelCooldown` table so a
 container restart does not forget and burn a request per rung rediscovering it.
+
+It is scoped to the **quota** that earned it, not stored globally — see
+[section 8d](#8d-bring-your-own-gemini-key). A refusal is a fact about one
+Google allowance, and a global table let one exhausted key grey the flagship out
+for everybody.
 
 `translateGeminiError()` distinguishes the kinds of refusal, because they need
 different answers:
@@ -1076,6 +1108,126 @@ sentence first.
 Streaming is local-only. The Gemini path returns whole responses, and the
 fallback walk down the ladder assumes it can retry a failed call — which a
 half-streamed answer complicates for no benefit the clinician would notice.
+
+## 8d. Bring your own Gemini key
+
+`src/lib/gemini-key.ts`, `src/app/api/gemini-key/route.ts`.
+
+A clinician can paste their own Google AI Studio key so cloud runs spend **their**
+free-tier allowance instead of the deployment's shared one. On the free tier that
+is the difference between twenty flagship requests a day between everybody and
+twenty each.
+
+### Where the key lives, and why
+
+**In the clinician's browser, and nowhere else.** It sits in that browser's
+`localStorage`, travels to the Mac Mini inside the *same AES-GCM envelope as the
+note*, is used for the life of one request, and is dropped when the handler
+returns.
+
+The alternative was an encrypted column in Postgres. That puts a decryptable
+third-party credential on the disk of a machine reachable from the internet, and
+needs a key-encryption key to protect it — a standing secret to protect a
+standing secret, with a rotation story attached. Sending it sealed per request
+costs a few hundred bytes and means a stolen database contains nobody's API key.
+It is the same discipline the TokenVault is under, for the same reason: the only
+place a secret lives on this server is RAM, for one request.
+
+The honest trade, and it is stated in the drawer too: `localStorage` is readable
+by any script running on this origin. Airlock loads no third-party scripts and
+ships no production source maps, but anyone who can execute script in the page
+can also read the note on screen — the key is no softer a target than the
+clinical text beside it. If that is not acceptable for your deployment, do not
+distribute keys through the browser at all: give the instance its own
+`GEMINI_API_KEY` and leave this feature unused.
+
+### It is sealed, including when you check it
+
+The obvious way to validate a key is `POST { apiKey }` as plain JSON. That hands
+the credential to Cloudflare in the clear, because Cloudflare terminates TLS at
+its edge — the exact threat this application exists to defeat for clinical text.
+So `/api/gemini-key` takes the identical `CryptoEnvelope` the pipeline does,
+opens it with the server's private key, and seals its answer with the same
+ephemeral AES key.
+
+The check calls `models.list`, which is an authenticated read and spends **no
+generation quota**. It reports which ladder rungs the key can actually reach: a
+key can be valid and still have no access to the models this instance offers — a
+restricted key, or a project without the Generative Language API enabled — and
+finding that out in the drawer is much kinder than finding it out mid-ward-round.
+
+Saving runs the check first. A key Google refuses is not saved, because saving it
+only moves the failure into the middle of a note. A check that *cannot run* — the
+network, not the key — offers "Save without checking" instead, so an unreachable
+Google is never a reason you cannot configure Airlock.
+
+### The shape check is deliberately loose
+
+The first version demanded `AIza` plus 35 URL-safe characters, which is the AI
+Studio format every tutorial shows. **It rejected the very first real key it was
+pointed at:** Google also issues 53-character keys beginning `AQ.A`.
+
+A validator that knows one vendor format will refuse a working credential the day
+the vendor adds another, and nobody debugging that would suspect the client. So
+the check now covers only what is genuinely diagnostic of a *paste error* —
+empty, whitespace inside it, absurdly short or long, characters no key of any
+format contains — and leaves "is this a real key" to the only party that can
+answer it. Both formats are pinned in `npm run verify` §6c.
+
+### Cooldowns are scoped to the quota that earned them
+
+This is the part that makes the feature safe to add rather than merely possible.
+
+Availability is *observed*: a rung is marked spent only once Google has refused
+it. A refusal is a fact about **one Google allowance**, not about the model — so
+with a global `ModelCooldown` table, one clinician exhausting the flagship greyed
+it out for everybody on the instance, and the persisted row survived a restart to
+keep doing so. That was already wrong before this feature; with several keys in
+play it is wrong in a way that costs other people their working models.
+
+`ModelCooldown` is therefore keyed `(quota, model)`, where `quota` is the literal
+`instance` for the deployment's own key or a truncated SHA-256 of a clinician's
+own. The in-memory cache is keyed the same way, and `availability()`,
+`chainFrom()`, `isAvailable()`, `markAvailable()` and `markUnavailable()` all
+take the scope.
+
+```
+quota             model                    reason      daily
+ee4e0cc6cfe45acc  gemini-3.7-flash         overloaded  f      ← one clinician's key
+instance          gemini-3.7-flash         quota       t      ← the shared key
+instance          gemini-3.6-flash         quota       t
+```
+
+The fingerprint is one-way and 64 bits over a high-entropy key: not enumerable,
+and it carries nothing about who pasted it. **It is the only part of the key that
+ever reaches Postgres**, and it reaches it as a cooldown scope, never as a column
+on an audit row.
+
+`/api/models?quota=` takes the same fingerprint — computed in the browser, never
+the key — so the selector greys out rungs *you* have spent rather than someone
+else's exhausted afternoon. A `quota` that is not 16 hex characters falls back to
+`instance` rather than minting a fresh namespace on demand.
+
+### What the run reports
+
+`meta.quotaSource` is `"own"` or `"instance"`, and the footer shows a **your
+quota** chip for the former. That is deliberately the *only* thing recorded about
+it: the audit row says which model wrote the note, not whose credential paid, and
+the clinician already knows which key they pasted.
+
+### With no instance key at all
+
+`GEMINI_API_KEY` is now optional. A deployment started without one is a coherent
+configuration — everyone brings their own — and the interface says so: the cloud
+rungs grey out with "No Gemini key on this instance", the run button explains
+itself, and the local model is unaffected. `/api/models` reports `instanceKey`
+so the browser can tell that state apart from "your key is missing".
+
+### A local run carries no credential
+
+The client omits the key from the payload entirely when the destination is local,
+and the route ignores it there too. A local run makes no outbound call, so a
+credential in it would be a secret held in one more place for no reason.
 
 ## 9. Concurrency: one compute slot
 
@@ -1495,7 +1647,7 @@ stream waiting for a full body. Verified live through the tunnel.
 | `AIRLOCK_DATA_DIR` | Where Postgres and the keypair live on the Mac. Required by compose. |
 | `DATABASE_URL` | Local Postgres for the audit log |
 | `SHADOW_DATABASE_URL` | Scratch DB for `prisma migrate diff/dev`. No application data. |
-| `GEMINI_API_KEY` | Cloud formatting layer. Required. |
+| `GEMINI_API_KEY` | The instance's shared Gemini allowance. **Optional** — a clinician can bring their own instead; see [section 8d](#8d-bring-your-own-gemini-key). With neither, the cloud rungs grey out and the local model still works. |
 | `GEMINI_MODEL` | Default starting rung of the ladder |
 | `GEMINI_MODEL_LADDER` | Optional override of the whole ladder, best first, comma separated |
 | `GEMINI_BASE_URL` | Optional endpoint override (egress proxy, regional endpoint, local stub). Unset normally. |
@@ -1562,6 +1714,9 @@ rather than adding a permanent bypass to a PHI-handling service. They need
 6. Token collision — `[MRN_11]` vs `[MRN_1]`, longest-first replacement.
 6b. Applying findings cannot corrupt findings already applied — a
    one-character span must not rewrite a placeholder a longer one produced.
+6c. Bring-your-own-key: both of Google's key formats are accepted, six shapes of
+   paste error are refused, the mask hides the middle, and the quota fingerprint
+   is stable, whitespace-insensitive and reveals nothing of the key.
 7. Compute lock — acquire, refuse, release, and a stale handle cannot free it.
 
 **Run this first for any change to crypto, either scrubber, the vault, or the
@@ -1625,6 +1780,20 @@ Section 7 covers the **input budget**: two prompt fields, each legally under its
 own 20,000-character cap, together exceed what the local model can scan, and the
 server must refuse the run rather than under-scan it. It asserts the arithmetic
 through `budgetedText()` and then asserts the live server agrees.
+
+### `npm run e2e:key` — `scripts/e2e-own-key.ts`
+
+Bring-your-own-key, asserted from the position of someone who does not trust the
+claim. Live server, real Gemini. It runs a **recording proxy in Cloudflare's
+seat** and requires that the key appears in no captured frame in either
+direction; it then sweeps every table in the database for the key and for its
+fingerprint; it checks the audit row records the run and not the credential; it
+proves a rung spent on one quota is not spent on another; it confirms a local run
+never carries the key at all; and it confirms `/api/gemini-key` refuses both an
+unsealed key and an anonymous caller.
+
+Uses `GEMINI_API_KEY` *as if* it were a clinician's own — which is the point: the
+pipeline cannot tell the difference and must not try.
 
 ### `npm run e2e:system` — `scripts/e2e-full-system.ts`
 
@@ -1745,6 +1914,10 @@ count, degraded-scrub policy, build id, dev-login policy.
 | `LOCAL_FORMAT_FAILED` after a long wait | The local model exceeded `LMSTUDIO_FORMAT_TIMEOUT_MS` | Shorten the note or raise it. It is deliberately not retried against Gemini. |
 | A local run produced no History entry | By design — a local run writes no audit row | [Section 10](#10-workspaces-and-the-one-rule); send it to Gemini if you need the record |
 | `ROUTINE_REQUIRED` | The "Others" format was chosen with no routine attached | Pick a routine, or one of the five built-in formats |
+| Cloud rungs greyed out with "No Gemini key on this instance" | Neither `GEMINI_API_KEY` nor a key in this browser | Add one under **API key** in the header, or set `GEMINI_API_KEY`; see [section 8d](#8d-bring-your-own-gemini-key) |
+| `GEMINI_KEY_INVALID` mid-run | The stored key stopped being well-formed, or was pasted with something attached | Re-paste it under **API key**; the drawer checks it against Google before saving |
+| `GEMINI_AUTH` naming *your* key | Google revoked or restricted it after it started working | Re-check it in the drawer — the message says whose key was refused |
+| A model is spent for you but not a colleague | Correct: availability is per Google allowance | `select quota, model from "ModelCooldown"` |
 | `TOO_LONG` on a prompt that looks short enough | On a cloud run the budget covers the system instruction **and** the prompt, because the local model reads them joined | `budgetedText()` in `workspace.ts`; the browser counter shows the same number |
 | The note arrives from a lighter model | The ladder walked down | The amber footer and `AuditLog.modelUsed` both say which |
 | `DECRYPT_FAILED` | The keypair rotated under an open tab | The client retries once with a fresh key; if it persists, `.keys/` was not persisted |
@@ -1802,6 +1975,14 @@ message.
   pins its response shape so it cannot quietly grow a field that is not.
 - **The health probe's 10-minute "busy" window** means a genuinely dead LM Studio
   can read as "busy" for up to ten minutes after its last success.
+- **Cooldowns hydrate once per process.** A `ModelCooldown` row written directly
+  into Postgres is invisible until the app restarts, because
+  `ensureCooldownsLoaded` is memoised for the process lifetime. Only a concern
+  when poking the table by hand.
+- **A clinician's key is per browser.** It is in `localStorage`, so the same
+  person on a second machine, or in a private window, is back on the instance's
+  quota until they paste it again. That is the cost of never storing it
+  server-side.
 
 ## 18. Changing this safely
 
@@ -1832,6 +2013,10 @@ The invariants that must survive any change:
   cookie is present, never that it is valid.
 - The input budget is measured against what the local model is actually shown —
   `budgetedText()`, not the prompt alone.
+- A clinician's API key is never persisted, never logged, and never written to
+  an audit row. Only its one-way fingerprint reaches Postgres, and only as a
+  cooldown scope. It crosses the tunnel sealed, on the check as well as the run.
+- An observed cooldown is scoped to the quota that earned it.
 - A run that chose the local destination never falls back to the cloud.
 - The app runs as exactly one replica.
 
