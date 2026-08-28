@@ -28,17 +28,10 @@ import { HARD_CHAR_LIMIT } from "../src/lib/limits";
 import { prisma } from "../src/lib/db";
 import { request as httpRequest } from "node:http";
 import { createTestSession, destroyTestUser, type TestSession } from "./test-session";
+import { check, finish, section } from "./harness";
 
 const base = "http://localhost:3000";
 
-let failures = 0;
-function check(name: string, ok: boolean, detail = "") {
-  console.log(`  ${ok ? "ok  " : "FAIL"} ${name}${ok || !detail ? "" : "  — " + detail}`);
-  if (!ok) failures++;
-}
-function section(title: string) {
-  console.log(`\n\x1b[1m${title}\x1b[0m`);
-}
 
 /** A realistic Taiwanese nursing shift note. Every identifier is invented. */
 const WARD_NOTE = `【護理紀錄 — 夜班交班】8B病房 15-2床
@@ -591,12 +584,7 @@ async function main() {
   await destroyTestUser(sessionB.userId);
   check("test users removed", (await prisma.user.count({ where: { email: { endsWith: "@airlock.test" } } })) === 0);
 
-  console.log(
-    failures === 0
-      ? `\n\x1b[32mAll checks passed.\x1b[0m\n`
-      : `\n\x1b[31m${failures} check(s) FAILED.\x1b[0m\n`,
-  );
-  process.exit(failures === 0 ? 0 : 1);
+  finish();
 }
 
 void main();

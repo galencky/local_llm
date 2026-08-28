@@ -13,6 +13,7 @@ import "dotenv/config";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { runPipeline } from "../src/lib/pipeline-client";
 import { createTestSession, destroyTestUser } from "./test-session";
+import { check, finish } from "./harness";
 
 const base = "http://localhost:3000";
 
@@ -82,11 +83,6 @@ const geminiStub = createServer(async (req: IncomingMessage, res: ServerResponse
   );
 });
 
-let failures = 0;
-function check(name: string, ok: boolean, detail = "") {
-  console.log(`  ${ok ? "ok  " : "FAIL"} ${name}${ok || !detail ? "" : " — " + detail}`);
-  if (!ok) failures++;
-}
 
 async function main() {
   const who = await createTestSession("full-stubbed");
@@ -131,8 +127,7 @@ async function main() {
     await new Promise<void>((r) => lmStudio.close(() => r()));
     await new Promise<void>((r) => geminiStub.close(() => r()));
   }
-  console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
-  process.exit(failures === 0 ? 0 : 1);
+  finish();
 }
 
 void main();

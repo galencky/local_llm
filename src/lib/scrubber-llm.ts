@@ -1,5 +1,5 @@
 import { escapeRegex, type PiiCategory, type TokenVault } from "./memory-cache";
-import { lmStudioBaseUrl, lmStudioTimeoutMs } from "./lmstudio";
+import { lmStudioBaseUrl, lmStudioTimeoutMs, readChatDeltas } from "./lmstudio";
 import { DEID_SAMPLING_DEFAULTS, type Sampling } from "./workspace";
 
 /**
@@ -342,7 +342,6 @@ export async function scrubWithLlm(
   let usedSchema = true;
   try {
     type ChatBody = { choices?: { message?: { content?: string } }[] };
-    type ChatStream = { choices?: { delta?: { content?: string } }[] };
     const read = async (r: Response): Promise<string> => {
       if (!r.ok) {
         throw new Error(`LM Studio responded ${r.status}: ${await r.text()}`);
@@ -355,34 +354,7 @@ export async function scrubWithLlm(
       if (!r.ok) {
         throw new Error(`LM Studio responded ${r.status}: ${await r.text()}`);
       }
-      if (!r.body) return "";
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let out = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let split: number;
-        while ((split = buffer.indexOf("\n")) !== -1) {
-          const line = buffer.slice(0, split).trim();
-          buffer = buffer.slice(split + 1);
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim();
-          if (payload === "[DONE]") continue;
-          try {
-            const delta = (JSON.parse(payload) as ChatStream).choices?.[0]?.delta?.content;
-            if (delta) {
-              out += delta;
-              onToken?.(delta);
-            }
-          } catch {
-            /* a malformed frame is not worth failing the note over */
-          }
-        }
-      }
-      return out;
+      return r.body ? readChatDeltas(r.body, onToken) : "";
     };
 
     let res = await callLmStudio(input, controller.signal, true, model, sampling, Boolean(onToken));

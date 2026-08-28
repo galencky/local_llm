@@ -37,7 +37,6 @@
      white-on-green, which is what reads as "primary action". */
   --accent-solid: #0a6a6a;
   --on-accent: #ffffff;
-  --ring: rgb(10 106 106 / 0.35);
   --elevate: 0 1px 2px rgb(15 20 24 / 0.04), 0 1px 3px rgb(15 20 24 / 0.06);
 }
 
@@ -53,7 +52,6 @@
     --accent: #2fb3ac;
     --accent-solid: #12736d;
     --on-accent: #ffffff;
-    --ring: rgb(47 179 172 / 0.35);
     --elevate: none;
   }
 }
@@ -68,19 +66,18 @@
   --accent: #2fb3ac;
   --accent-solid: #12736d;
   --on-accent: #ffffff;
-  --ring: rgb(47 179 172 / 0.35);
   --elevate: none;
 }
 
+/**
+ * Only the two font families. The colour tokens used to be mapped here too —
+ * `--color-surface`, `--color-muted` and six more, which is what gives you
+ * `bg-surface` and `text-muted` as utilities. Nothing ever used them: the
+ * interface reaches for `bg-[var(--surface)]` throughout, because an arbitrary
+ * value is greppable back to the variable and a utility name is not. Eight
+ * aliases nobody could call.
+ */
 @theme inline {
-  --color-background: var(--background);
-  --color-surface: var(--surface);
-  --color-border-subtle: var(--border);
-  --color-foreground: var(--foreground);
-  --color-muted: var(--muted);
-  --color-faint: var(--faint);
-  --color-accent: var(--accent);
-  --color-accent-solid: var(--accent-solid);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }

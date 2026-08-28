@@ -68,7 +68,7 @@ memory, so a second replica would silently break it.
 | `src/lib/model-registry.ts` | The Gemini ladder and observed availability, **scoped per quota** |
 | `src/lib/gemini-key.ts` | Bring-your-own Gemini key: shape, masking, and the one-way quota fingerprint |
 | `src/lib/local-format.ts` | The local formatting destination — the same note, written on this Mac |
-| `src/lib/lmstudio.ts` | Where LM Studio lives and how long each kind of call may take |
+| `src/lib/lmstudio.ts` | Where LM Studio lives, how long each kind of call may take, and the one SSE delta reader both local stages share |
 | `src/lib/concurrency.ts` | Single-slot lock with stale reclaim, plus the live stage read-out |
 | `src/lib/workspace.ts` | The two workspaces, the one privacy rule, and the clamp both sides run |
 | `src/lib/placeholders.ts` | The placeholder-integrity rules every cloud-bound prompt carries |
@@ -78,17 +78,22 @@ memory, so a second replica would silently break it.
 | `src/lib/dev-login.ts` | Rules for the developer password bypass |
 | `src/lib/db.ts` | Lazy Prisma singleton behind a proxy |
 | `src/lib/pipeline-client.ts` | Client half: seal, POST, parse SSE, open the reply. **The stage ids live here** — it is the wire contract, and `concurrency.ts` re-exports the type rather than declaring a second one. |
+| `src/lib/contract.ts` | **Every shape that crosses the wire, declared once.** Types only, so it costs the browser bundle nothing. |
+| `src/lib/settings.ts` | The two `localStorage` stores — run settings and the clinician's own Gemini key |
+| `src/lib/sealed-stream.ts` | Live model output, sealed and ordered, on its way to the browser |
 | `src/lib/db.ts` | Lazy Prisma singleton behind a proxy |
 | `src/lib/utils.ts` | `cn()` — `clsx` + `tailwind-merge` |
 | `src/app/api/process-note/route.ts` | The pipeline itself |
 | `src/app/api/{status,models,keys,health}/route.ts` | Health, the ladder, the public key, the container probe |
 | `src/app/api/{history,prompts,prompt-config}/route.ts` | Past notes, saved routines, and a read-only view of every prompt |
 | `src/app/api/auth/` | Auth.js handlers and the developer password bypass |
-| `src/app/page.tsx` | The entire UI (single client component plus seven drawers) |
+| `src/app/page.tsx` | The page itself: state, the run loop, and the layout. Composition only — every part it renders lives next door. |
+| `src/app/_components/` | The parts. `drawer.tsx` is the shell all seven share; the rest are one file per surface. Underscore-prefixed so Next excludes it from routing. |
 | `src/app/layout.tsx`, `theme-toggle.tsx`, `signin/` | Shell, theme, sign-in |
 | `src/app/globals.css` | Theme tokens, drawer animation, focus rings, the touch-target floor |
 | `src/generated/prisma/` | Generated client. Never edited, never reviewed — `prisma generate` output. |
 | `scripts/` | Verification and acceptance — see [section 15](#15-every-script-and-what-it-proves) |
+| `scripts/harness.ts` | `check` / `section` / `finish`, shared by every suite |
 | `ops/` | Cloudflare Tunnel setup, the hourly backup, and its launchd job |
 
 Each module's exported entry points, with what they take and what they return,
@@ -328,11 +333,15 @@ Throws `LocalScrubUnavailableError` when LM Studio cannot answer, unless
 `ALLOW_DEGRADED_SCRUB=true`. **Fails closed by default.**
 
 #### `src/lib/lmstudio.ts` — where the local model lives
-| Function | Out |
-| --- | --- |
-| `lmStudioBaseUrl()` | `LMSTUDIO_BASE_URL`, trailing slashes stripped |
-| `lmStudioTimeoutMs()` | 90 s — the NER pass writes a short JSON array |
-| `lmStudioFormatTimeoutMs()` | 240 s — formatting writes a whole chart entry |
+| Function | In | Out |
+| --- | --- | --- |
+| `lmStudioBaseUrl()` | — | `LMSTUDIO_BASE_URL`, trailing slashes stripped |
+| `lmStudioTimeoutMs()` | — | 90 s — the NER pass writes a short JSON array |
+| `lmStudioFormatTimeoutMs()` | — | 240 s — formatting writes a whole chart entry |
+| `readChatDeltas(body, onToken?)` | an OpenAI-style `stream: true` body | the whole text, with each delta handed on as it lands |
+
+Both local stages stream, and both had their own byte-identical copy of that
+reader. One reader, in the module that already owns where LM Studio lives.
 
 #### `src/lib/limits.ts` — the input budget, shared by both sides
 | Function | In | Out |
@@ -465,6 +474,42 @@ through the deterministic scrubber and refuses anything that matches. A routine
 lives in Postgres forever.
 
 ### The wire
+
+#### `src/lib/contract.ts` — every shape that crosses the wire
+Types only, imported by both ends. `ProcessNoteResult`, `StatusPayload`,
+`ModelsPayload`, `HistoryNote`, `PromptTemplate`, `PromptConfig`, `SessionUser`.
+
+Each of these used to be written twice — once where the route builds it, once
+where the browser reads it — and they drifted: `quotaSource` was added to the
+route's `meta` and had to be separately remembered in the page's copy, with
+nothing to complain if it had not been, because a JSON response is `any` until
+somebody asserts otherwise.
+
+#### `src/lib/settings.ts` — what this browser remembers
+Two independent stores, both `localStorage` with React subscribing rather than
+owning.
+
+| Function | In | Out |
+| --- | --- | --- |
+| `getRunSettings()` / `writeRunSettings(next)` | — / a whole settings object | workspace, prompt, both samplings, the pattern switch |
+| `subscribeRunSettings(fn)` | a listener | an unsubscribe; also listens for another tab's `storage` event |
+| `getGeminiKey()` / `writeGeminiKey(key)` | — / a key or `""` to clear | the clinician's own Gemini key |
+| `getServerRunSettings()` / `getServerGeminiKey()` | — | the server snapshot — Note workspace, no key. The server cannot know and must not guess. |
+
+The Gemini key is deliberately **not** part of `RunSettings`: everything in that
+object gets spread into payloads and drafts, and a credential in there would
+eventually be spread somewhere it should not go, silently.
+
+#### `src/lib/sealed-stream.ts` — live output, sealed and ordered
+| Member | In | Out |
+| --- | --- | --- |
+| `createSealedStream(emit)` | the SSE emitter | `{ arm, onToken, flush }` |
+| `arm(key)` | the request's ephemeral AES key | — ; until called, every flush is a no-op, which is the safe direction |
+| `onToken(stage)` | a stage id | a `(chunk) => void` to hand a model client |
+| `flush()` | — | resolves when everything queued has been emitted |
+
+Buffered at 120ms and **chained, not raced** — see
+[section 8c](#8c-watching-the-local-model-work).
 
 #### `src/lib/pipeline-client.ts` — the client half
 Isomorphic: the UI and every script drive it identically, which is why the
@@ -1527,7 +1572,39 @@ minimal frame parser (`EventSource` cannot issue a POST). On
 `code: DECRYPT_FAILED` it re-fetches the public key past any cache and retries
 **once** — telling a clinician to reload mid-note is not a fix.
 
-**`page.tsx`** is one client component plus drawers. Notable mechanics:
+**`page.tsx`** is the page: state, the run loop, the layout, and nothing else.
+It was 4,282 lines — 44% of all the source in the repository, holding the whole
+interface plus seven drawers plus a markdown renderer plus two `localStorage`
+stores. Now it composes, and every part lives next door in
+`src/app/_components/`, one file per surface:
+
+| File | What it is |
+| --- | --- |
+| `drawer.tsx` | `useDrawer` plus the `Drawer` shell all seven share |
+| `run-bars.tsx` | The workspace toggle and the model selector |
+| `progress.tsx` | The live stage list and the queued panel |
+| `controls.tsx` | The small pieces every surface reuses — pills, counters, labelled rows |
+| `markdown.tsx` | The note renderer |
+| `formats.ts` | Note formats as the interface names them |
+| `history-drawer.tsx`, `wire-view.tsx`, `prompts-drawer.tsx`, `api-key-drawer.tsx`, `how-it-works.tsx`, `prompt-library.tsx`, `inspector.tsx` | One drawer each |
+
+The underscore is load-bearing: Next treats `_components` as a private folder
+and excludes it from routing, so a file there can never accidentally become a
+URL.
+
+**One drawer at a time, by construction.** `page.tsx` holds a single
+`DrawerName` rather than seven booleans. They are all modal, all scroll-lock the
+page and all trap focus, so two open at once is not a layout to design for — it
+is two components fighting over `document.body.style.overflow` and over where
+focus returns, which nothing in the interface can get you out of.
+
+**The shell owns the four behaviours nobody remembers.** Escape closes, focus
+moves inside on open and returns to the trigger on close, Tab is trapped, and
+the background is scroll-locked. Seven drawers had written that wiring out
+individually, which made "add a drawer" mean "remember four things" — and a
+drawer that forgot one looked fine until somebody pressed Escape.
+
+Notable mechanics:
 
 - **The raw note leaves the workspace the moment it is sealed** (`setInput("")`).
   A chart entry sitting on screen is itself an exposure.
@@ -1871,6 +1948,17 @@ the redaction count, which is the honest signal that the run finished. The same
 trap catches hand-written probes; check for a button that only exists on
 success, not one that is merely enabled by it.
 
+### `scripts/harness.ts`
+
+`check`, `section`, `note`, `finish`. Five suites had written their own copies —
+and one of them counted failures but exited `0`, reporting green in CI while
+printing FAIL. `finish()` is the fix: it prints the verdict and exits with a
+status that matches it.
+
+Deliberately tiny and deliberately not a test framework. These scripts are meant
+to be readable end to end by somebody deciding whether to trust the claims they
+make, and a runner would put a layer between the reader and the assertion.
+
 ### `scripts/test-session.ts`
 
 Not runnable — the helper the others import. `createTestSession(label)` upserts a
@@ -1988,14 +2076,36 @@ message.
 
 Before you push anything that touches the PHI path:
 
-1. `npm run verify` — offline, seconds, covers crypto, both scrubbers, the vault
-   and the lock.
+1. `npm run verify` — offline, seconds, covers crypto, both scrubbers, the vault,
+   the key formats and the lock.
 2. `npx tsc --noEmit && npm run lint`.
 3. `npm run e2e:full` against a stubbed server if you touched the route or the
    client, `npm run e2e:prompt` if you touched the workspaces, the privacy rule
    or the input budget.
 4. `npm run e2e:system` against the live stack before shipping.
-5. `npm run db:inspect` if you touched anything that writes.
+5. `npm run e2e:key` if you touched the cloud layer, the model registry, or
+   anything a credential passes through.
+6. `npm run db:inspect` if you touched anything that writes.
+7. `npm run audit:contrast` if you touched the interface — it drives a real
+   browser through sign-in, a full run and every drawer in both themes, which is
+   also the fastest way to find out that a refactor broke a surface.
+
+### Where a change goes
+
+| Changing… | Goes in |
+| --- | --- |
+| a shape that crosses the wire | `src/lib/contract.ts` — **once**, never in both ends |
+| what one surface looks like | its own file in `src/app/_components/` |
+| what every drawer does | `_components/drawer.tsx`, and all seven get it |
+| what this browser remembers | `src/lib/settings.ts` |
+| the pipeline itself | `src/app/api/process-note/route.ts` |
+| an assertion helper | `scripts/harness.ts` |
+
+Two things worth knowing before adding to the interface. A drawer should use the
+`Drawer` shell rather than its own markup — that is what guarantees Escape,
+focus return, the focus trap and the scroll lock. And a new API shape belongs in
+`contract.ts` before it belongs in either end: the shapes drifted once, and
+nothing complained.
 
 The invariants that must survive any change:
 

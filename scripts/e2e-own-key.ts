@@ -19,18 +19,11 @@ import { runPipeline, verifyGeminiKey, PipelineError } from "../src/lib/pipeline
 import { INSTANCE_QUOTA, maskGeminiKey, quotaFingerprint } from "../src/lib/gemini-key";
 import { prisma } from "../src/lib/db";
 import { createTestSession, destroyTestUser } from "./test-session";
+import { check, finish, note, section } from "./harness";
 
 const base = "http://localhost:3000";
 const KEY = process.env.GEMINI_API_KEY?.trim() ?? "";
 
-let failures = 0;
-function check(name: string, ok: boolean, detail = "") {
-  console.log(`  ${ok ? "ok  " : "FAIL"} ${name}${ok || !detail ? "" : "  — " + detail}`);
-  if (!ok) failures++;
-}
-function section(title: string) {
-  console.log(`\n\x1b[1m${title}\x1b[0m`);
-}
 
 const NOTE = `病歷號 4471902，患者林淑惠，主治醫師吳承翰。BT 37.8°C，CRP 4.6 mg/dL。`;
 
@@ -189,11 +182,10 @@ async function main() {
     if (spentSomewhere.length === 0) {
       // Say so rather than passing quietly: with nothing spent anywhere, the
       // comparison below has nothing to compare and proves nothing.
-      console.log("       (nothing is spent on any quota right now — the cross-quota");
-      console.log("        comparison is vacuous this run. Offline scoping is pinned by");
-      console.log("        `npm run verify`.)");
+      note("nothing is spent on any quota right now, so the cross-quota");
+      note("comparison is vacuous this run. Offline scoping is pinned by `npm run verify`.");
     } else {
-      console.log(`       spent right now: ${spentSomewhere.join(", ")}`);
+      note(`spent right now: ${spentSomewhere.join(", ")}`);
       check("nothing spent elsewhere leaks into a fresh quota",
         asVirgin.models.every((m) => m.available));
     }
@@ -233,12 +225,7 @@ async function main() {
     await destroyTestUser(who.userId);
   }
 
-  console.log(
-    failures === 0
-      ? `\n\x1b[32mAll checks passed.\x1b[0m\n`
-      : `\n\x1b[31m${failures} check(s) FAILED.\x1b[0m\n`,
-  );
-  process.exit(failures === 0 ? 0 : 1);
+  finish();
 }
 
 void main();

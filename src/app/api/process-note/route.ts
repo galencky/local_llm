@@ -6,13 +6,13 @@ import {
   releaseLock,
   setStage,
   type LockHandle,
-  type PipelineStage,
 } from "@/lib/concurrency";
 import { openRequest, sealResponse, type CryptoEnvelope } from "@/lib/crypto";
+import { createSealedStream } from "@/lib/sealed-stream";
 import { getServerKeys } from "@/lib/keystore";
 import { scrubWithRegex } from "@/lib/scrubber-regex";
 import { LocalScrubUnavailableError, scrubWithLlm } from "@/lib/scrubber-llm";
-import { purgeVault, storeVault, TokenVault, type RedactionSummaryEntry } from "@/lib/memory-cache";
+import { purgeVault, storeVault, TokenVault } from "@/lib/memory-cache";
 import {
   formatClinicalNote,
   GeminiUnavailableError,
@@ -46,6 +46,7 @@ import {
   type Sampling,
   type Workspace,
 } from "@/lib/workspace";
+import type { ProcessNoteResult as Result } from "@/lib/contract";
 import { prisma } from "@/lib/db";
 import { auth } from "@/lib/auth";
 
@@ -105,45 +106,12 @@ interface DecryptedPayload {
   geminiApiKey?: unknown;
 }
 
-export interface ProcessNoteResult {
-  note: string;
-  deidentifiedInput: string;
-  deidentifiedOutput: string;
-  redactions: RedactionSummaryEntry[];
-  meta: {
-    auditLogId: string | null;
-    model: string;
-    format: NoteFormat;
-    promptTemplateName: string | null;
-    /** Where the note was written. "local" means nothing left the Mac at all. */
-    destination: "cloud" | "local";
-    /** Which workspace produced it. */
-    workspace: "note" | "prompt";
-    /** False on a local run — the one destination that is not scrubbed. */
-    deidentified: boolean;
-    /** Whether the deterministic pattern pass ran. */
-    patternScrub: boolean;
-    /**
-     * Whose Google allowance paid for this run: "own" or "instance". Never the
-     * key, and never the fingerprint — the clinician already knows which key
-     * they pasted, and the browser is where that belongs.
-     */
-    quotaSource: "own" | "instance";
-    /** Models exhausted or unavailable before the one that served this note. */
-    modelFallbacks: { model: string; reason: string }[];
-    processingTimeMs: number;
-    scrubMs: number;
-    /** Time in the formatting stage, wherever it ran. Named before local
-     *  formatting existed; kept, because it is on the wire and in History. */
-    geminiMs: number;
-    regexHits: Record<string, number>;
-    llmEntityCount: number;
-    hallucinatedSpans: number;
-    rejectedClinicalSpans: number;
-    unresolvedTokens: string[];
-    degradedScrub: boolean;
-  };
-}
+/**
+ * Re-exported from the shared contract so the browser and this route cannot
+ * describe the same JSON differently. It was written out twice once, and the
+ * two copies drifted.
+ */
+export type { ProcessNoteResult } from "@/lib/contract";
 
 const encoder = new TextEncoder();
 
@@ -210,51 +178,10 @@ export async function POST(req: NextRequest) {
         }
       };
 
-      /**
-       * Live output from the local model, SEALED like everything else.
-       *
-       * Progress events are plaintext by design — they carry stage names and
-       * counts, never content. A token stream is content, and the entity list
-       * the de-identifier writes is content of the worst kind, so each flush is
-       * encrypted with the same ephemeral AES key as the final result. The
-       * browser already holds that key; Cloudflare still sees only ciphertext.
-       *
-       * Buffered rather than emitted per token: a GCM seal and a base64 encode
-       * per token would cost more than the inference.
-       */
-      let streamKey: CryptoKey | null = null;
-      let pending = "";
-      let pendingStage: PipelineStage | null = null;
-      let lastFlush = 0;
-      /**
-       * Seals are chained, not raced.
-       *
-       * Sealing is async, and two flushes in flight can resolve in either
-       * order — which would emit the second chunk of a note before the first
-       * and show the clinician scrambled text. The client already awaits each
-       * decryption, but that only preserves the order frames ARRIVE in, so the
-       * ordering has to be established here. Awaiting the tail also means
-       * `flushStream(true)` waits for everything already queued.
-       */
-      let flushChain: Promise<void> = Promise.resolve();
-      const flushStream = (force = false): Promise<void> => {
-        if (!streamKey || !pending || !pendingStage) return flushChain;
-        if (!force && Date.now() - lastFlush < 120) return flushChain;
-        const key = streamKey;
-        const chunk = pending;
-        const stage = pendingStage;
-        pending = "";
-        lastFlush = Date.now();
-        flushChain = flushChain.then(async () => {
-          emit("stream", { stage, sealed: await sealResponse(key, chunk) });
-        });
-        return flushChain;
-      };
-      const onToken = (stage: PipelineStage) => (chunk: string) => {
-        pendingStage = stage;
-        pending += chunk;
-        void flushStream();
-      };
+      // Named for what it carries, and not `stream`: the ReadableStream this
+      // handler returns is already called that, and shadowing it would make two
+      // very different things read the same.
+      const live = createSealedStream(emit);
 
       try {
         // 2. Unwrap the ephemeral AES key, then decrypt.
@@ -276,7 +203,7 @@ export async function POST(req: NextRequest) {
           return;
         }
 
-        streamKey = aesKey;
+        live.arm(aesKey);
         let noteText = plaintext;
         let format: string | undefined = body.format;
         let promptId: string | undefined;
@@ -455,8 +382,8 @@ export async function POST(req: NextRequest) {
           // The original, joined for a prompt run so one pass covers both
           // strings. See `scrubWithLlm` on why this is not the scrubbed text.
           const nerInput = promptRun ? joinForScrub(promptSystem, noteText) : noteText;
-          const llmResult = await scrubWithLlm(nerInput, vault, onToken("ner"), deidSampling);
-          await flushStream(true);
+          const llmResult = await scrubWithLlm(nerInput, vault, live.onToken("ner"), deidSampling);
+          await live.flush();
           scrubMs = Date.now() - scrubStarted;
 
           // One application of everything both passes found, in one place.
@@ -546,7 +473,7 @@ export async function POST(req: NextRequest) {
                 systemInstruction: promptSystem,
                 prompt: deidentifiedInput,
                 sampling,
-                onToken: onToken("cloud"),
+                onToken: live.onToken("cloud"),
               })
             : await runPromptOnCloud({
                 systemInstruction: promptSystem,
@@ -562,7 +489,7 @@ export async function POST(req: NextRequest) {
                 resolvedFormat,
                 { template },
                 sampling,
-                onToken("cloud"),
+                live.onToken("cloud"),
               )
             : await formatClinicalNote(
                 deidentifiedInput,
@@ -573,7 +500,7 @@ export async function POST(req: NextRequest) {
                 onFallback,
                 startModel,
               );
-        await flushStream(true);
+        await live.flush();
         emit("progress", {
           stage: "cloud",
           status: "done",
@@ -644,7 +571,7 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        const result: ProcessNoteResult = {
+        const result: Result = {
           note: rehydrated,
           deidentifiedInput,
           deidentifiedOutput: formatted.text,

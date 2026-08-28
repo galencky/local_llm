@@ -17,17 +17,10 @@ import { budgetedText, deidentifies, MAX_PROMPT_LENGTH, stagesFor } from "../src
 import { HARD_CHAR_LIMIT } from "../src/lib/limits";
 import { prisma } from "../src/lib/db";
 import { createTestSession, destroyTestUser } from "./test-session";
+import { check, finish, section } from "./harness";
 
 const base = process.env.AIRLOCK_BASE ?? "http://localhost:3000";
 
-let failures = 0;
-function check(name: string, ok: boolean, detail = "") {
-  console.log(`  ${ok ? "ok  " : "FAIL"} ${name}${ok || !detail ? "" : "  — " + detail}`);
-  if (!ok) failures++;
-}
-function section(title: string) {
-  console.log(`\n\x1b[1m${title}\x1b[0m`);
-}
 
 /** Every identifier is invented. */
 const PII = ["林淑惠", "吳承翰", "H284549486", "4471902", "0937-882-146"];
@@ -224,12 +217,7 @@ async function main() {
     await destroyTestUser(who.userId);
   }
 
-  console.log(
-    failures === 0
-      ? `\n\x1b[32mAll checks passed.\x1b[0m\n`
-      : `\n\x1b[31m${failures} check(s) FAILED.\x1b[0m\n`,
-  );
-  process.exit(failures === 0 ? 0 : 1);
+  finish();
 }
 
 void main();

@@ -1,7 +1,7 @@
 import "server-only";
 import { assemblePrompt, systemInstruction, type NoteFormat, type NoteInstructions, type FormatNoteResult } from "./gemini";
 
-import { lmStudioBaseUrl, lmStudioFormatTimeoutMs } from "./lmstudio";
+import { lmStudioBaseUrl, lmStudioFormatTimeoutMs, readChatDeltas } from "./lmstudio";
 import { resolveLocalModel } from "./scrubber-llm";
 import type { Sampling } from "./workspace";
 
@@ -130,52 +130,6 @@ export async function formatWithLocalModel(
   });
 }
 
-/**
- * Read an OpenAI-style `stream: true` response, handing each delta to the
- * caller and returning the whole thing at the end.
- *
- * A chunk can be split across TCP reads, so the tail of the buffer is kept
- * until a blank line completes the frame — the same reason the browser's own
- * SSE parser in `pipeline-client.ts` buffers rather than parsing per read.
- */
-async function readStream(
-  body: ReadableStream<Uint8Array>,
-  onToken: (chunk: string) => void,
-): Promise<string> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let text = "";
-
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    let split: number;
-    while ((split = buffer.indexOf("\n")) !== -1) {
-      const line = buffer.slice(0, split).trim();
-      buffer = buffer.slice(split + 1);
-      if (!line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (payload === "[DONE]") continue;
-      try {
-        const delta = (JSON.parse(payload) as {
-          choices?: { delta?: { content?: string } }[];
-        }).choices?.[0]?.delta?.content;
-        if (delta) {
-          text += delta;
-          onToken(delta);
-        }
-      } catch {
-        // A malformed frame is not worth failing a whole note over; the
-        // non-streaming path would not have seen it either.
-      }
-    }
-  }
-  return text;
-}
-
 /** The one place either local path actually talks to LM Studio. */
 async function callLocalChat(opts: {
   system?: string;
@@ -225,7 +179,7 @@ async function callLocalChat(opts: {
 
     let text: string;
     if (streaming && res.body) {
-      text = await readStream(res.body, opts.onToken!);
+      text = await readChatDeltas(res.body, opts.onToken);
     } else {
       const body = (await res.json()) as {
         choices?: { message?: { content?: string } }[];

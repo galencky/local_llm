@@ -28,15 +28,7 @@ import { TokenVault } from "../src/lib/memory-cache";
 import { scrubWithRegex, isValidTaiwanId } from "../src/lib/scrubber-regex";
 import { scrubWithLlm, LocalScrubUnavailableError } from "../src/lib/scrubber-llm";
 import { acquireLock, releaseLock } from "../src/lib/concurrency";
-
-let failures = 0;
-function check(name: string, condition: boolean, detail = "") {
-  if (condition) console.log(`  ok   ${name}`);
-  else {
-    failures++;
-    console.log(`  FAIL ${name}${detail ? ` — ${detail}` : ""}`);
-  }
-}
+import { check, finish } from "./harness";
 
 const SAMPLE = `病歷號 12345678，患者陳建明（身分證 A123456789），男性 68 歲，
 聯絡電話 0912-345-678，家屬陳美玲 0928765432，住台北市大安區信義路四段 100 號。
@@ -215,10 +207,7 @@ async function main() {
   check("stale handle cannot free the slot", acquireLock() === null);
   releaseLock(b);
 
-  console.log(
-    failures === 0 ? "\nAll checks passed.\n" : `\n${failures} check(s) FAILED.\n`,
-  );
-  process.exit(failures === 0 ? 0 : 1);
+  finish();
 }
 
 void main();

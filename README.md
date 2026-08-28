@@ -18,7 +18,7 @@ Source: <https://github.com/galencky/local_llm>
 | deciding whether this is for you | [Is this for you?](#is-this-for-you) and [What it does not promise](#what-it-does-not-promise) |
 | setting it up | [Install](#install), then [Prove it works](#prove-it-works) |
 | adapting it to your own hospital | [Making it yours](#making-it-yours) |
-| changing the code | **[TECHNICAL.md](TECHNICAL.md)** — every module's inputs and outputs, the flow charts, and the debugging playbook |
+| changing the code | **[TECHNICAL.md](TECHNICAL.md)** — every module's inputs and outputs, the flow charts, where a change goes, and the debugging playbook |
 
 ---
 
@@ -267,6 +267,7 @@ npm run db:inspect    # dump the audit schema and scan every row for identifiers
 npm run e2e:system    # full acceptance run against the live stack
 npm run e2e:prompt    # the one rule, asserted from both destinations
 npm run e2e:key       # wiretap a key check, then sweep the database for the key
+npm run audit:contrast # drive a real browser through every surface, both themes
 ```
 
 `verify` needs nothing but Node — no model, no key, no database. The rest need
@@ -393,6 +394,8 @@ The parts most people will want to change, and where they are:
 | **the note formats** | `NOTE_FORMATS` and `FORMAT_INSTRUCTIONS` in `src/lib/gemini.ts` | Add a key to both. `BUILT_IN_FORMATS` must stay declared *below* `FORMAT_INSTRUCTIONS`. |
 | **which cloud models are tried** | `GEMINI_MODEL_LADDER` in `.env`, or `DEFAULT_LADDER` in `src/lib/model-registry.ts` | Best first. Availability is observed, never predicted — and scoped to the key that earned the refusal. |
 | **what counts as a valid API key** | `src/lib/gemini-key.ts` | Deliberately loose: it catches paste errors and leaves "is this real" to Google. A strict format check here once rejected a working key. |
+| **anything the browser shows** | one file per surface in `src/app/_components/` | `page.tsx` is composition only. A new drawer should use the shared `Drawer` shell — that is what gives it Escape, focus return, a focus trap and a scroll lock. |
+| **a shape that crosses the wire** | `src/lib/contract.ts` | Declare it once. Both ends import it; they used to declare it twice and drifted. |
 | **the cloud provider** | `src/lib/gemini.ts` | It is one module with one job. Whatever replaces it must keep the placeholder rules in its system instruction, or re-hydration breaks. |
 | **the input budget** | `src/lib/limits.ts` | `HARD_CHAR_LIMIT` is a **safety** limit, not a performance one: past it your local model starts missing names. Raise it only if you raise the model. |
 | **who may sign in** | `AUTH_ALLOWED_EMAILS` | Or replace the Google provider in `src/lib/auth.ts`. Keep the fail-closed allowlist. |
